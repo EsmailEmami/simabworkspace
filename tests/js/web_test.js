@@ -12,7 +12,8 @@ let reloaded = 0;
 
 function skeleton() {
   ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-    'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+    'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync',
+    'empty-hint', 'empty-actions'].forEach((id) => {
     const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
     el.setAttribute('id', id);
     document.body.append(el);
@@ -114,6 +115,13 @@ const tests = {
     require(path.join(ROOT, 'gui/static/chat.js'));
     await settle();
     assert.strictEqual(q('.login').length, 0);
+    // phone, nothing open yet: buttons instead of "press Ctrl+Shift+P"
+    assert.strictEqual(document.body.querySelector('#empty-hint').textContent, 'Open a project to start.');
+    const emptyBtns = q('.btn', document.body.querySelector('#empty-actions'));
+    assert.deepStrictEqual(emptyBtns.map((b) => b.textContent), ['☰  Projects', '⌕  Search']);
+    emptyBtns[0].click();
+    assert.ok(document.body.classList.contains('side-open'), 'opens the projects drawer');
+    q('#side-backdrop')[0].click();
     q('.proj-head')[0].dispatch('click');
     const acts = q('.act').map((b) => [b.textContent, !!b.disabled]);
     assert.deepStrictEqual(acts, [['Claude', false], ['Terminal', false], ['Code', true], ['Git', false], ['Docker', false], ['Ports', true], ['History', false]],

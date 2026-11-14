@@ -2770,6 +2770,18 @@
 
   // ------------------------------------------------------------------ empty state
   function renderEmpty() {
+    // what to do from here — buttons, so it works without a keyboard (phone, tablet)
+    var hint = $('#empty-hint'), acts = $('#empty-actions');
+    if (hint && acts) {
+      var small = compact() || TOUCH.matches;
+      hint.replaceChildren.apply(hint, small ? ['Open a project to start.']
+        : ['Pick a project on the left, or press ', h('kbd', null, 'Ctrl+Shift+P'), '.']);
+      acts.replaceChildren.apply(acts, [
+        compact() ? h('button', { class: 'btn primary', onclick: openDrawer }, '☰  Projects') : null,
+        S.projects.length ? null : h('button', { class: 'btn' + (compact() ? '' : ' primary'), onclick: addManualProject }, '+ Add project'),
+        small ? h('button', { class: 'btn', onclick: openPalette }, '⌕  Search') : null
+      ].filter(Boolean));
+    }
     var box = $('#restore-box');
     var last = S.lastTabs || [];
     if (!S.tabs.length && last.length) {
@@ -2831,6 +2843,7 @@
   function applyCompact() {
     document.body.classList.toggle('compact', compact());
     document.body.classList.toggle('touch', !!TOUCH.matches);
+    if (!S.tabs.length) renderEmpty();
     if (compact()) {
       if (L.groups.length > 1) mergeAll();
     } else closeDrawer();

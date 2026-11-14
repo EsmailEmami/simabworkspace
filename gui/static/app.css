@@ -641,3 +641,8 @@ body.compact .dkname { flex-basis: 60%; }
 body.compact .dkacts { width: 100%; flex-wrap: wrap; }
 body.compact .chat-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); }
 body.compact .empty-inner { padding: 0 20px; text-align: center; }
+
+.empty-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.empty-actions:empty { display: none; }
+body.touch .empty-actions .btn { height: 40px; padding: 0 18px; font-size: 14px; }
+#restore-box { margin-top: 10px; }

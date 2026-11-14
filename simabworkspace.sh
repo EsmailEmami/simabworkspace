@@ -39,6 +39,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.19.0 2026-11-14  Window: Docker panel per project (containers on the server, logs,
+#                       shell, restart, rebuild; a notice when one crashes), port forwarding
+#                       (ssh tunnels to localhost, one click, reconnect by themselves) and
+#                       Claude usage (5-hour / weekly limit in the sidebar, cost per day).
 #    1.18.2 2026-11-14  WSL: the app keeps WSL running while it runs (closing the last
 #                       terminal no longer kills it); lost connection → one notice and
 #                       automatic reconnect instead of "Failed to fetch"; crash log
@@ -122,7 +126,7 @@
 
 set -u -o pipefail
 
-VERSION="1.18.2"
+VERSION="1.19.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

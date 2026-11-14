@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "simabworkspace"
-VERSION = "1.18.2"
+VERSION = "1.19.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -153,6 +153,7 @@ DEFAULT_SETTINGS = {
     "browser": "",               # command used to open the window (empty = auto)
     "gitWatch": True,            # git badges: check every repository in the background
     "gitAutoFetch": True,        # …and `git fetch` every few minutes so "behind" is current
+    "dockerWatch": True,         # check the projects' docker containers; tell me when one crashes
     "port": 0,                   # remembered so the window keeps the same address
 }
 
@@ -547,7 +548,7 @@ def claude_inner(claude_cmd: str, mode: str, resume: str = "") -> str:
     """resume: a conversation id → open exactly that conversation."""
     flags = (" --resume " + resume) if resume else CLAUDE_MODES.get(mode, "")
     return CLAUDE_FIND + (claude_cmd or "claude") + flags + CLAUDE_FAIL
-KINDS = ("shell", "claude", "run", "sync-info", "sync-monitor", "git-sync-on", "add-local", "add-server")
+KINDS = ("shell", "claude", "run", "sync-info", "sync-monitor", "git-sync-on", "add-local", "add-server", "docker")
 KIND_TITLES = {"shell": "", "claude": "Claude", "sync-info": "sync details", "sync-monitor": "sync monitor", "git-sync-on": "sync .git"}
 
 
@@ -576,6 +577,11 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         where = cmd["where"]
     if kind == "claude":
         where = "server"          # Claude Code always runs on the server
+    dk = spec.get("_docker") if kind == "docker" else None
+    if kind == "docker":
+        where = "server"
+        if not project or not isinstance(dk, dict) or not dk.get("inner"):
+            raise ApiError(400, "docker tabs belong to a project")
     if kind in ("add-local", "add-server"):
         where = "local"
         if pname:
@@ -598,6 +604,8 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         inner = claude_inner(s.get("claudeCmd") or "claude", mode, resume)
     elif kind == "run":
         inner = cmd["cmd"]
+    elif kind == "docker":
+        inner = dk["inner"]
 
     plabel = pname or "home"
     side = "server" if where == "server" else "local"
@@ -611,6 +619,8 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         title = "add project"
     elif kind == "claude":
         title = f"Claude · {plabel} · terminal"
+    elif kind == "docker":
+        title = dk.get("title") or "docker"
     else:
         title = f"{KIND_TITLES[kind]} · {plabel}"
     custom = spec.get("title")
@@ -687,7 +697,8 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         "spec": {"kind": kind, "project": pname, "where": where,
                  "cmdId": cmd["id"] if cmd else "", "claudeMode": mode,
                  "slot": spec.get("slot") if isinstance(spec.get("slot"), int) else 0,
-                 **({"resume": spec["resume"]} if kind == "claude" and spec.get("resume") else {})},
+                 **({"resume": spec["resume"]} if kind == "claude" and spec.get("resume") else {}),
+                 **({"container": dk["container"], "action": dk["action"]} if dk else {})},
         "url": (cmd or {}).get("url") or "",
     }
 
@@ -1277,6 +1288,9 @@ class ChatSession:
         self.pending = {}             # permission requests waiting for the user
         self.my_requests = {}         # request_id -> subtype of requests we sent
         self.wlock = threading.Lock()
+        self.on_usage = None          # callback(rate_limit_info)
+        self.on_cost = None           # callback(project, usd) — the cost of each answer
+        self._cost_seen = 0.0
         h = built.get("history")
         if isinstance(h, list):                        # old format: a plain list
             h = {"total": len(h), "start": 0, "entries": h}
@@ -1300,6 +1314,7 @@ class ChatSession:
             self.started = time.time()
             self.runs += 1
             self.pending.clear()
+            self._cost_seen = 0.0
         threading.Thread(target=self._read_out, args=(proc,), daemon=True).start()
         threading.Thread(target=self._read_err, args=(proc,), daemon=True).start()
         self._request({"subtype": "initialize", "hooks": None})
@@ -1399,6 +1414,17 @@ class ChatSession:
                 self.pending.pop(ev.get("request_id"), None)
         elif t == "result":
             self.busy = False
+            tc = ev.get("total_cost_usd")          # the whole process so far
+            if isinstance(tc, (int, float)) and not isinstance(tc, bool):
+                d = tc - self._cost_seen if tc >= self._cost_seen else tc
+                self._cost_seen = tc
+                if self.on_cost and d > 0:
+                    self.on_cost(self.spec.get("project") or "", d)
+        elif t == "rate_limit_event":
+            if self.on_usage:
+                self.on_usage(ev.get("rate_limit_info"))
+            self._broadcast({"t": "u", "u": ev.get("rate_limit_info")})
+            return
         elif t == "system" and ev.get("subtype") == "init":
             if ev.get("permissionMode") in CHAT_MODES:
                 self.mode = ev["permissionMode"]
@@ -1853,6 +1879,330 @@ class Activity:
         return out
 
 
+# ----------------------------------------------------------------------------- docker on the server
+# One SSH call lists every container whose compose working folder is inside a
+# project's server folder (argv: name=path …); the longest matching folder wins.
+DOCKER_PY = r'''
+import sys, os, json, subprocess
+roots = []
+for a in sys.argv[1:]:
+    name, _, path = a.partition("=")
+    p = os.path.realpath(os.path.expanduser(path))
+    roots.append((name, p.rstrip("/") or "/"))
+roots.sort(key=lambda r: -len(r[1]))
+def run(args):
+    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=25)
+try:
+    r = run(["docker", "ps", "-aq", "--no-trunc"])
+except FileNotFoundError:
+    print(json.dumps({"error": "docker is not installed on the server", "containers": []})); sys.exit()
+if r.returncode:
+    print(json.dumps({"error": (r.stderr.strip().splitlines() or ["docker failed"])[-1][:300], "containers": []})); sys.exit()
+ids = r.stdout.split()
+data = []
+if ids:
+    r = run(["docker", "inspect"] + ids)
+    try:
+        data = json.loads(r.stdout or "[]")
+    except ValueError:
+        data = []
+out = []
+for c in data:
+    cfg = c.get("Config") or {}
+    lab = cfg.get("Labels") or {}
+    wd = lab.get("com.docker.compose.project.working_dir") or ""
+    rwd = os.path.realpath(wd) if wd else ""
+    proj = ""
+    for name, root in roots:
+        if rwd and (rwd == root or rwd.startswith(root + "/")):
+            proj = name
+            break
+    if not proj:
+        continue
+    st = c.get("State") or {}
+    ports, seen = [], set()
+    for key, binds in ((c.get("NetworkSettings") or {}).get("Ports") or {}).items():
+        port, _, proto = key.partition("/")
+        for b in binds or []:
+            hp = b.get("HostPort") or ""
+            if hp and (hp, proto) not in seen:
+                seen.add((hp, proto))
+                ports.append({"host": int(hp), "port": int(port), "proto": proto or "tcp", "ip": b.get("HostIp") or ""})
+    out.append({
+        "id": (c.get("Id") or "")[:12], "name": (c.get("Name") or "").lstrip("/"), "image": cfg.get("Image") or "",
+        "state": st.get("Status") or "", "health": (st.get("Health") or {}).get("Status") or "",
+        "exitCode": st.get("ExitCode") or 0, "startedAt": st.get("StartedAt") or "", "finishedAt": st.get("FinishedAt") or "",
+        "restarts": c.get("RestartCount") or 0, "compose": lab.get("com.docker.compose.project") or "",
+        "service": lab.get("com.docker.compose.service") or "", "workdir": wd,
+        "configFiles": lab.get("com.docker.compose.project.config_files") or "", "ports": sorted(ports, key=lambda p: p["host"]),
+        "proj": proj})
+print(json.dumps({"containers": out}))
+'''
+DOCKER_ACT_PY = r'''
+import sys, json, subprocess
+r = subprocess.run(["docker"] + sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=140)
+print(json.dumps({"code": r.returncode, "err": r.stderr.strip()[-300:]}))
+'''
+DOCKER_ACTIONS = ("start", "stop", "restart")
+DOCKER_TABS = ("logs", "shell", "rebuild")
+CONTAINER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def docker_error(msg: str) -> str:
+    if "permission denied" in msg.lower() and "docker" in msg.lower():
+        return "your server user may not use docker — on the server run: sudo usermod -aG docker $USER (then log in again)"
+    return msg
+
+
+def docker_crash(old: dict, new: dict) -> str:
+    """Why a container needs attention now, or "" (only on a change from a good state)."""
+    if new.get("state") == "restarting" and old.get("state") != "restarting":
+        return "keeps restarting"
+    if new.get("health") == "unhealthy" and old.get("health") != "unhealthy":
+        return "unhealthy"
+    if old.get("state") == "running" and new.get("state") in ("exited", "dead") and new.get("exitCode") not in (0, 137, 143):
+        return f"stopped with exit code {new.get('exitCode')}"
+    return ""
+
+
+def docker_tab_inner(c: dict, action: str) -> str:
+    name = shlex.quote(c["name"])
+    if action == "logs":
+        return f"docker logs -f --tail 300 {name}"
+    if action == "shell":
+        return f"docker exec -it {name} sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'"
+    if not c.get("compose") or not c.get("service") or not c.get("workdir"):
+        raise ApiError(400, "this container was not started by docker compose")
+    files = "".join(" -f " + shlex.quote(f) for f in (c.get("configFiles") or "").split(",") if f)
+    dc = f"docker compose -p {shlex.quote(c['compose'])}{files}"
+    svc = shlex.quote(c["service"])
+    return (f"cd {shlex.quote(c['workdir'])} && {dc} up -d --build {svc} && "
+            f"echo && echo '✓ {c['service']} rebuilt and started — its logs follow (Ctrl+C to stop watching)' && "
+            f"{dc} logs -f --tail 50 {svc}")
+
+
+# ----------------------------------------------------------------------------- port tunnels (ssh -L)
+def clean_port(v, field: str) -> int:
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 65535:
+        raise ApiError(400, f"{field} must be a port number (1–65535)")
+    return v
+
+
+def clean_tunnels(items) -> list:
+    if not isinstance(items, list) or len(items) > 40:
+        raise ApiError(400, "invalid tunnel list")
+    out, ids, ports = [], set(), set()
+    for t in items:
+        if not isinstance(t, dict):
+            raise ApiError(400, "invalid tunnel list")
+        tid = t.get("id") if isinstance(t.get("id"), str) and re.fullmatch(r"[a-z0-9]{4,16}", t.get("id") or "") else secrets.token_hex(4)
+        while tid in ids:
+            tid = secrets.token_hex(4)
+        ids.add(tid)
+        host = clean_str(t.get("remoteHost"), 200, "server address") or "127.0.0.1"
+        if not re.fullmatch(r"[A-Za-z0-9.:_-]+", host):
+            raise ApiError(400, "the address on the server may only contain letters, digits, . : - _")
+        rp = clean_port(t.get("remotePort"), "the server port")
+        lp = clean_port(t.get("localPort") or rp, "the local port")
+        if lp in ports:
+            raise ApiError(400, f"local port {lp} is used twice")
+        ports.add(lp)
+        out.append({"id": tid, "name": clean_str(t.get("name"), 60, "name") or f"port {rp}",
+                    "localPort": lp, "remoteHost": host, "remotePort": rp, "on": t.get("on") is True,
+                    "http": t.get("http") is True})
+    return out
+
+
+def local_port_free(port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def tunnel_argv(conf: ServerConf, t: dict) -> list:
+    return ssh_base(conf, multiplex=False, batch=True) + [
+        "-N", "-T", "-o", "ExitOnForwardFailure=yes",
+        "-L", f"127.0.0.1:{t['localPort']}:{t['remoteHost']}:{t['remotePort']}", conf.target]
+
+
+class Tunnel:
+    """Keeps one `ssh -L` running; reconnects with a growing pause when it drops."""
+
+    def __init__(self, project: str, spec: dict, conf_fn, popen=None, free=None):
+        self.project = project
+        self.spec = dict(spec)
+        self.conf_fn = conf_fn
+        self.popen = popen or (lambda argv: subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            env=dict(os.environ, PATH=tool_path()), start_new_session=True))
+        self.free = free or local_port_free
+        self.state = "off"            # off | connecting | up | error
+        self.error = ""
+        self.since = 0.0
+        self.proc = None
+        self.wanted = False
+        self.wake = threading.Event()
+        self.thread = None
+
+    def start(self):
+        if self.wanted:
+            return
+        self.wanted = True
+        self.wake.clear()
+        self.state, self.error = "connecting", ""
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.wanted = False
+        self.wake.set()
+        p = self.proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+        self.state, self.error = "off", ""
+
+    def _loop(self):
+        pause = 2
+        while self.wanted:
+            lp = self.spec["localPort"]
+            if not self.free(lp):
+                self.state, self.error = "error", f"port {lp} is already used on this machine — pick another local port"
+                self.wanted = False
+                return
+            self.state = "connecting"
+            started = time.time()
+            try:
+                self.proc = p = self.popen(tunnel_argv(self.conf_fn(), self.spec))
+            except OSError as e:
+                self.state, self.error = "error", f"could not start ssh: {e}"
+                self.wanted = False
+                return
+            while self.wanted and p.poll() is None:
+                if self.state != "up" and time.time() - started > 2.5:
+                    self.state, self.error, self.since = "up", "", time.time()
+                    pause = 2
+                self.wake.wait(0.5)
+            if not self.wanted:
+                return
+            err = ""
+            try:
+                err = (p.stderr.read() or b"").decode("utf-8", "replace").strip() if p.stderr else ""
+            except (OSError, ValueError):
+                pass
+            last = [l for l in err.splitlines() if l.strip() and "Warning: Permanently added" not in l]
+            self.state = "error"
+            self.error = (last[-1] if last else "the connection closed")[:200] + f" — retrying in {pause}s"
+            if self.wake.wait(pause):
+                return
+            pause = min(pause * 2, 60)
+
+    def info(self) -> dict:
+        return dict(self.spec, project=self.project, state=self.state, error=self.error, since=self.since,
+                    on=self.wanted)
+
+
+# ----------------------------------------------------------------------------- Claude usage (limits, cost)
+USAGE_WINDOWS = ("five_hour", "seven_day", "seven_day_overage_included")
+
+
+def merge_limits(cur: dict, info: dict, now: float = None) -> dict:
+    """Fold a rate_limit_event's rate_limit_info into the last known limits."""
+    now = time.time() if now is None else now
+    out = {"windows": dict((cur or {}).get("windows") or {}), "status": (cur or {}).get("status") or "",
+           "updated": now}
+    if not isinstance(info, dict):
+        info = {}
+    if info.get("status") in ("allowed", "allowed_warning", "rejected"):
+        out["status"] = info["status"]
+        out["limiting"] = info.get("rateLimitType") or ""
+        out["resetsAt"] = info.get("resetsAt") or 0
+    wins = info.get("unifiedWindows")
+    if isinstance(wins, dict):
+        for k in USAGE_WINDOWS:
+            w = wins.get(k)
+            if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+                out["windows"][k] = {"used": float(w["utilization"]), "resetsAt": int(w.get("resetsAt") or 0),
+                                     "status": w.get("status") or ""}
+    elif isinstance(info.get("utilization"), (int, float)) and info.get("rateLimitType") in USAGE_WINDOWS:
+        out["windows"][info["rateLimitType"]] = {"used": float(info["utilization"]),
+                                                 "resetsAt": int(info.get("resetsAt") or 0),
+                                                 "status": info.get("status") or ""}
+    # a window whose reset time has passed starts again from zero
+    for k, w in list(out["windows"].items()):
+        if w.get("resetsAt") and w["resetsAt"] < now:
+            out["windows"].pop(k)
+    return out
+
+
+class Usage:
+    """Claude limits (last seen) and the API-equivalent cost per day and project."""
+    KEEP_DAYS = 60
+
+    def __init__(self, path: Path = None):
+        self.path = path or (config_dir() / "usage.json")
+        self.lock = threading.Lock()
+        try:
+            d = json.loads(self.path.read_text())
+            d = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            d = {}
+        self.data = {"limits": d.get("limits") if isinstance(d.get("limits"), dict) else {},
+                     "days": d.get("days") if isinstance(d.get("days"), dict) else {}}
+        self._dirty = 0.0
+
+    def _save(self, force=False):
+        if not force and time.time() - self._dirty < 5:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.data))
+            os.replace(tmp, self.path)
+            self._dirty = time.time()
+        except OSError:
+            pass
+
+    def limits(self, info: dict):
+        with self.lock:
+            self.data["limits"] = merge_limits(self.data["limits"], info)
+            self._save()
+
+    def cost(self, project: str, usd: float, day: str = None):
+        if not isinstance(usd, (int, float)) or usd <= 0:
+            return
+        day = day or time.strftime("%Y-%m-%d")
+        with self.lock:
+            d = self.data["days"].setdefault(day, {})
+            d[project or "home"] = round(d.get(project or "home", 0.0) + float(usd), 6)
+            for old in sorted(self.data["days"])[:-self.KEEP_DAYS]:
+                self.data["days"].pop(old, None)
+            self._save(force=True)
+
+    def summary(self, now: float = None) -> dict:
+        now = time.time() if now is None else now
+        with self.lock:
+            lim = merge_limits(self.data["limits"], None, now) if self.data["limits"] else {}
+            if self.data["limits"]:
+                lim["updated"] = self.data["limits"].get("updated", 0)
+            days = {k: dict(v) for k, v in self.data["days"].items()}
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        week = [time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)) for i in range(7)]
+        return {"limits": lim, "today": round(sum(days.get(today, {}).values()), 4),
+                "week": round(sum(sum(days.get(d, {}).values()) for d in week), 4),
+                "days": [{"day": d, "projects": days.get(d, {}), "total": round(sum(days.get(d, {}).values()), 4)}
+                         for d in sorted(days, reverse=True)[:30]]}
+
+
 # ----------------------------------------------------------------------------- setup from the window
 # Same files and marked blocks the bash script writes, so both stay compatible.
 RC_MARK_BEGIN = "# >>> simabworkspace >>>"
@@ -2019,6 +2369,14 @@ class App:
         self._status = {"ssh": "unknown", "sshError": "", "daemon": False, "checked": 0.0}
         self._status_lock = threading.Lock()
         self.httpd = None
+        self.usage = Usage(self.store.path.parent / "usage.json")
+        self.tunnels = {}             # (project, id) -> Tunnel
+        self._docker_seen = {}        # container id -> last seen container
+        self._docker_quiet = {}       # container id -> when we stopped/restarted it ourselves
+        self._docker_events = collections.deque(maxlen=50)
+        self._docker_seq = 0
+        self._docker_error = ""
+        self._docker_checked = 0.0
 
     @property
     def conf(self) -> ServerConf:
@@ -2081,12 +2439,17 @@ class App:
             c = ChatSession(sid, built, on_change=self._changed)
             c.log = self.activity.add
             c.remember = self.store.set_chat_prefs
+            c.on_usage = self.usage.limits
+            c.on_cost = self.usage.cost
             c.start()
             self.activity.add("chat", built["spec"]["project"], c.title, session=built.get("resume") or "")
             with self.lock:
                 self.sessions[sid] = c
             self._remember()
             return c.info()
+        body = {k: v for k, v in body.items() if k != "_docker"}
+        if body.get("kind") == "docker":
+            body["_docker"] = self.docker_tab(body.get("project") or "", body.get("container"), body.get("action"))
         built = build_spec(body, self.conf, self.store, self.projects(max_age=10))
         cols, rows = body.get("cols"), body.get("rows")
         cols = int(cols) if isinstance(cols, (int, float)) and not isinstance(cols, bool) else 120
@@ -2097,6 +2460,8 @@ class App:
         if sp["kind"] == "run":
             cmd = self.store.command(sp["project"], sp["cmdId"]) or {}
             self.activity.add("run", sp["project"], s.title, cmdId=sp["cmdId"], cmd=cmd.get("cmd", ""), where=sp["where"])
+        elif sp["kind"] == "docker":
+            self.activity.add("docker-" + sp["action"], sp["project"], sp["container"])
         elif sp["kind"] in ("shell", "claude"):
             self.activity.add("terminal" if sp["kind"] == "shell" else "claude-tui", sp["project"], s.title, where=sp["where"],
                               session=sp.get("resume") or "")
@@ -2655,6 +3020,194 @@ class App:
         for s in list(self.sessions.values()):
             s.kill()
         self.sessions = {}
+        for t in list(self.tunnels.values()):
+            t.stop()
+
+    def _project(self, name: str) -> dict:
+        p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
+        if not p:
+            raise ApiError(404, "project not found")
+        return p
+
+    def _project_conf(self, p: dict) -> ServerConf:
+        ep = p.get("endpoint") or {}
+        return self.conf.with_endpoint(ep.get("user"), ep.get("host"), ep.get("port"))
+
+    # docker ----------------------------------------------------------------------
+    def docker_list(self, project: dict = None) -> dict:
+        if not self.conf.configured:
+            raise ApiError(400, "the server is not configured")
+        projs = [project] if project else [p for p in self.projects(max_age=20) if p.get("remote")]
+        groups = {}
+        for p in projs:
+            if not p.get("remote"):
+                raise ApiError(400, "this project has no server folder")
+            c = self._project_conf(p)
+            groups.setdefault((c.target, str(c.port)), (c, []))[1].append(p)
+        out, errors = [], []
+        for c, ps in groups.values():
+            r = remote_python(c, DOCKER_PY, [f"{p['name']}={p['remote']}" for p in ps],
+                              multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=40) or {}
+            if r.get("error"):
+                errors.append(docker_error(str(r["error"])))
+            out += [x for x in r.get("containers") or [] if isinstance(x, dict)]
+        return {"containers": out, "error": "; ".join(errors)}
+
+    def _docker_update(self, d: dict, only: str = None):
+        now = time.time()
+        with self.lock:
+            prev = self._docker_seen
+            seen = {k: v for k, v in prev.items() if v.get("proj") != only} if only else {}
+            for c in d.get("containers") or []:
+                old = prev.get(c.get("id"))
+                why = docker_crash(old, c) if old else ""
+                if why and now - self._docker_quiet.get(c["id"], 0) > 90:
+                    self._docker_seq += 1
+                    self._docker_events.append({"seq": self._docker_seq, "project": c.get("proj"), "name": c.get("name"),
+                                                "service": c.get("service"), "why": why, "t": now})
+                    self.activity.add("docker-crash", c.get("proj") or "", f"{c.get('name')}: {why}")
+                seen[c.get("id")] = c
+            self._docker_seen = seen
+            if not only:
+                self._docker_error = d.get("error") or ""
+                self._docker_checked = now
+
+    def docker_project(self, name: str) -> dict:
+        p = self._project(name)
+        d = self.docker_list(p)
+        self._docker_update(d, only=name)
+        return d
+
+    def _container(self, name: str, container) -> tuple:
+        if not isinstance(container, str) or not CONTAINER_RE.fullmatch(container):
+            raise ApiError(400, "invalid container")
+        p = self._project(name)
+        c = next((x for x in self.docker_list(p)["containers"] if container in (x.get("name"), x.get("id"))), None)
+        if not c:
+            raise ApiError(404, f"container {container} not found in {name}")
+        return p, c
+
+    def docker_action(self, name: str, container, action) -> dict:
+        if action not in DOCKER_ACTIONS:
+            raise ApiError(400, "unknown docker action")
+        p, c = self._container(name, container)
+        if action in ("stop", "restart"):
+            self._docker_quiet[c["id"]] = time.time()
+        r = remote_python(self._project_conf(p), DOCKER_ACT_PY, [action, c["name"]],
+                          multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=150) or {}
+        if r.get("code"):
+            raise ApiError(502, docker_error(r.get("err") or f"docker {action} failed"))
+        self.activity.add("docker-" + action, name, c["name"])
+        return self.docker_project(name)
+
+    def docker_tab(self, name: str, container, action) -> dict:
+        if action not in DOCKER_TABS:
+            raise ApiError(400, "unknown docker action")
+        _, c = self._container(name, container)
+        title = {"logs": "logs", "shell": "shell", "rebuild": "rebuild"}[action] + " · " + (c.get("service") or c["name"])
+        return {"inner": docker_tab_inner(c, action), "title": title, "container": c["name"], "action": action}
+
+    def docker_summary(self, since: int = 0) -> dict:
+        with self.lock:
+            per = {}
+            for c in self._docker_seen.values():
+                s = per.setdefault(c.get("proj") or "", {"total": 0, "running": 0, "bad": 0})
+                s["total"] += 1
+                s["running"] += 1 if c.get("state") == "running" else 0
+                bad = c.get("state") == "restarting" or c.get("health") == "unhealthy" or (
+                    c.get("state") in ("exited", "dead") and c.get("exitCode") not in (0, 137, 143))
+                s["bad"] += 1 if bad else 0
+            return {"summary": per, "events": [e for e in self._docker_events if e["seq"] > since],
+                    "seq": self._docker_seq, "error": self._docker_error, "checked": self._docker_checked}
+
+    def docker_watch_loop(self, interval=30):
+        pause = 0
+        while not getattr(self, "_stopping", False):
+            if pause <= 0 and self.store.settings.get("dockerWatch", True) and self.conf.configured \
+                    and self._status.get("ssh") != "err":
+                try:
+                    d = self.docker_list()
+                    self._docker_update(d)
+                    # no docker on the server: look again much later
+                    pause = 20 if "not installed" in (d.get("error") or "") else 0
+                except ApiError as e:
+                    self._docker_error = e.message
+                except Exception as e:  # noqa: BLE001 - the watcher must keep running
+                    log_line(f"docker watch: {e}")
+            else:
+                pause -= 1
+            for _ in range(interval * 2):
+                if getattr(self, "_stopping", False):
+                    return
+                time.sleep(0.5)
+
+    # port tunnels ----------------------------------------------------------------
+    def _tunnel_conf(self, project: str):
+        def conf():
+            p = next((x for x in self.projects(max_age=30) if x["name"] == project), None)
+            return self._project_conf(p) if p else self.conf
+        return conf
+
+    def start_tunnels(self):
+        with self.lock:
+            for project, pd in list(self.store.data["projects"].items()):
+                for spec in pd.get("tunnels") or []:
+                    key = (project, spec.get("id"))
+                    if key not in self.tunnels:
+                        self.tunnels[key] = Tunnel(project, spec, self._tunnel_conf(project))
+                        if spec.get("on") and self.conf.configured:
+                            self.tunnels[key].start()
+
+    def tunnel_list(self) -> list:
+        out = []
+        for project, pd in self.store.data["projects"].items():
+            for spec in pd.get("tunnels") or []:
+                t = self.tunnels.get((project, spec.get("id")))
+                out.append(t.info() if t else dict(spec, project=project, state="off", error="", since=0, on=False))
+        return out
+
+    def set_tunnels(self, project: str, items) -> list:
+        self._project(project)
+        new = clean_tunnels(items)
+        mine = {t["localPort"] for t in new}
+        for other, pd in self.store.data["projects"].items():
+            if other == project:
+                continue
+            for t in pd.get("tunnels") or []:
+                if t.get("localPort") in mine:
+                    raise ApiError(400, f"local port {t['localPort']} is already used by a tunnel of {other}")
+        with self.lock:
+            for key in [k for k in self.tunnels if k[0] == project and k[1] not in {t["id"] for t in new}]:
+                self.tunnels.pop(key).stop()
+            for spec in new:
+                key = (project, spec["id"])
+                t = self.tunnels.get(key)
+                same = t and all(t.spec.get(k) == spec[k] for k in ("localPort", "remoteHost", "remotePort"))
+                if t and not same:
+                    t.stop()
+                if not same:
+                    t = self.tunnels[key] = Tunnel(project, spec, self._tunnel_conf(project))
+                t.spec = dict(spec)
+                if spec["on"] and not t.wanted:
+                    t.start()
+                elif not spec["on"] and t.wanted:
+                    t.stop()
+            self.store.data["projects"].setdefault(project, {})["tunnels"] = new
+            self.store.save()
+        self.activity.add("tunnels", project, ", ".join(f"{t['name']} :{t['localPort']}" for t in new))
+        return self.tunnel_list()
+
+    def toggle_tunnel(self, project: str, tid: str, on: bool) -> list:
+        specs = [dict(t) for t in (self.store.data["projects"].get(project) or {}).get("tunnels") or []]
+        hit = next((t for t in specs if t.get("id") == tid), None)
+        if not hit:
+            raise ApiError(404, "this tunnel no longer exists")
+        hit["on"] = on
+        if on:
+            t = self.tunnels.get((project, tid))
+            if (not t or not t.wanted) and not local_port_free(hit["localPort"]):
+                raise ApiError(409, f"port {hit['localPort']} is already used on this machine — pick another local port")
+        return self.set_tunnels(project, specs)
 
     # editor
     def open_editor(self, body: dict) -> dict:
@@ -3005,6 +3558,22 @@ class Handler(BaseHTTPRequestHandler):
                 app.activity.add("git-" + act, p["name"], text, repo=repo.repo)
                 return {"output": out, "status": repo.status()}
             raise ApiError(404, "not found")
+        if route == ("GET", "docker") and len(parts) == 2:
+            return app.docker_project(parts[1])
+        if route == ("POST", "docker") and len(parts) == 2:
+            b = self._body()
+            return app.docker_action(parts[1], b.get("container"), b.get("action"))
+        if route == ("GET", "docker-summary"):
+            since = (query.get("since") or ["0"])[0]
+            return app.docker_summary(int(since) if since.isdigit() else 0)
+        if route == ("GET", "tunnels"):
+            return {"tunnels": app.tunnel_list()}
+        if route == ("POST", "tunnels") and len(parts) == 2:
+            return {"tunnels": app.set_tunnels(parts[1], self._body().get("tunnels"))}
+        if route == ("POST", "tunnels") and len(parts) == 3:
+            return {"tunnels": app.toggle_tunnel(parts[1], parts[2], self._body().get("on") is True)}
+        if route == ("GET", "usage"):
+            return app.usage.summary()
         if route == ("GET", "connection"):
             return app.connection()
         if route == ("POST", "connection"):
@@ -3253,6 +3822,8 @@ def serve(foreground_msg=True):
         subprocess.Popen([exe, "daemon", "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          stdin=subprocess.DEVNULL, env=dict(os.environ, PATH=tool_path()))
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
+    threading.Thread(target=app.docker_watch_loop, daemon=True).start()
+    threading.Thread(target=app.start_tunnels, daemon=True).start()
     start_wsl_keepalive()
     log_line(f"started {VERSION} on 127.0.0.1:{app.port} (pid {os.getpid()})")
     for sig in (signal.SIGTERM, signal.SIGINT):

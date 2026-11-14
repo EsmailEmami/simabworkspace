@@ -106,7 +106,7 @@
   var S = {
     settings: {}, server: {}, projects: [], projectsKey: '', tabs: [], active: null,
     open: new Set(JSON.parse(localStorage.getItem('sw-open') || '[]')),
-    filter: '', status: {}, wsl: false, lastTabs: [], version: '', git: {}
+    filter: '', status: {}, wsl: false, lastTabs: [], version: '', git: {}, docker: {}, tunnels: [], usage: null
   };
 
   var MONO = '"JetBrains Mono", "Vazirmatn", ui-monospace, Menlo, Consolas, monospace';
@@ -162,6 +162,7 @@
     if (spec.kind === 'chat' || spec.kind === 'claude') return ['✳', 'claude'];
     if (spec.kind === 'run') return ['▶', 'run'];
     if (spec.kind === 'sync-info' || spec.kind === 'sync-monitor') return ['⇅', ''];
+    if (spec.kind === 'docker') return ['▣', 'server'];
     return ['›', spec.where === 'server' ? 'server' : 'local'];
   }
 
@@ -1231,6 +1232,8 @@
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
       '-',
       { label: 'Git…', action: function () { gitDialog(p); } },
+      { label: 'Docker containers…', disabled: !r, action: function () { dockerDialog(p); } },
+      { label: 'Port forwarding…', disabled: !r, action: function () { tunnelsDialog(p); } },
       { label: 'Colour…', action: function () { colorDialog(p); } },
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
@@ -1276,6 +1279,9 @@
     prompt: ['✳', 'Claude'], chat: ['✳', 'chat'], 'claude-tui': ['✳', 'Claude (terminal)'],
     run: ['▶', 'run'], 'run-exit': ['■', 'finished'], terminal: ['›', 'terminal'],
     'git-commit': ['⎇', 'commit'], 'git-push': ['⎇', 'push'], 'git-pull': ['⎇', 'pull'], 'git-fetch': ['⎇', 'fetch'],
+    'docker-logs': ['▣', 'logs'], 'docker-shell': ['▣', 'container shell'], 'docker-rebuild': ['▣', 'rebuild'],
+    'docker-start': ['▣', 'start'], 'docker-stop': ['▣', 'stop'], 'docker-restart': ['▣', 'restart'], 'docker-crash': ['▣', 'crashed'],
+    tunnels: ['⇄', 'ports'],
     vscode: ['◇', 'VS Code'], 'sync-flush': ['⇅', 'sync'], 'sync-pause': ['⇅', 'sync'], 'sync-resume': ['⇅', 'sync']
   };
 
@@ -1307,6 +1313,7 @@
       out.push({ label: 'Run again', fn: function () { openSession({ kind: 'run', project: it.project, cmdId: it.cmdId }); } });
     if (it.kind === 'terminal') out.push({ label: 'Open', fn: function () { openSession({ kind: 'shell', where: it.where || 'server', project: it.project }); } });
     if (it.kind.indexOf('git-') === 0 && p) out.push({ label: 'Git', fn: function () { gitDialog(p); } });
+    if (it.kind.indexOf('docker-') === 0 && p) out.push({ label: 'Docker', fn: function () { dockerDialog(p); } });
     return out;
   }
 
@@ -1604,6 +1611,7 @@
       el.classList.toggle('open');
     } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name' }, p.name), open ? null : gitBadges(p.name, true),
       sync && sync.conflicts ? h('span', { class: 'gb conflict', title: plural(sync.conflicts, 'sync conflict') + ' — click to resolve', onclick: function (e) { e.stopPropagation(); syncDetails(p); } }, '⇅' + sync.conflicts) : null,
+      S.docker[p.name] && S.docker[p.name].bad ? h('span', { class: 'gb conflict', title: plural(S.docker[p.name].bad, 'container') + ' with problems — click', onclick: function (e) { e.stopPropagation(); dockerDialog(p); } }, '▣' + S.docker[p.name].bad) : null,
       count ? h('span', { class: 'count' }, String(count)) : null, more));
 
     var pr = sync && sync.progress;
@@ -1626,6 +1634,9 @@
         h('span', { class: 'tag' }, c.where === 'server' ? 'srv' : 'loc')));
     });
     if (!p.commands.length) body.append(h('button', { class: 'add-link', onclick: function () { editCommands(p); } }, '+ run command'));
+    var dl = dockerLine(p);
+    if (dl) body.append(dl);
+    projectTunnels(p.name).forEach(function (t) { var tl = tunnelLine(t); if (tl) body.append(tl); });
     el.append(body);
     return el;
   }
@@ -1876,6 +1887,7 @@
         chk('copyOnSelect', 'Copy on select'),
         chk('persianView', 'Show the Persian reading view automatically', 'When Persian text appears in a terminal.'),
         chk('bellNotify', 'Desktop notification when a tab needs you'),
+        chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
           h('button', { class: 'btn sm danger', onclick: uninstallDialog }, 'Uninstall…'))
@@ -2035,6 +2047,322 @@
     load();
   }
 
+  // ------------------------------------------------------------------ docker on the server
+  function ago(iso) {
+    var t = Date.parse(iso || '');
+    if (!t || t < 86400000) return '';
+    var s = Math.max(0, (Date.now() - t) / 1000);
+    return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd';
+  }
+  var CLEAN_EXIT = [0, 137, 143];
+  function containerState(c) {
+    var restarts = c.restarts ? ' · ' + plural(c.restarts, 'restart') : '';
+    if (c.state === 'running') {
+      if (c.health === 'unhealthy') return ['err', 'unhealthy'];
+      if (c.health === 'starting') return ['busy', 'starting'];
+      return ['ok', 'up ' + ago(c.startedAt) + restarts];
+    }
+    if (c.state === 'restarting') return ['err', 'restarting' + restarts];
+    if (c.state === 'paused') return ['warn', 'paused'];
+    if (c.state === 'exited' || c.state === 'dead') {
+      var crashed = CLEAN_EXIT.indexOf(c.exitCode) < 0;
+      var when = ago(c.finishedAt);
+      return [crashed ? 'err' : '', (crashed ? 'crashed · exit ' + c.exitCode : 'stopped') + (when ? ' · ' + when + ' ago' : '')];
+    }
+    return ['', c.state || 'unknown'];
+  }
+
+  function dockerTab(p, c, action) { openSession({ kind: 'docker', project: p.name, container: c.name, action: action }); }
+
+  function dockerDialog(p) {
+    var body = h('div', { class: 'dk' }, h('div', { class: 'muted' }, 'Reading the containers on the server…'));
+    var timer = null, busy = false;
+    var md = openModal({
+      title: 'Docker — ' + p.name, size: 'wide', body: body,
+      foot: [h('span', { class: 'muted left', style: 'font-size:12px' }, 'Containers started from this project’s folder on the server'),
+        h('button', { class: 'btn', onclick: function () { load(); } }, 'Refresh'),
+        h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')],
+      onclose: function () { clearInterval(timer); }
+    });
+    function act(c, action, btn) {
+      btn.disabled = true;
+      busy = true;
+      api('POST', 'docker/' + encodeURIComponent(p.name), { container: c.name, action: action }).then(function (d) {
+        busy = false;
+        toast((c.service || c.name) + ': ' + { start: 'started', stop: 'stopped', restart: 'restarted' }[action], 'ok');
+        render(d);
+        refreshDocker();
+      }).catch(function (e) { busy = false; btn.disabled = false; fail(e); });
+    }
+    function portChip(c, pt) {
+      var t = S.tunnels.find(function (x) { return x.project === p.name && x.remotePort === pt.host && /^(127\.0\.0\.1|localhost)$/.test(x.remoteHost); });
+      var label = ':' + pt.host + (pt.host !== pt.port ? '→' + pt.port : '');
+      if (t) {
+        return h('button', { class: 'pchip on ' + t.state, title: 'Forwarded: localhost:' + t.localPort + ' on this machine' + (t.state === 'up' ? '' : ' (' + t.state + ')') + '\nclick for options',
+          onclick: function (e) { tunnelMenu(t, e.currentTarget); } }, label, h('span', { class: 'pto' }, '⇄ ' + t.localPort));
+      }
+      return h('button', { class: 'pchip', title: 'Port ' + pt.host + ' on the server (' + pt.proto + ')\nclick: reach it from this machine (localhost:' + pt.host + ')',
+        onclick: function () { addTunnel(p, { name: c.service || c.name, remoteHost: '127.0.0.1', remotePort: pt.host, localPort: pt.host, on: true, http: false }); setTimeout(load, 300); } }, label);
+    }
+    function row(c) {
+      var st = containerState(c);
+      var running = c.state === 'running' || c.state === 'restarting';
+      var b = function (label, title, fn, cls) {
+        var btn = h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: title, onclick: function () { fn(btn); } }, label);
+        return btn;
+      };
+      return h('div', { class: 'dkrow' },
+        h('i', { class: 'dot ' + st[0] }),
+        h('div', { class: 'dkname' }, h('b', null, c.service || c.name), h('span', { class: 'muted mono', title: c.name }, c.image)),
+        h('span', { class: 'dkst ' + st[0] }, st[1]),
+        h('span', { class: 'dkports' }, c.ports.filter(function (pt) { return pt.proto === 'tcp'; }).map(function (pt) { return portChip(c, pt); })),
+        h('span', { class: 'dkacts' },
+          b('Logs', 'Follow the logs in a tab', function () { dockerTab(p, c, 'logs'); }),
+          running ? b('Shell', 'A shell inside the container, in a tab', function () { dockerTab(p, c, 'shell'); }) : null,
+          b(running ? 'Restart' : 'Start', running ? 'Restart the container' : 'Start the container', function (btn) { act(c, running ? 'restart' : 'start', btn); }),
+          running ? b('Stop', 'Stop the container', function (btn) { act(c, 'stop', btn); }) : null,
+          c.compose && c.service ? b('Rebuild', 'docker compose up -d --build ' + c.service + ' — in a tab', function () { dockerTab(p, c, 'rebuild'); md.close(); }) : null));
+    }
+    function render(d) {
+      var rows = [];
+      if (d.error) rows.push(h('div', { class: 'add-err' }, d.error));
+      var groups = {};
+      d.containers.forEach(function (c) { (groups[c.compose || '—'] = groups[c.compose || '—'] || []).push(c); });
+      Object.keys(groups).sort().forEach(function (g) {
+        var list = groups[g].sort(function (a, b) { return (a.service || a.name).localeCompare(b.service || b.name); });
+        var up = list.filter(function (c) { return c.state === 'running'; }).length;
+        rows.push(h('div', { class: 'sec' }, (g === '—' ? 'other containers' : g) + ' · ' + up + '/' + list.length + ' running'));
+        list.forEach(function (c) { rows.push(row(c)); });
+      });
+      if (!d.containers.length && !d.error) rows.push(h('div', { class: 'muted' }, 'No containers from this project on the server. Start them with docker compose (a ▶ run command on the server is handy), and they show up here.'));
+      body.replaceChildren.apply(body, rows);
+    }
+    function load() {
+      if (busy) return;
+      api('GET', 'docker/' + encodeURIComponent(p.name)).then(render).catch(function (e) {
+        if (!body.querySelector('.dkrow')) body.replaceChildren(h('div', { class: 'add-err' }, e.message));
+      });
+    }
+    load();
+    timer = setInterval(function () { if (!document.hidden) load(); }, 6000);
+  }
+
+  function dockerLine(p) {
+    var d = S.docker[p.name];
+    if (!d || !d.total) return null;
+    var cls = d.bad ? 'err' : d.running < d.total ? 'warn' : 'ok';
+    return h('div', { class: 'cmd dkline', title: 'Docker on the server: ' + d.running + ' of ' + d.total + ' running' + (d.bad ? ', ' + d.bad + ' with problems' : '') + '\nclick for logs, restart, ports',
+      onclick: function () { dockerDialog(p); } },
+      h('span', { class: 'ic' }, '▣'), h('span', { class: 'nm' }, 'docker'),
+      h('span', { class: 'gb dk ' + cls }, d.running + '/' + d.total));
+  }
+
+  function refreshDocker() {
+    return api('GET', 'docker-summary?since=' + (S.dockerSeq || 0)).then(function (d) {
+      if (S.dockerSeq !== undefined) {
+        d.events.forEach(function (e) {
+          var p = project(e.project);
+          toast(e.project + ' · ' + (e.service || e.name) + ': ' + e.why, 'err', { timeout: 20000, onclick: p ? function () { dockerDialog(p); } : null });
+          notify('Container ' + e.why, e.project + ' · ' + (e.service || e.name));
+        });
+      }
+      S.dockerSeq = d.seq;
+      var key = JSON.stringify(d.summary);
+      S.docker = d.summary;
+      if (key !== S.dockerKey) { S.dockerKey = key; renderProjects(); }
+    }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------------ port forwarding (ssh tunnels)
+  function tunnelUrl(t) { return 'http://localhost:' + t.localPort + '/'; }
+  function tunnelTitle(t) {
+    var s = 'localhost:' + t.localPort + ' on this machine → ' + t.remoteHost + ':' + t.remotePort + ' on the server';
+    if (t.state === 'up') s += '\nconnected';
+    else if (t.state === 'connecting') s += '\nconnecting…';
+    else if (t.state === 'error') s += '\n' + t.error;
+    else s += '\noff — click to connect';
+    return s;
+  }
+  function projectTunnels(name) { return S.tunnels.filter(function (t) { return t.project === name; }); }
+  function plainTunnel(t) { return { id: t.id, name: t.name, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort, on: t.on, http: t.http }; }
+
+  function saveTunnels(name, list) {
+    return api('POST', 'tunnels/' + encodeURIComponent(name), { tunnels: list }).then(function (d) {
+      S.tunnels = d.tunnels;
+      renderProjects();
+      setTimeout(refreshTunnels, 3000);
+      return d.tunnels;
+    });
+  }
+
+  function addTunnel(p, spec) {
+    var used = S.tunnels.map(function (t) { return t.localPort; });
+    while (used.indexOf(spec.localPort) >= 0 && spec.localPort < 65535) spec.localPort++;
+    var list = projectTunnels(p.name).map(plainTunnel).concat([spec]);
+    return saveTunnels(p.name, list).then(function () {
+      toast('localhost:' + spec.localPort + ' → server port ' + spec.remotePort, 'ok');
+    }).catch(fail);
+  }
+
+  function toggleTunnel(t, on) {
+    api('POST', 'tunnels/' + encodeURIComponent(t.project) + '/' + encodeURIComponent(t.id), { on: on === undefined ? !t.on : on }).then(function (d) {
+      S.tunnels = d.tunnels;
+      renderProjects();
+      setTimeout(refreshTunnels, 3000);
+    }).catch(fail);
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { toast('Copied ' + text, 'ok'); }, function () {});
+  }
+
+  function tunnelMenu(t, anchor) {
+    var p = project(t.project);
+    menuAt(anchor, [
+      { header: t.name + ' · localhost:' + t.localPort },
+      t.on ? { label: 'Disconnect', action: function () { toggleTunnel(t, false); } } : { label: 'Connect', action: function () { toggleTunnel(t, true); } },
+      { label: 'Open in the browser', action: function () { window.open(tunnelUrl(t), '_blank'); } },
+      { label: 'Copy localhost:' + t.localPort, action: function () { copyText('localhost:' + t.localPort); } },
+      p ? { label: 'Edit…', action: function () { tunnelsDialog(p); } } : null
+    ]);
+  }
+
+  function tunnelLine(t) {
+    var p = project(t.project);
+    var dot = t.state === 'up' ? 'ok' : t.state === 'connecting' ? 'busy' : t.state === 'error' ? 'err' : '';
+    var more = h('span', { class: 'tag', title: 'Options' }, '⋯');
+    var el = h('div', { class: 'cmd tline' + (t.on ? ' running' : ''), title: tunnelTitle(t) + '\nclick: ' + (t.on ? 'disconnect' : 'connect') + ' · right-click: options',
+      onclick: function (e) { if (e.target === more) { tunnelMenu(t, more); return; } toggleTunnel(t); },
+      oncontextmenu: function (e) { e.preventDefault(); tunnelMenu(t, el); } },
+      h('i', { class: 'dot ' + dot }), h('span', { class: 'nm' }, t.name),
+      t.http && t.state === 'up' ? h('a', { class: 'tag tlink', href: tunnelUrl(t), target: '_blank', title: 'Open ' + tunnelUrl(t), onclick: function (e) { e.stopPropagation(); } }, ':' + t.localPort + ' ↗')
+        : h('span', { class: 'tag' }, ':' + t.localPort), more);
+    return p ? el : null;
+  }
+
+  function tunnelsDialog(p) {
+    var list = h('div');
+    function row(t) {
+      var name = h('input', { class: 'inp', value: t.name || '', placeholder: 'Name, e.g. postgres' });
+      var lp = h('input', { class: 'inp mono', value: t.localPort ? String(t.localPort) : '', placeholder: 'same', inputmode: 'numeric' });
+      var host = h('input', { class: 'inp mono', value: t.remoteHost || '127.0.0.1', placeholder: '127.0.0.1' });
+      var rp = h('input', { class: 'inp mono', value: t.remotePort ? String(t.remotePort) : '', placeholder: '5432', inputmode: 'numeric' });
+      var http = h('input', { type: 'checkbox' });
+      http.checked = !!t.http;
+      var st = t.state ? h('span', { class: 'dkst ' + (t.state === 'up' ? 'ok' : t.state === 'error' ? 'err' : ''), title: t.error || '' }, t.state === 'error' ? 'error' : t.state) : null;
+      var box = h('div', { class: 'cmd-edit' },
+        h('div', { class: 'top' }, name, st, h('button', { class: 'icon-btn', title: 'Remove', onclick: function () { box.remove(); } }, '✕')),
+        h('div', { class: 'row trow' },
+          h('label', null, h('span', null, 'this machine'), h('span', { class: 'mono muted' }, 'localhost:'), lp),
+          h('span', { class: 'muted' }, '→'),
+          h('label', null, h('span', null, 'on the server'), host, h('span', { class: 'mono muted' }, ':'), rp)),
+        h('label', { class: 'check', style: 'margin-top:6px' }, http, ' a web page — show an ↗ link to open it'),
+        t.error ? h('div', { class: 'add-err', style: 'margin-top:6px' }, t.error) : null);
+      box._get = function () {
+        return { id: t.id, name: name.value, localPort: lp.value.trim() || rp.value.trim(), remoteHost: host.value.trim(), remotePort: rp.value.trim(),
+          on: t.id ? !!t.on : true, http: http.checked };
+      };
+      return box;
+    }
+    var mine = projectTunnels(p.name);
+    mine.forEach(function (t) { list.append(row(t)); });
+    if (!mine.length) list.append(row({}));
+    var md = openModal({
+      title: 'Port forwarding — ' + p.name,
+      body: [h('div', { class: 'muted', style: 'margin-bottom:10px;font-size:12px' },
+        'Reach a port of the server from this machine, through SSH: a database for DBeaver, an API for Postman, a page in the browser. ',
+        'Nothing is opened to the internet. A tunnel that is on reconnects by itself while the app runs.'), list],
+      foot: [h('button', { class: 'btn left', onclick: function () { list.append(row({})); } }, '+ Add'),
+        h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: function () {
+          var items = Array.prototype.map.call(list.children, function (b) { return b._get(); }).filter(function (t) { return String(t.remotePort).trim(); });
+          saveTunnels(p.name, items).then(function () { md.close(); }).catch(fail);
+        } }, 'Save')]
+    });
+  }
+
+  function refreshTunnels() {
+    return api('GET', 'tunnels').then(function (d) {
+      var key = JSON.stringify(d.tunnels.map(function (t) { return [t.project, t.id, t.name, t.state, t.on, t.localPort, t.error, t.http]; }));
+      S.tunnels = d.tunnels;
+      if (key !== S.tunnelsKey) { S.tunnelsKey = key; renderProjects(); }
+    }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------------ Claude usage (limits, cost)
+  var USAGE_NAMES = { five_hour: '5-hour limit', seven_day: 'weekly limit', seven_day_overage_included: 'weekly limit (model)' };
+  function pct(w) { return Math.round((w.used || 0) * 100); }
+  function resetIn(ts) {
+    var s = ts - Date.now() / 1000;
+    if (!ts || s <= 0) return '';
+    var m = Math.max(1, Math.round(s / 60)), d = Math.floor(m / 1440), hh = Math.floor((m % 1440) / 60), mm = m % 60;
+    return d ? d + 'd ' + hh + 'h' : hh ? hh + 'h ' + mm + 'm' : mm + 'm';
+  }
+  function money(v) { return '$' + (v >= 100 ? v.toFixed(0) : v.toFixed(2)); }
+  function liveWindows(u) {
+    var w = (u && u.limits && u.limits.windows) || {}, now = Date.now() / 1000, out = {};
+    Object.keys(w).forEach(function (k) { if (!w[k].resetsAt || w[k].resetsAt > now) out[k] = w[k]; });
+    return out;
+  }
+  function meter(label, w) {
+    var p = pct(w);
+    return h('span', { class: 'um' + (p >= 90 ? ' err' : p >= 70 ? ' warn' : '') },
+      h('span', { class: 'ul' }, label), h('span', { class: 'ub' }, h('i', { style: 'width:' + Math.min(100, p) + '%' })), h('span', { class: 'up' }, p + '%'));
+  }
+
+  function renderUsage() {
+    var el = $('#usage');
+    if (!el) return;
+    var u = S.usage, w = liveWindows(u);
+    if (!w.five_hour && !w.seven_day && !(u && u.today)) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    var tip = [];
+    if (w.five_hour) tip.push('5-hour limit: ' + pct(w.five_hour) + '% used' + (resetIn(w.five_hour.resetsAt) ? ', resets in ' + resetIn(w.five_hour.resetsAt) : ''));
+    if (w.seven_day) tip.push('weekly limit: ' + pct(w.seven_day) + '% used' + (resetIn(w.seven_day.resetsAt) ? ', resets in ' + resetIn(w.seven_day.resetsAt) : ''));
+    if (u.today) tip.push('today ≈ ' + money(u.today) + ' (API price)');
+    el.title = tip.join('\n') + '\nclick for details';
+    el.replaceChildren.apply(el, [w.five_hour ? meter('5h', w.five_hour) : null, w.seven_day ? meter('7d', w.seven_day) : null,
+      !w.five_hour && !w.seven_day ? h('span', { class: 'um' }, h('span', { class: 'ul' }, 'Claude today'), h('span', { class: 'up' }, money(u.today))) : null].filter(Boolean));
+    // warn once per window when it gets close
+    var f = w.five_hour;
+    if (f) {
+      var level = pct(f) >= 95 ? 95 : pct(f) >= 80 ? 80 : 0;
+      var k = f.resetsAt + ':' + level;
+      if (level && S.usageWarned !== k && S.usageWarned !== f.resetsAt + ':95') {
+        S.usageWarned = k;
+        toast('Claude: ' + pct(f) + '% of the 5-hour limit used' + (resetIn(f.resetsAt) ? ' — resets in ' + resetIn(f.resetsAt) : ''), 'warn', { timeout: 12000, onclick: usageDialog });
+      }
+    }
+  }
+
+  function refreshUsage() {
+    return api('GET', 'usage').then(function (u) { S.usage = u; renderUsage(); }).catch(function () {});
+  }
+
+  function usageDialog() {
+    var u = S.usage || {}, w = liveWindows(u), rows = [];
+    rows.push(h('div', { class: 'sec' }, 'Claude subscription limits'));
+    var keys = Object.keys(w);
+    if (!keys.length) rows.push(h('div', { class: 'muted' }, 'Not known yet — shown after Claude answers in a chat here.'));
+    keys.forEach(function (k) {
+      var x = w[k], p = pct(x);
+      rows.push(h('div', { class: 'ubig' + (p >= 90 ? ' err' : p >= 70 ? ' warn' : '') },
+        h('div', { class: 'uhead' }, h('b', null, USAGE_NAMES[k] || k), h('span', { class: 'muted' }, p + '% used' + (resetIn(x.resetsAt) ? ' · resets in ' + resetIn(x.resetsAt) : ''))),
+        h('div', { class: 'ub' }, h('i', { style: 'width:' + Math.min(100, p) + '%' }))));
+    });
+    if (u.limits && u.limits.status === 'rejected') rows.push(h('div', { class: 'add-err' }, 'The limit is reached — Claude answers again when it resets.'));
+    if (u.limits && u.limits.updated) rows.push(h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:6px' }, 'As of Claude’s last answer, ' + (ago(new Date(u.limits.updated * 1000).toISOString()) || '0s') + ' ago.'));
+    rows.push(h('div', { class: 'sec' }, 'Cost at API prices · today ' + money(u.today || 0) + ' · last 7 days ' + money(u.week || 0)));
+    rows.push(h('div', { class: 'muted', style: 'font-size:11.5px;margin-bottom:8px' }, 'What the same use would cost on the Claude API. On a Claude subscription you do not pay it — it shows where the limit goes.'));
+    (u.days || []).slice(0, 14).forEach(function (d) {
+      var ps = Object.keys(d.projects).sort(function (a, b) { return d.projects[b] - d.projects[a]; });
+      rows.push(h('div', { class: 'kv' }, h('span', { class: 'k mono' }, d.day), h('span', { class: 'v' }, h('b', null, money(d.total)), '  ',
+        h('span', { class: 'muted' }, ps.map(function (n) { return n + ' ' + money(d.projects[n]); }).join(' · ')))));
+    });
+    if (!(u.days || []).length) rows.push(h('div', { class: 'muted' }, 'Nothing yet.'));
+    var md = openModal({ title: 'Claude usage', body: rows, foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+  }
+
   // ------------------------------------------------------------------ palette
   function paletteItems() {
     var items = [];
@@ -2047,7 +2375,12 @@
         items.push({ label: n + ': Claude, past chats…', grp: n, action: function () { pickClaudeSession(n, function (sid, title) { openSession({ kind: 'chat', project: n, resume: sid, title: 'Claude · ' + title }); }); } });
         items.push({ label: n + ': server terminal', grp: n, action: function () { openSession({ kind: 'shell', where: 'server', project: n }); } });
         items.push({ label: n + ': VS Code on server', grp: n, action: function () { openEditor(p, 'server'); } });
+        items.push({ label: n + ': docker containers — logs, restart, ports', grp: n, action: function () { dockerDialog(p); } });
+        items.push({ label: n + ': port forwarding', grp: n, action: function () { tunnelsDialog(p); } });
       }
+      projectTunnels(n).forEach(function (t) {
+        items.push({ label: n + ': ' + (t.on ? 'disconnect ' : 'connect ') + t.name + ' (localhost:' + t.localPort + ')', grp: n, action: function () { toggleTunnel(t); } });
+      });
       if (p.localExists) {
         items.push({ label: n + ': local terminal', grp: n, action: function () { openSession({ kind: 'shell', where: 'local', project: n }); } });
         items.push({ label: n + ': VS Code, local folder', grp: n, action: function () { openEditor(p, 'local'); } });
@@ -2068,6 +2401,7 @@
     items.push({ label: 'Toggle sidebar', grp: 'layout', action: toggleWorkMode });
     items.push({ label: 'Add project…', grp: 'app', action: addManualProject });
     items.push({ label: 'History — what you did', grp: 'app', action: function () { historyDialog(); } });
+    items.push({ label: 'Claude usage — limits and cost', grp: 'app', action: usageDialog });
     items.push({ label: 'Settings', grp: 'app', action: settingsDialog });
     items.push({ label: 'Quit (stop every terminal)', grp: 'app', action: quitApp });
     return items;
@@ -2228,7 +2562,9 @@
     var chain = Promise.resolve();
     list.forEach(function (sp, i) {
       chain = chain.then(function () {
+        if (sp.kind === 'docker' && sp.action === 'rebuild') return null;
         var spec = { kind: sp.kind, where: sp.where, project: sp.project, cmdId: sp.cmdId, title: sp.title, claudeMode: sp.kind === 'claude' ? 'continue' : 'new' };
+        if (sp.kind === 'docker') { spec.container = sp.container; spec.action = sp.action; }
         if ((sp.kind === 'chat' || sp.kind === 'claude') && sp.resume) spec.resume = sp.resume;
         return openSession(spec, { background: i > 0 });
       });
@@ -2336,6 +2672,7 @@
   function wire() {
     $('#btn-palette').addEventListener('click', openPalette);
     $('#update-note').addEventListener('click', updateDialog);
+    $('#usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, [
@@ -2400,6 +2737,13 @@
       refreshGit();
       setInterval(function () { refreshGit(); }, 10000);
       setInterval(function () { refreshStatus(false); }, 20000);
+      refreshDocker();
+      setInterval(refreshDocker, 15000);
+      refreshTunnels();
+      setInterval(refreshTunnels, 5000);
+      refreshUsage();
+      setInterval(refreshUsage, 30000);
+      window.addEventListener('sw-usage', debounce(refreshUsage, 500));
     }).catch(function (e) {
       document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' },
         h('p', { class: 'empty-title' }, 'Cannot reach the app'), h('p', { class: 'muted' }, e.message + ' — run simabworkspace gui'))));

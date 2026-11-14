@@ -136,7 +136,10 @@ function install() {
   global.Node = Node;
   global.window = global;
   global.requestAnimationFrame = (f) => f();
-  global.addEventListener = () => {};
+  const winListeners = {};
+  global.addEventListener = (t, fn) => { (winListeners[t] = winListeners[t] || []).push(fn); };
+  global.dispatchEvent = (ev) => { (winListeners[ev.type] || []).forEach((f) => f(ev)); return true; };
+  if (typeof global.CustomEvent !== 'function') global.CustomEvent = class { constructor(type, o) { this.type = type; this.detail = o && o.detail; } };
   global.innerWidth = 1400; global.innerHeight = 900;
   global.ResizeObserver = class { observe() {} disconnect() {} };
   global.history = { replaceState() {} };

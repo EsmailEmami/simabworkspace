@@ -16,6 +16,11 @@ with each project folder kept in sync both ways.
 - **Run buttons** per project (`npm start`, `docker compose logs -f`, …), local or on
   the server, in any sub-folder.
 - **VS Code** opens the project on the server (Remote-SSH) or the synced local copy.
+- **Docker** per project: the containers on the server with their state and ports —
+  logs, shell, restart, rebuild — and a notice when one crashes.
+- **Port forwarding**: reach a server port on `localhost` (database, API, web page)
+  through SSH with one click; it reconnects by itself.
+- **Claude usage**: the 5-hour and weekly limits in the sidebar, cost per day and project.
 - **History** of what you did, project colours, a minimal dark UI.
 
 Runs on **Linux**, **macOS** and **Windows (WSL)**. The server only needs SSH.

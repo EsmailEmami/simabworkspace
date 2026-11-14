@@ -343,6 +343,8 @@
         self.scrollEnd();
       } else if (m.t === 'e') {
         self.onEvent(m.e);
+      } else if (m.t === 'u') {
+        window.dispatchEvent(new CustomEvent('sw-usage'));
       } else if (m.t === 'busy') {
         self.setBusy(m.busy);
         if (!m.busy && self.phaseKind === 'work') self.setPhase('idle', 'ready');

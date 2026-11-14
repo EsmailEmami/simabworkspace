@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-palette', 'btn-history', 'btn-settings', 'update-note', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-palette', 'btn-history', 'btn-settings', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -45,6 +45,18 @@ const state = {
   ]
 };
 let offline = false;
+const now = Date.now() / 1000;
+const dockerSummary = { summary: { cheshmeh: { total: 3, running: 2, bad: 1 } }, events: [], seq: 0 };
+const containers = [
+  { id: 'a1', name: 'cheshmeh-api-1', image: 'api:dev', state: 'running', health: '', exitCode: 0, startedAt: new Date(Date.now() - 7200e3).toISOString(),
+    restarts: 0, compose: 'cheshmeh', service: 'api', workdir: '/home/esi/cheshmeh/docker/local', configFiles: '', ports: [{ host: 18080, port: 8080, proto: 'tcp', ip: '0.0.0.0' }], proj: 'cheshmeh' },
+  { id: 'b2', name: 'cheshmeh-db-1', image: 'postgres:16', state: 'running', health: 'healthy', exitCode: 0, startedAt: new Date(Date.now() - 60e3).toISOString(),
+    restarts: 0, compose: 'cheshmeh', service: 'db', workdir: '/home/esi/cheshmeh/docker/local', configFiles: '', ports: [{ host: 5432, port: 5432, proto: 'tcp', ip: '0.0.0.0' }], proj: 'cheshmeh' },
+  { id: 'c3', name: 'cheshmeh-worker-1', image: 'api:dev', state: 'exited', health: '', exitCode: 1, startedAt: '', finishedAt: new Date(Date.now() - 300e3).toISOString(),
+    restarts: 4, compose: 'cheshmeh', service: 'worker', workdir: '/home/esi/cheshmeh/docker/local', configFiles: '', ports: [], proj: 'cheshmeh' }];
+let tunnels = [{ project: 'cheshmeh', id: 't1', name: 'db', localPort: 5432, remoteHost: '127.0.0.1', remotePort: 5432, on: true, http: false, state: 'up', error: '' }];
+const usage = { limits: { windows: { five_hour: { used: 0.38, resetsAt: now + 3600 }, seven_day: { used: 0.12, resetsAt: now + 3 * 86400 } }, status: 'allowed', updated: now },
+  today: 1.5, week: 7.25, days: [{ day: '2026-11-14', projects: { cheshmeh: 1.2, shop: 0.3 }, total: 1.5 }] };
 global.fetch = (url, opts) => {
   if (offline) return Promise.reject(new TypeError('Failed to fetch'));
   const method = (opts && opts.method) || 'GET';
@@ -75,6 +87,12 @@ global.fetch = (url, opts) => {
     { t: Date.now() / 1000, kind: 'prompt', project: 'cheshmeh', text: 'باگ پرداخت را درست کن', session: '11111111-2222-3333-4444-555555555555' },
     { t: Date.now() / 1000 - 60, kind: 'run-exit', project: 'cheshmeh', text: 'web', code: 1, seconds: 12.5, cmdId: 'c1' },
     { t: Date.now() / 1000 - 86400 * 3, kind: 'git-commit', project: 'cheshmeh', text: 'payment bug', repo: 'cheshmeh-api-service' }] };
+  else if (url.startsWith('/api/docker-summary')) res = dockerSummary;
+  else if (url === '/api/docker/cheshmeh') res = { containers, error: '' };
+  else if (url === '/api/tunnels') res = { tunnels };
+  else if (url.startsWith('/api/tunnels/cheshmeh/')) { tunnels = tunnels.map((t) => Object.assign({}, t, { on: body.on, state: body.on ? 'connecting' : 'off' })); res = { tunnels }; }
+  else if (url === '/api/tunnels/cheshmeh') { tunnels = body.tunnels.map((t) => Object.assign({ project: 'cheshmeh', state: 'connecting', error: '' }, t, { id: t.id || 'n' + t.remotePort })); res = { tunnels }; }
+  else if (url === '/api/usage') res = usage;
   else if (url.startsWith('/api/git/cheshmeh/diff')) res = { diff: '@@ -1 +1 @@\n-a\n+b' };
   else if (url.startsWith('/api/git/cheshmeh/commit')) res = { output: 'ok', status: Object.assign({}, gitStatus, { files: [gitStatus.files[1]], ahead: 1 }) };
   else if (url === '/api/sessions' && method === 'POST') {
@@ -203,6 +221,86 @@ const tests = {
     // a collapsed project shows the badges on its row too; a clean one shows nothing there
     const heads = q('.proj-head');
     assert.strictEqual(q('.gb', heads[1]).length, 0);
+  },
+
+  async 'docker: the project shows its containers; logs, restart and a crash notice'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const line = q('.dkline')[0];
+    assert.ok(line, 'docker line under the project');
+    assert.strictEqual(line.querySelector('.gb').textContent, '2/3');
+    assert.ok(line.querySelector('.gb').classList.contains('err'), 'a crashed container makes it red');
+    line.dispatch('click');
+    await settle();
+    const modal = q('.modal').pop();
+    const rows = q('.dkrow', modal);
+    assert.deepStrictEqual(rows.map((r) => r.querySelector('b').textContent), ['api', 'db', 'worker']);
+    assert.match(rows[0].textContent, /up 2h/);
+    assert.match(rows[2].textContent, /crashed · exit 1/);
+    assert.ok(!q('button', rows[2]).some((b) => b.textContent === 'Shell'), 'no shell in a stopped container');
+    q('button', rows[0]).find((b) => b.textContent === 'Logs').click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/sessions' && c.method === 'POST').pop();
+    assert.deepStrictEqual([post.body.kind, post.body.project, post.body.container, post.body.action], ['docker', 'cheshmeh', 'cheshmeh-api-1', 'logs']);
+    // a crash reported by the server's watcher appears as a toast after the next refresh
+    dockerSummary.events = [{ seq: 1, project: 'cheshmeh', name: 'cheshmeh-worker-1', service: 'worker', why: 'stopped with exit code 1', t: now }];
+    dockerSummary.seq = 1;
+    q('button', rows[2]).find((b) => b.textContent === 'Start').click();
+    await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/docker/cheshmeh' && c.method === 'POST').pop().body, { container: 'cheshmeh-worker-1', action: 'start' });
+    assert.ok(q('.toast').some((t) => /cheshmeh · worker: stopped with exit code 1/.test(t.textContent)), 'crash toast');
+  },
+
+  async 'ports: a docker port becomes a tunnel; tunnels toggle from the sidebar'() {
+    const modal = q('.modal').pop();
+    const chips = q('.pchip', modal);
+    assert.deepStrictEqual(chips.map((c) => c.classList.contains('on')), [false, true], 'db is already forwarded');
+    chips[0].click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/tunnels/cheshmeh').pop();
+    assert.deepStrictEqual(post.body.tunnels.map((t) => [t.name, t.localPort, t.remotePort, t.on]), [['db', 5432, 5432, true], ['api', 18080, 18080, true]]);
+    document.body.querySelector('#modal-root').replaceChildren();
+    await settle();
+    const lines = q('.tline');
+    assert.deepStrictEqual(lines.map((l) => l.querySelector('.nm').textContent), ['db', 'api']);
+    lines[0].dispatch('click');
+    await settle();
+    const tog = calls.filter((c) => c.url === '/api/tunnels/cheshmeh/t1').pop();
+    assert.deepStrictEqual(tog.body, { on: false });
+  },
+
+  async 'ports dialog edits tunnels'() {
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim() === 'Port forwarding…').click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.strictEqual(q('.cmd-edit', modal).length, 2);
+    q('.btn', modal).find((b) => b.textContent === '+ Add').click();
+    const boxes = q('.cmd-edit', modal);
+    const ins = q('input', boxes[2]);
+    ins[0].value = 'web'; ins[3].value = '4200';
+    q('.btn.primary', modal).pop().click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/tunnels/cheshmeh').pop();
+    assert.deepStrictEqual(post.body.tunnels[2], { name: 'web', localPort: '4200', remoteHost: '127.0.0.1', remotePort: '4200', on: true, http: false });
+    assert.strictEqual(q('.modal').length, 0);
+  },
+
+  async 'Claude usage: limits in the sidebar, details on click'() {
+    const el = document.body.querySelector('#usage');
+    assert.ok(!el.classList.contains('hidden'));
+    assert.deepStrictEqual(q('.um', el).map((m) => m.textContent), ['5h38%', '7d12%']);
+    assert.match(el.title, /5-hour limit: 38% used, resets in (59m|1h 0m)/);
+    el.click();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /today \$1\.50 · last 7 days \$7\.25/);
+    assert.match(modal.textContent, /cheshmeh \$1\.20 · shop \$0\.30/);
+    document.body.querySelector('#modal-root').replaceChildren();
+    // close to the limit → one warning
+    usage.limits.windows.five_hour.used = 0.85;
+    global.dispatchEvent && global.dispatchEvent(new CustomEvent('sw-usage'));
+    await new Promise((r) => setTimeout(r, 700));
+    await settle();
+    assert.ok(q('.toast').some((t) => /85% of the 5-hour limit/.test(t.textContent)));
   },
 
   async 'history lists what you did and can continue a chat'() {

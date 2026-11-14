@@ -3842,7 +3842,8 @@ def serve_web(args: list):
 # ----------------------------------------------------------------------------- HTTP
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml",
-        ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8"}
+        ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8",
+        ".webmanifest": "application/manifest+json"}
 
 
 class Handler(BaseHTTPRequestHandler):

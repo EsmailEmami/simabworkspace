@@ -249,6 +249,7 @@
   // ------------------------------------------------------------------ modals
   var modalStack = [];
   function openModal(opts) {
+    if (typeof compact === 'function' && compact()) closeDrawer();
     var overlay = h('div', { class: 'overlay' });
     var modal = h('div', { class: 'modal ' + (opts.size || '') },
       h('div', { class: 'modal-head' }, opts.title, h('button', { class: 'icon-btn', title: 'Close (Esc)', onclick: function () { close(); } }, '✕')),
@@ -352,7 +353,8 @@
     this.composer = h('div', { class: 'composer hidden' }, this.ta);
     this.ta.addEventListener('keydown', function (e) { self.composerKey(e); });
     this.ta.addEventListener('input', function () { self.ta.style.height = 'auto'; self.ta.style.height = Math.min(160, self.ta.scrollHeight + 2) + 'px'; });
-    this.pane = h('div', { class: 'pane hidden-pane' }, this.body, this.composer);
+    this.keybar = TOUCH.matches ? this.makeKeybar() : null;
+    this.pane = h('div', { class: 'pane hidden-pane' }, this.body, this.composer, this.keybar);
 
     var st = S.settings;
     this.term = new Terminal({
@@ -371,6 +373,11 @@
 
     this.term.onData(function (d) {
       if (!self.alive) { if (d === '\r') self.restart(); return; }
+      if (self.ctrlArmed && d.length === 1) {
+        var c = d.toUpperCase().charCodeAt(0);
+        if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64);
+        self.armCtrl(false);
+      }
       self.send({ t: 'i', d: d });
     });
     this.term.onResize(function (sz) { self.send({ t: 'r', c: sz.cols, r: sz.rows }); });
@@ -389,6 +396,32 @@
     this.applyInfo();
     this.connect();
   }
+
+  // Keys a touch keyboard does not have (Esc, Tab, Ctrl, arrows…), above it.
+  var KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl', null], ['^C', '\x03'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'],
+    ['|', '|'], ['/', '/'], ['-', '-'], ['~', '~'], ['Aa', 'composer']];
+  Tab.prototype.makeKeybar = function () {
+    var self = this;
+    var bar = h('div', { class: 'keybar' });
+    KEYS.forEach(function (k) {
+      var b = h('button', { class: 'kb', title: k[1] === 'composer' ? 'Type in a text box (Persian, autocorrect)' : k[0] }, k[0]);
+      b.addEventListener('pointerdown', function (e) { e.preventDefault(); });      // keep the keyboard open
+      b.addEventListener('click', function () {
+        if (k[0] === 'Ctrl') { self.armCtrl(!self.ctrlArmed); return; }
+        if (k[1] === 'composer') { self.toggleComposer(); return; }
+        if (self.alive) self.send({ t: 'i', d: k[1] });
+        self.term.focus();
+      });
+      if (k[0] === 'Ctrl') self.ctrlBtn = b;
+      bar.append(b);
+    });
+    return bar;
+  };
+  Tab.prototype.armCtrl = function (on) {
+    this.ctrlArmed = on;
+    if (this.ctrlBtn) this.ctrlBtn.classList.toggle('on', on);
+    if (on) this.term.focus();
+  };
 
   Tab.prototype.focus = function () {
     if (!this.composer.classList.contains('hidden') && document.activeElement === this.ta) return;
@@ -676,7 +709,7 @@
       moveTab(dragTab, g, g.tabs.length);
     });
     this.closeBtn = h('button', { class: 'icon-btn', title: 'Close section (tabs move to the next one)', onclick: function () { closeGroup(g); } }, '✕');
-    this.bar = h('div', { class: 'gbar' }, this.tabsEl,
+    this.bar = h('div', { class: 'gbar' }, h('button', { class: 'icon-btn menu-btn', title: 'Projects', onclick: function () { openDrawer(); } }, '☰'), this.tabsEl,
       h('button', { class: 'icon-btn newtab', title: 'New tab (Alt+T)', onclick: function (e) { focusGroup(g); newTabMenu(e.currentTarget); } }, '+'),
       h('span', { class: 'grow' }),
       h('span', { class: 'gtools' },
@@ -750,6 +783,7 @@
   }
 
   function splitGroup(g, side, noRender) {
+    if (compact()) { toast('Split sections need a wider screen', 'warn'); return g; }
     if (S.active && S.active.info.spec.project) L.lastProject = S.active.info.spec.project;
     var dir = side === 'left' || side === 'right' ? 'h' : 'v';
     var before = side === 'left' || side === 'top';
@@ -1105,6 +1139,7 @@
 
   function openSession(spec, opts) {
     opts = opts || {};
+    if (compact()) closeDrawer();
     if (spec.kind === 'chat' && spec.resume) {
       var open = S.tabs.find(function (t) { return t.isChat && !t.gone && (t.sessionId === spec.resume || t.info.spec.resume === spec.resume); });
       if (open) { activate(open); return Promise.resolve(open); }
@@ -1260,9 +1295,15 @@
   function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) ? 'server' : 'local', project: p.name }); }
   function openCode(p) { openEditor(p, hasRemote(p) ? 'server' : 'local'); }
 
+  // In the web version the things that need your own computer stay visible but disabled,
+  // so people know the installed app has them.
+  var APP_ONLY = 'Only in the installed app (on your computer)';
   var WEB_HIDDEN = ['Local terminal', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
   function webItems(items) {
-    return S.web ? items.filter(function (it) { return !(it && it.label && WEB_HIDDEN.indexOf(it.label) >= 0); }) : items;
+    if (!S.web) return items;
+    return items.map(function (it) {
+      return it && it.label && WEB_HIDDEN.indexOf(it.label) >= 0 ? Object.assign({}, it, { disabled: true, k: 'installed app', action: function () {} }) : it;
+    });
   }
 
   function projectMenu(p, anchor) {
@@ -1675,7 +1716,7 @@
     body.append(h('div', { class: 'acts' },
       h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
       h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'Terminal on the server, in the project' : 'Local terminal', onclick: function () { openTerminal(p); } }, 'Terminal'),
-      S.web ? null : h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
+      h('button', { class: 'act', disabled: S.web || (!r && !p.localExists), title: S.web ? 'VS Code — ' + APP_ONLY : r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name))));
     var dk = S.docker[p.name], tn = projectTunnels(p.name), tup = tn.filter(function (t) { return t.state === 'up'; }).length;
     body.append(h('div', { class: 'acts' },
@@ -1683,11 +1724,15 @@
         + (dk && dk.total ? '\n' + dk.running + ' of ' + dk.total + ' running' + (dk.bad ? ', ' + dk.bad + ' with problems' : '') : ''),
         onclick: function () { dockerDialog(p); } }, 'Docker',
         dk && dk.total ? h('span', { class: 'gb dk ' + (dk.bad ? 'err' : dk.running < dk.total ? 'warn' : 'ok') }, dk.running + '/' + dk.total) : null),
-      S.web ? null : h('button', { class: 'act ports', disabled: !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
+      h('button', { class: 'act ports', disabled: S.web || !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
         tn.length ? h('span', { class: 'gb dk ' + (tup ? 'ok' : '') }, tup + '/' + tn.length) : null),
       h('button', { class: 'act', title: 'What you did in this project', onclick: function () { historyDialog(p.name); } }, 'History')));
     p.commands.forEach(function (c) {
-      if (S.web && c.where !== 'server') return;
+      if (S.web && c.where !== 'server') {
+        body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — ' + APP_ONLY },
+          h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'loc')));
+        return;
+      }
       var t = runningCmd(p.name, c.id);
       body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
@@ -1865,14 +1910,14 @@
     };
     var area = h('div');
     var go = h('button', { class: 'btn primary', onclick: submit });
-    var modes = S.web ? [['list', 'Server folder', 'Work on it on the server']]
+    var modes = S.web ? [['list', 'Server folder', 'Work on it on the server'], ['download', 'Sync to my computer', 'installed app only', true], ['upload', 'Upload from my computer', 'installed app only', true]]
       : [['download', 'From the server', 'Download, then keep in sync'], ['upload', 'From this machine', 'Upload, then keep in sync'], ['list', 'Server only', 'No sync, work on the server']];
     var seg = h('div', { class: 'seg' });
     function show(m) {
       mode = m;
       errBox.classList.add('hidden');
       seg.replaceChildren.apply(seg, modes.map(function (x) {
-        return h('button', { class: 'segb' + (x[0] === m ? ' on' : ''), onclick: function () { show(x[0]); } }, h('b', null, x[1]), h('small', null, x[2]));
+        return h('button', { class: 'segb' + (x[0] === m ? ' on' : ''), disabled: !!x[3], title: x[3] ? APP_ONLY : null, onclick: function () { show(x[0]); } }, h('b', null, x[1]), h('small', null, x[2]));
       }));
       area.replaceChildren.apply(area, forms[m]().filter(Boolean));
       go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add' }[m];
@@ -1980,7 +2025,12 @@
       chk('copyOnSelect', 'Copy on select'),
       chk('persianView', 'Show the Persian reading view automatically', 'When Persian text appears in a terminal.'),
       chk('bellNotify', 'Notification when a tab needs you'),
-      chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.')
+      chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
+      h('div', { class: 'sec' }, 'In the installed app'),
+      h('div', { class: 'app-only' },
+        ['Two-way sync of projects with your computer', 'Terminals and run commands on your computer', 'VS Code (local or Remote-SSH)',
+          'Port forwarding to localhost', 'Updates, prerequisites, SSH keys'].map(function (t) { return h('div', null, '· ' + t); }),
+        h('div', { class: 'muted', style: 'margin-top:6px' }, 'Install it on your computer from github.com/EsmailEmami/simabworkspace.'))
     ] : null;
     if (!S.web) api('GET', 'connection').then(function (c) {
       cUser.value = c.user; cHost.value = c.host; cPort.value = c.port;
@@ -2762,6 +2812,30 @@
     });
   })();
 
+  // Small screens: the sidebar is a drawer over the workspace, one section at a time.
+  var COMPACT = window.matchMedia ? window.matchMedia('(max-width: 760px)') : { matches: false };
+  var TOUCH = window.matchMedia ? window.matchMedia('(pointer: coarse)') : { matches: false };
+  function compact() { return !!COMPACT.matches; }
+  function openDrawer() {
+    document.body.classList.add('side-open');
+    if (!$('#side-backdrop')) {
+      var b = h('div', { id: 'side-backdrop', onclick: closeDrawer });
+      document.body.append(b);
+    }
+  }
+  function closeDrawer() {
+    document.body.classList.remove('side-open');
+    var b = $('#side-backdrop');
+    if (b) b.remove();
+  }
+  function applyCompact() {
+    document.body.classList.toggle('compact', compact());
+    document.body.classList.toggle('touch', !!TOUCH.matches);
+    if (compact()) {
+      if (L.groups.length > 1) mergeAll();
+    } else closeDrawer();
+  }
+
   function setWorkMode(on) {
     document.body.classList.toggle('work-mode', on);
     localStorage.setItem('sw-work', on ? '1' : '');
@@ -2860,7 +2934,8 @@
         { label: 'Quit', action: quitApp }
       ]));
     });
-    $('#btn-hide-side').addEventListener('click', function () { setWorkMode(true); });
+    $('#btn-hide-side').addEventListener('click', function () { if (compact()) closeDrawer(); else setWorkMode(true); });
+    if (COMPACT.addEventListener) COMPACT.addEventListener('change', applyCompact);
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
     $('#st-ssh').addEventListener('click', function () { refreshStatus(true); });
     $('#proj-filter').addEventListener('input', function (e) { S.filter = e.target.value; renderProjects(); });
@@ -2909,6 +2984,7 @@
       });
       syncOrder();
       renderLayout();
+      applyCompact();
       var t = S.tabs.find(function (x) { return x.id === want; }) || (L.focused && L.focused.active) || S.tabs[0];
       if (t) activate(t); else renderEmpty();
       refreshStatus(true);

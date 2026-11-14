@@ -45,6 +45,9 @@
 #                       allowed server (checked, never stored); one workspace per user;
 #                       server-only (no local terminals, sync, VS Code, port forwarding).
 #                       Add project: browse the server's folders and pick one.
+#                       Phone/tablet layout (projects drawer, full-screen dialogs, keys
+#                       bar for terminals, add to home screen); installed-app features
+#                       shown disabled on the web. Storage moved to SQLite (simab.db).
 #    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
 #                       (low ports need admin rights) and say so instead of "in use"
 #                       Port forwarding lists the ports open on the server (click to add);

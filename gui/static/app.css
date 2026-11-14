@@ -592,3 +592,52 @@ body.web #st-sync { display: none; }
 .crumb.on { color: var(--text); font-weight: 600; }
 .fpick-foot { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--line); background: var(--bg); }
 .fpick-foot .inp { flex: 1; }
+
+/* ---------------------------------------------------------------- phone & tablet */
+#app { height: 100dvh; }
+.menu-btn { display: none; }
+.cmd.off { opacity: .4; cursor: default; }
+.cmd.off:hover { background: none; color: var(--muted); }
+.segb:disabled { opacity: .45; cursor: default; }
+.app-only { font-size: 12.5px; color: var(--muted); line-height: 1.8; }
+.keybar { flex: none; display: flex; gap: 4px; padding: 5px 6px calc(5px + env(safe-area-inset-bottom)); overflow-x: auto; background: var(--bg2);
+  border-top: 1px solid var(--line); scrollbar-width: none; }
+.keybar::-webkit-scrollbar { display: none; }
+.kb { flex: none; min-width: 40px; height: 34px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg3); font: 13px var(--mono); color: var(--text); }
+.kb:active, .kb.on { background: var(--accent); color: #0c0e12; border-color: var(--accent); }
+
+/* touch: no hover, so what appears on hover is always shown; bigger targets; 16px inputs stop iOS zooming */
+body.touch .tab .x, body.touch .proj-head .icon-btn, body.touch .gtools { opacity: 1; }
+body.touch .tab .x { width: 24px; height: 24px; }
+body.touch input, body.touch textarea, body.touch select, body.touch .cbox textarea, body.touch .composer textarea { font-size: 16px; }
+body.touch .gbar { height: 40px; }
+body.touch .tab { padding: 0 6px 0 12px; }
+body.touch .menu button { padding: 10px 12px; font-size: 14px; }
+body.touch .frow { padding: 10px 12px; }
+body.touch .crumb { padding: 6px 8px; }
+body.touch .proj-head { padding: 9px 8px; }
+body.touch #proj-filter { height: 34px; }
+
+/* compact (phone, tablet upright): the sidebar slides over the workspace */
+body.compact .menu-btn { display: block; align-self: center; margin: 0 2px 0 4px; font-size: 16px; }
+body.compact #resizer, body.compact #show-side, body.compact .gtools { display: none !important; }
+body.compact #sidebar { position: fixed; z-index: 45; top: 0; bottom: 0; left: 0; width: min(330px, 88vw);
+  transform: translateX(-102%); transition: transform .2s ease; box-shadow: 8px 0 30px #000a;
+  padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+body.compact.side-open #sidebar { transform: none; }
+body.compact.work-mode #sidebar { display: flex; }
+#side-backdrop { position: fixed; inset: 0; z-index: 44; background: #0009; }
+body.compact #workspace { padding-top: env(safe-area-inset-top); }
+body.compact .tab { min-width: 70px; max-width: 160px; }
+body.compact .overlay { padding: 0; place-items: stretch; }
+body.compact .modal { width: 100vw; max-height: none; height: 100dvh; border-radius: 0; border: none;
+  padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+body.compact .row { flex-wrap: wrap; }
+body.compact .row > * { min-width: 140px; }
+body.compact #toasts { left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom)); }
+body.compact .toast { max-width: none; }
+body.compact .dkrow { flex-wrap: wrap; }
+body.compact .dkname { flex-basis: 60%; }
+body.compact .dkacts { width: 100%; flex-wrap: wrap; }
+body.compact .chat-composer { padding: 6px 8px calc(8px + env(safe-area-inset-bottom)); }
+body.compact .empty-inner { padding: 0 20px; text-align: center; }

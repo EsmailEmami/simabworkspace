@@ -19,9 +19,12 @@ function skeleton() {
   });
 }
 skeleton();
-global.Terminal = class { constructor(o) { this.options = o; } open() {} loadAddon() {} onData() {} onResize() {} onBell() {} onSelectionChange() {}
-  attachCustomKeyEventHandler() {} focus() {} write() {} dispose() {} };
-const addon = (name) => ({ [name]: class { fit() {} dispose() {} onContextLoss() {} } });
+global.Terminal = class {
+  constructor(o) { (global.terms = global.terms || []).push(this); this.options = Object.assign({}, o); this.cols = o.cols; this.rows = o.rows; this.unicode = {}; this.buffer = { active: { length: 0, getLine: () => null } }; }
+  open() {} loadAddon() {} onData(f) { this.dataCb = f; } onResize() {} onBell() {} onSelectionChange() {}
+  attachCustomKeyEventHandler() {} focus() {} write() {} reset() {} dispose() {} hasSelection() { return false; } getSelection() { return ''; } clear() {}
+};
+const addon = (name) => ({ [name]: { [name]: class { fit() {} findNext() { return true; } findPrevious() { return true; } onContextLoss() {} dispose() {} } } });
 Object.assign(global, addon('FitAddon'), addon('SearchAddon'), addon('WebLinksAddon'), addon('Unicode11Addon'), addon('WebglAddon'));
 
 let signedIn = false;
@@ -104,38 +107,49 @@ const tests = {
     global.location.reload = () => { reloaded++; };
     global.fetch = fetch0;
     skeleton();
+    // this time: a phone (narrow touch screen)
+    global.matchMedia = (q) => ({ matches: true, media: q, addEventListener() {} });
     for (const f of ['app.js', 'chat.js']) delete require.cache[require.resolve(path.join(ROOT, 'gui/static', f))];
     require(path.join(ROOT, 'gui/static/app.js'));
     require(path.join(ROOT, 'gui/static/chat.js'));
     await settle();
     assert.strictEqual(q('.login').length, 0);
     q('.proj-head')[0].dispatch('click');
-    const acts = q('.act').map((b) => b.textContent);
-    assert.deepStrictEqual(acts, ['Claude', 'Terminal', 'Git', 'Docker', 'History'], 'no Code, no Ports');
-    assert.deepStrictEqual(q('.cmd').map((e) => e.querySelector('.nm').textContent), ['logs'], 'only server run commands');
+    const acts = q('.act').map((b) => [b.textContent, !!b.disabled]);
+    assert.deepStrictEqual(acts, [['Claude', false], ['Terminal', false], ['Code', true], ['Git', false], ['Docker', false], ['Ports', true], ['History', false]],
+      'Code and Ports are shown, disabled');
+    assert.match(q('.act').find((b) => b.textContent === 'Code').getAttribute('title'), /installed app/);
+    assert.deepStrictEqual(q('.cmd').map((e) => [e.querySelector('.nm').textContent, e.classList.contains('off')]), [['web', true], ['logs', false]],
+      'a local run command is shown, disabled');
     document.body.querySelector('#btn-settings').click();
     const menu = q('button').map((b) => b.textContent.trim());
     assert.ok(menu.includes('Sign out'));
-    assert.ok(!menu.includes('Quit') && !menu.includes('Check for updates'));
+    const quit = q('button').find((b) => b.textContent.trim().indexOf('Quit') === 0);
+    assert.ok(quit.disabled && /installed app/.test(quit.textContent), 'Quit shown disabled');
     q('button').find((b) => b.textContent.trim() === 'Settings…').click();
     await settle();
     const modal = q('.modal').pop();
     assert.match(modal.textContent, /Signed in as esi@127\.0\.0\.1/);
-    assert.ok(!/Uninstall|SSH key|Sync service/.test(modal.textContent));
+    assert.ok(!q('button', modal).some((b) => /Uninstall|New key|Save & test|Stop service/.test(b.textContent)), 'no local setup controls');
+    assert.match(modal.textContent, /In the installed app.*Two-way sync/);
     assert.ok(!calls.some((c) => c.url === '/api/connection' || c.url.startsWith('/api/update') || c.url === '/api/tunnels'), 'nothing local is asked for');
     document.body.querySelector('#modal-root').replaceChildren();
     // the project menu has no local terminal / VS Code / port forwarding
     q('.proj-head')[0].querySelector('.icon-btn').click();
     const items = q('button').map((b) => b.textContent.trim());
     assert.ok(items.includes('Server terminal'));
-    assert.ok(!items.some((t) => /Local terminal|VS Code|Port forwarding/.test(t)));
+    for (const name of ['Local terminal', 'VS Code on server', 'Port forwarding…']) {
+      const b = q('button').find((x) => x.textContent.trim().indexOf(name) === 0);
+      assert.ok(b && b.disabled, name + ' shown, disabled');
+    }
     // add a project: browse the server's folders and pick one
     document.body.querySelector('#modal-root').replaceChildren();
     q('.add-link').find((b) => /add project/.test(b.textContent)).click();
     await settle();
     const addModal = q('.modal').pop();
     assert.ok(!/null/.test(addModal.textContent), 'no stray "null"');
-    assert.deepStrictEqual(q('.segb', addModal).map((b) => b.querySelector('b').textContent), ['Server folder']);
+    assert.deepStrictEqual(q('.segb', addModal).map((b) => [b.querySelector('b').textContent, !!b.disabled]),
+      [['Server folder', false], ['Sync to my computer', true], ['Upload from my computer', true]]);
     assert.deepStrictEqual(q('.fname', addModal).map((e) => e.textContent), ['..', 'cheshmeh', 'hamava'], 'hidden folders are hidden');
     q('.frow', addModal).find((r) => r.querySelector('.fname').textContent === 'cheshmeh').click();
     await settle();
@@ -151,13 +165,34 @@ const tests = {
     await settle();
     const post = calls.filter((c) => c.url === '/api/sessions').pop();
     assert.ok(post, 'session asked for');
+    // phone: drawer menu, one section, keys a touch keyboard lacks
+    assert.ok(document.body.classList.contains('compact') && document.body.classList.contains('touch'));
+    q('.menu-btn')[0].click();
+    assert.ok(document.body.classList.contains('side-open'), 'the ☰ button opens the projects drawer');
+    q('#side-backdrop')[0].click();
+    assert.ok(!document.body.classList.contains('side-open'));
+    const keys = q('.kb').map((b) => b.textContent);
+    assert.deepStrictEqual(keys.slice(0, 8), ['Esc', 'Tab', 'Ctrl', '^C', '↑', '↓', '←', '→']);
+    const ws = global.sockets[global.sockets.length - 1];
+    ws.onopen && ws.onopen();
+    q('.kb').find((b) => b.textContent === 'Esc').click();
+    assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: '\x1b' });
+    assert.match(ws.url, /^wss:/);
+    // Ctrl, then a letter on the touch keyboard → the control key
+    q('.kb').find((b) => b.textContent === 'Ctrl').click();
+    assert.ok(q('.kb').find((b) => b.textContent === 'Ctrl').classList.contains('on'));
+    global.terms[global.terms.length - 1].dataCb('d');
+    assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: '\x04' });
+    assert.ok(!q('.kb').find((b) => b.textContent === 'Ctrl').classList.contains('on'), 'Ctrl is used once');
+    global.terms[global.terms.length - 1].dataCb('d');
+    assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: 'd' });
   }
 };
 
 (async () => {
   let failed = 0;
   for (const [name, fn] of Object.entries(tests)) {
-    try { await fn(); console.log('ok   ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String(e.stack || e).split('\n').slice(0, 5).join('\n     ')); }
+    try { await fn(); console.log('ok   ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String(e.stack || e).split('\n').slice(0, 30).join('\n     ')); }
   }
   process.exit(failed ? 1 : 0);
 })();

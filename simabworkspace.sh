@@ -39,6 +39,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.18.1 2026-11-14  setup never looks frozen: numbered steps, sudo asked first, a
+#                       spinner with seconds and the latest output line for long steps
 #    1.18.0 2026-11-14  updates: the window says when a new version is out and installs it
 #                       in place (restarts and reloads by itself); `simabworkspace update`
 #    1.17.0 2026-11-14  chat: send while Claude works (queued, picked up next), live list
@@ -117,7 +119,7 @@
 
 set -u -o pipefail
 
-VERSION="1.18.0"
+VERSION="1.18.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -213,6 +215,43 @@ if [ "$OS" = "Linux" ] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; t
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="${SW_SUDO:-sudo}"; fi
 
+# run_step "label" command…  — long steps never look frozen: a spinner, the seconds
+# spent and the latest output line while it runs; the full output only on failure.
+run_step() {
+  local label="$1"; shift
+  local log start pid rc last i=0 frames='|/-\'
+  log=$(mktemp); start=$(date +%s)
+  "$@" </dev/null >"$log" 2>&1 &
+  pid=$!
+  if [ -t 1 ]; then
+    while kill -0 "$pid" 2>/dev/null; do
+      last=$(tail -n 1 "$log" 2>/dev/null | tr -d '\r' | tr -s ' ' | cut -c1-60)
+      printf '\r\033[K  %s %s  %ss  %s%s%s' "${frames:$((i % 4)):1}" "$label" "$(( $(date +%s) - start ))" "$C_DIM" "$last" "$C_0"
+      i=$((i + 1))
+      sleep 0.25
+    done
+    printf '\r\033[K'
+  fi
+  wait "$pid"; rc=$?
+  if [ $rc -eq 0 ]; then
+    ok "$label ($(( $(date +%s) - start ))s)"
+  else
+    err "$label — failed:"
+    tail -n 15 "$log" | sed 's/^/      /' >&2
+  fi
+  rm -f "$log"
+  return $rc
+}
+
+# ask for the sudo password up front (in the foreground), so the steps after it can run quietly
+sudo_ready() {
+  [ -n "$SUDO" ] || return 0
+  sudo -n true 2>/dev/null && return 0
+  [ -n "${SW_SUDO:-}" ] && { $SUDO -v; return; }
+  info "Administrator password needed to install packages (sudo):"
+  $SUDO -v
+}
+
 pkg_install() {
   # pkg_install <generic names...>  (curl tar gzip ssh jq)
   local pkgs=() p
@@ -229,19 +268,23 @@ pkg_install() {
   info "Installing: ${pkgs[*]}"
   if [ "$OS" = "Darwin" ]; then
     command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS: https://brew.sh"
-    brew install "${pkgs[@]}"
-  elif command -v apt-get >/dev/null 2>&1; then
-    $SUDO apt-get update -qq && $SUDO apt-get install -y -qq "${pkgs[@]}"
+    run_step "brew install ${pkgs[*]}" brew install "${pkgs[@]}"
+    return
+  fi
+  sudo_ready || { err "sudo was not accepted."; return 1; }
+  if command -v apt-get >/dev/null 2>&1; then
+    run_step "Updating the package list" $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update \
+      && run_step "Installing ${pkgs[*]}" $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y -q "${pkgs[@]}"
+    run_step "Installing ${pkgs[*]}" $SUDO dnf install -y "${pkgs[@]}"
   elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y -q "${pkgs[@]}"
+    run_step "Installing ${pkgs[*]}" $SUDO yum install -y "${pkgs[@]}"
   elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -Sy --noconfirm --needed "${pkgs[@]}"
+    run_step "Installing ${pkgs[*]}" $SUDO pacman -Sy --noconfirm --needed "${pkgs[@]}"
   elif command -v zypper >/dev/null 2>&1; then
-    $SUDO zypper -q install -y "${pkgs[@]}"
+    run_step "Installing ${pkgs[*]}" $SUDO zypper --non-interactive install "${pkgs[@]}"
   elif command -v apk >/dev/null 2>&1; then
-    $SUDO apk add --no-cache "${pkgs[@]}"
+    run_step "Installing ${pkgs[*]}" $SUDO apk add --no-cache "${pkgs[@]}"
   else
     die "No supported package manager found. Install manually: ${pkgs[*]}"
   fi
@@ -301,7 +344,8 @@ install_jq() {
   if [ -n "$arch" ] && [ -n "$os" ]; then
     url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-$os-$arch"
     mkdir -p "$BIN_DIR"
-    if curl -fsSL --retry 2 --max-time 120 "$url" -o "$BIN_DIR/jq.tmp" && chmod +x "$BIN_DIR/jq.tmp" && "$BIN_DIR/jq.tmp" --version >/dev/null 2>&1; then
+    if run_step "Downloading jq" curl -fSL --retry 2 --max-time 120 "$url" -o "$BIN_DIR/jq.tmp" \
+       && chmod +x "$BIN_DIR/jq.tmp" && "$BIN_DIR/jq.tmp" --version >/dev/null 2>&1; then
       mv -f "$BIN_DIR/jq.tmp" "$BIN_DIR/jq"; ensure_path; ok "jq installed: $("$BIN_DIR/jq" --version)"; return 0
     fi
     rm -f "$BIN_DIR/jq.tmp"
@@ -1423,11 +1467,17 @@ uninstall_all() {
 }
 
 run_setup() {
+  printf '\n  %s[1/4]%s Tools this machine needs\n' "$C_BOLD$C_C" "$C_0"
   check_prereqs
-  [ -z "$SSH_USER" ] && configure
+  printf '\n  %s[2/4]%s Your server\n' "$C_BOLD$C_C" "$C_0"
+  if [ -z "$SSH_USER" ] || [ -z "$SSH_HOST" ]; then configure; else ok "Server: $SSH_USER@$SSH_HOST:$SSH_PORT"; fi
+  printf '\n  %s[3/4]%s SSH key (log in without a password)\n' "$C_BOLD$C_C" "$C_0"
   setup_ssh || true
-  daemon_start
+  printf '\n  %s[4/4]%s Sync service and the simabworkspace command\n' "$C_BOLD$C_C" "$C_0"
+  run_step "Starting the sync service" mutagen daemon start || true
   self_install
+  printf '\n'
+  ok "Setup finished."
 }
 
 # item <key> <label> <width>  -> "  1  Add project" padded to width

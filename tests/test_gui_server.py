@@ -1453,6 +1453,45 @@ class Updates(TmpHome):
         httpd.server_close()
 
 
+class BashProgress(unittest.TestCase):
+    """Long setup steps show they are alive (spinner, seconds, latest output line)."""
+
+    def prog(self, body):
+        script = (ROOT / "simabworkspace.sh").read_text()
+        fn = re.search(r"^run_step\(\) \{.*?^\}", script, re.S | re.M).group(0)
+        return "C_DIM=; C_0=\nok() { echo \"OK $*\"; }\nerr() { echo \"ERR $*\" >&2; }\n" + fn + "\n" + body
+
+    def test_without_a_terminal(self):
+        r = subprocess.run(["bash", "-c", self.prog("run_step 'Installing jq' bash -c 'echo Unpacking jq; sleep 0.3'")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertRegex(r.stdout, r"^OK Installing jq \(\d+s\)\n$")
+        r = subprocess.run(["bash", "-c", self.prog("run_step 'Installing x' bash -c 'echo E: Unable to locate package x; exit 100'")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 100)
+        self.assertIn("ERR Installing x — failed:", r.stderr)
+        self.assertIn("Unable to locate package x", r.stderr)
+
+    def test_in_a_terminal_it_shows_progress(self):
+        import pty
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execvp("bash", ["bash", "-c", self.prog("run_step 'Updating the package list' bash -c 'echo Get:1 http://archive jammy InRelease; sleep 1.2; echo Reading package lists'")])
+        out = b""
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.waitpid(pid, 0)
+        text = out.decode("utf-8", "replace")
+        self.assertIn("Updating the package list  0s", text)
+        self.assertIn("Get:1 http://archive jammy InRelease", text)       # the user sees it moving
+        self.assertRegex(text, r"Updating the package list  1s")
+        self.assertIn("OK Updating the package list", text)
+
+
 class BashScript(unittest.TestCase):
     def test_syntax_and_gui_command(self):
         import subprocess
@@ -1460,7 +1499,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.18.0"', text)
+        self.assertIn('VERSION="1.18.1"', text)
 
 
 if __name__ == "__main__":

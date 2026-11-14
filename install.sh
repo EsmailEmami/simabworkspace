@@ -32,7 +32,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 say "Downloading Simab Workspace ($VERSION)…"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --retry 3 "$URL" -o "$tmp/install.sh" || fail "Download failed: $URL"
+  if [ -t 2 ]; then curl -fL --retry 3 --progress-bar "$URL" -o "$tmp/install.sh"; else curl -fsSL --retry 3 "$URL" -o "$tmp/install.sh"; fi \
+    || fail "Download failed: $URL"
 elif command -v wget >/dev/null 2>&1; then
   wget -q -O "$tmp/install.sh" "$URL" || fail "Download failed: $URL"
 else

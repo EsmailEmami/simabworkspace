@@ -290,7 +290,7 @@ class Tunnels(TmpHome):
             self.assertEqual(started, [5432])
             self.assertEqual([t["name"] for t in out], ["db", "web"])
             ids = [t["id"] for t in out]
-            self.assertEqual(json.loads(self.store.path.read_text())["projects"]["cheshmeh"]["tunnels"][0]["on"], True)
+            self.assertEqual(sw.Store(self.store.path).data["projects"]["cheshmeh"]["tunnels"][0]["on"], True)
             self.app.toggle_tunnel("cheshmeh", ids[1], True)
             self.assertEqual(started, [5432, 4200])
             self.app.toggle_tunnel("cheshmeh", ids[0], False)
@@ -349,7 +349,6 @@ class ClaudeUsage(TmpHome):
         self.assertEqual(s["days"][0], {"day": today, "projects": {"cheshmeh": 1.75, "home": 0.25}, "total": 2.0})
         self.assertEqual(s["week"], 2.0)
         u.limits({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.4, "resetsAt": int(time.time()) + 600}}})
-        u._save(force=True)
         again = sw.Usage(Path(self.tmp.name) / "usage.json").summary()
         self.assertEqual(again["limits"]["windows"]["five_hour"]["used"], 0.4)
         self.assertEqual(again["today"], 2.0)
@@ -451,7 +450,9 @@ class WebVersion(unittest.TestCase):
         self.assertTrue(app.conf.key.startswith(str(self.root)))
         self.assertIsNone(self.gate.app_for("forged"))
         self.assertIs(self.gate.app_for(self.login()), app)                       # same user@server, same workspace
-        self.assertNotIn(tok, (self.root / "sessions.json").read_text())          # only hashes are stored
+        stored = [r[0] for r in self.gate.db.rows("SELECT hash FROM web_sessions")]
+        self.assertNotIn(tok, stored)                                              # only hashes are stored
+        self.assertEqual(len(stored), 2)
         # sessions survive a restart; signing out ends one
         gate2 = sw.WebGate(self.root, ["127.0.0.1:22"], verify=self.verify, start_loops=False)
         self.assertIsNotNone(gate2.app_for(tok))
@@ -460,9 +461,9 @@ class WebVersion(unittest.TestCase):
 
     def test_expired_and_idle_sessions(self):
         tok = self.login()
-        rec = next(iter(self.gate.sessions.values()))
-        rec["last"] = time.time() - 8 * 86400
+        self.gate.db.run("UPDATE web_sessions SET last = ?", (time.time() - 8 * 86400,))
         self.assertIsNone(self.gate.app_for(tok))
+        self.assertEqual(self.gate.db.rows("SELECT count(*) FROM web_sessions")[0][0], 0)
 
     def test_only_allowed_servers_and_valid_input(self):
         with self.assertRaises(sw.ApiError) as cm:
@@ -642,3 +643,62 @@ class WebHttp(unittest.TestCase):
         port = self.serve(cert, key)
         st, d, _ = self.req(port, "GET", "/api/web-info", tls=True)
         self.assertEqual((st, d["web"]), (200, True))
+
+
+class SqliteStorage(unittest.TestCase):
+    """Everything is kept in simab.db; files of older versions are imported once."""
+
+    def test_old_json_files_are_imported_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "gui.json").write_text(json.dumps({"settings": {"fontSize": 17, "bogus": 1}, "lastTabs": [{"kind": "shell"}],
+                                                    "projects": {"p": {"commands": [{"id": "abcd", "name": "web"}], "color": "#123456"}},
+                                                    "manual": [{"name": "m2", "remote": "/b"}, {"name": "m1", "remote": "/a"}]}))
+            (d / "activity.jsonl").write_text("\n".join([json.dumps({"t": 1, "kind": "chat", "project": "p", "text": "سلام", "session": "x"}),
+                                                         "broken", json.dumps({"t": 2, "kind": "run", "project": "q", "text": "web"})]) + "\n")
+            (d / "usage.json").write_text(json.dumps({"limits": {"windows": {}, "status": "allowed"}, "days": {"2026-11-13": {"p": 1.5}}}))
+            app = sw.App(sw.Store(d / "simab.db"), sw.ServerConf("u", "h"))
+            self.assertEqual(app.store.settings["fontSize"], 17)
+            self.assertNotIn("bogus", app.store.settings)
+            self.assertEqual(app.store.data["projects"]["p"]["color"], "#123456")
+            self.assertEqual([m["name"] for m in app.store.manual()], ["m2", "m1"])           # order kept
+            self.assertEqual(app.store.data["lastTabs"], [{"kind": "shell"}])
+            items = app.activity.list()
+            self.assertEqual([(i["kind"], i["text"]) for i in items], [("run", "web"), ("chat", "سلام")])
+            self.assertEqual(items[1]["session"], "x")
+            self.assertEqual(app.usage.summary()["days"][0], {"day": "2026-11-13", "projects": {"p": 1.5}, "total": 1.5})
+            for f in ("gui.json", "activity.jsonl", "usage.json"):
+                self.assertFalse((d / f).exists())
+                self.assertTrue((d / (f + ".migrated")).exists())
+            # a second start does not import again, even if an old file shows up again
+            (d / "activity.jsonl").write_text(json.dumps({"t": 3, "kind": "x"}) + "\n")
+            again = sw.Activity(d / "simab.db")
+            self.assertEqual(len(again.list()), 2)
+            self.assertEqual(oct((d / "simab.db").stat().st_mode & 0o777), "0o600")
+
+    def test_history_search_and_project_filter(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = sw.Activity(Path(d) / "simab.db")
+            a.add("prompt", "cheshmeh", "باگ پرداخت را درست کن", session="s1")
+            a.add("run", "shop", "web", code=0)
+            a.add("git-commit", "cheshmeh", "Payment fix")
+            self.assertEqual([i["text"] for i in a.list(project="cheshmeh")], ["Payment fix", "باگ پرداخت را درست کن"])
+            self.assertEqual([i["text"] for i in a.list(query="پرداخت")], ["باگ پرداخت را درست کن"])
+            self.assertEqual([i["text"] for i in a.list(query="PAYMENT")], ["Payment fix"])
+            self.assertEqual([i["kind"] for i in a.list(query="shop")], ["run"])
+            self.assertEqual(a.list(limit=1)[0]["kind"], "git-commit")
+            self.assertEqual(a.list(query="web")[0]["code"], 0)
+
+    def test_two_threads_write_at_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = sw.Activity(Path(d) / "simab.db")
+            store = sw.Store(Path(d) / "simab.db")
+            def work(n):
+                for i in range(50):
+                    a.add("run", f"p{n}", str(i))
+                    store.set_color(f"p{n}", "#00000" + str(i % 10))
+            ts = [threading.Thread(target=work, args=(n,)) for n in range(4)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            self.assertEqual(len(a.list(limit=5000)), 200)
+            self.assertEqual(sorted(sw.Store(Path(d) / "simab.db").data["projects"]), ["p0", "p1", "p2", "p3"])

@@ -31,6 +31,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -40,6 +41,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -133,7 +135,112 @@ def load_server_conf() -> ServerConf:
                       c.get("SSH_PORT") or os.environ.get("SIMAB_PORT", "22"), c.get("SSH_KEY", ""))
 
 
-# ----------------------------------------------------------------------------- GUI store (gui.json)
+# ----------------------------------------------------------------------------- SQLite
+# One simab.db per workspace (the laptop app: ~/.config/simabworkspace/simab.db; the web
+# version: one per signed-in user@server, plus gate.db for sign-ins). Older versions kept
+# JSON files: they are imported once and renamed to *.migrated.
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS manual (name TEXT PRIMARY KEY, pos INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, t REAL NOT NULL, kind TEXT NOT NULL,
+    project TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', extra TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS activity_project ON activity (project, id);
+CREATE TABLE IF NOT EXISTS cost (day TEXT NOT NULL, project TEXT NOT NULL, usd REAL NOT NULL, PRIMARY KEY (day, project));
+CREATE TABLE IF NOT EXISTS web_sessions (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, exp REAL NOT NULL, last REAL NOT NULL, ip TEXT NOT NULL DEFAULT '');
+"""
+_DBS = {}
+_DBS_LOCK = threading.Lock()
+
+
+class Database:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
+        self.conn = sqlite3.connect(str(self.path), timeout=15, isolation_level=None, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=15000")
+        self.conn.executescript(SCHEMA)
+        for f in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            try:
+                os.chmod(f, 0o600)
+            except OSError:
+                pass
+
+    def rows(self, sql: str, args=()) -> list:
+        with self.lock:
+            return self.conn.execute(sql, args).fetchall()
+
+    def run(self, sql: str, args=()):
+        with self.lock:
+            return self.conn.execute(sql, args)
+
+    @contextmanager
+    def tx(self):
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
+
+    def get(self, key: str, default=None):
+        r = self.rows("SELECT value FROM state WHERE key = ?", (key,))
+        if not r:
+            return default
+        try:
+            return json.loads(r[0][0])
+        except ValueError:
+            return default
+
+    def put(self, key: str, value, conn=None):
+        (conn or self).execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                               (key, json.dumps(value, ensure_ascii=False)))
+
+    def execute(self, sql, args=()):
+        return self.run(sql, args)
+
+    def import_once(self, name: str, legacy, load) -> bool:
+        """Import an old JSON file once (load(path) does the work); then rename it *.migrated."""
+        with self.lock:
+            if self.rows("SELECT 1 FROM meta WHERE key = ?", ("imported:" + name,)):
+                return False
+            done = False
+            if legacy is not None and Path(legacy).is_file():
+                load(Path(legacy))
+                done = True
+                try:
+                    os.replace(legacy, str(legacy) + ".migrated")
+                except OSError:
+                    pass
+            self.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", ("imported:" + name, str(time.time())))
+            return done
+
+
+def open_db(path: Path) -> Database:
+    key = str(Path(path).expanduser().resolve())
+    with _DBS_LOCK:
+        db = _DBS.get(key)
+        if db is None:
+            db = _DBS[key] = Database(Path(key))
+        return db
+
+
+def db_and_legacy(path, default_legacy: str):
+    """Constructors accept the database file, or (older callers, tests) the old JSON file next to it."""
+    path = Path(path) if path else config_dir() / "simab.db"
+    if path.suffix in (".json", ".jsonl"):
+        return open_db(path.with_name("simab.db")), path
+    return open_db(path), path.with_name(default_legacy)
+
+
+# ----------------------------------------------------------------------------- GUI store (settings, projects)
 DEFAULT_SETTINGS = {
     "fontSize": 14,
     "fontFamily": "",
@@ -202,17 +309,44 @@ def valid_name(name: str) -> bool:
 
 class Store:
     def __init__(self, path: Path = None):
-        self.path = path or (config_dir() / "gui.json")
+        self.db, legacy = db_and_legacy(path, "gui.json")
+        self.path = self.db.path
         self.lock = threading.RLock()
-        self.data = self._load()
+        imported = {}
 
-    def _load(self) -> dict:
-        try:
-            d = json.loads(self.path.read_text())
-            if not isinstance(d, dict):
-                d = {}
-        except (OSError, ValueError):
-            d = {}
+        def load(f):
+            try:
+                d = json.loads(f.read_text())
+                imported.update(d if isinstance(d, dict) else {})
+            except (OSError, ValueError):
+                pass
+        self.db.import_once("gui.json", legacy, load)
+        self.data = self._load(imported or None)
+        if imported:
+            self.save()
+
+    def _read(self) -> dict:
+        d = {"settings": self.db.get("settings", {}), "lastTabs": self.db.get("lastTabs", [])}
+        d["projects"] = {}
+        for name, data in self.db.rows("SELECT name, data FROM projects"):
+            try:
+                d["projects"][name] = json.loads(data)
+            except ValueError:
+                pass
+        d["manual"] = []
+        for (data,) in self.db.rows("SELECT data FROM manual ORDER BY pos"):
+            try:
+                d["manual"].append(json.loads(data))
+            except ValueError:
+                pass
+        return d
+
+    def _load(self, imported: dict = None) -> dict:
+        d = imported if imported is not None else self._read()
+        if not isinstance(d.get("projects"), dict):
+            d["projects"] = {}
+        if not isinstance(d.get("manual"), list):
+            d["manual"] = []
         s = dict(DEFAULT_SETTINGS)
         s.update({k: v for k, v in (d.get("settings") or {}).items() if k in DEFAULT_SETTINGS})
         d["settings"] = s
@@ -222,12 +356,16 @@ class Store:
         return d
 
     def save(self):
-        with self.lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2))
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
+        with self.lock, self.db.tx() as c:
+            self.db.put("settings", self.data["settings"], c)
+            self.db.put("lastTabs", self.data.get("lastTabs") or [], c)
+            c.execute("DELETE FROM projects")
+            c.executemany("INSERT INTO projects (name, data) VALUES (?, ?)",
+                          [(k, json.dumps(v, ensure_ascii=False)) for k, v in self.data["projects"].items()])
+            c.execute("DELETE FROM manual")
+            c.executemany("INSERT INTO manual (name, pos, data) VALUES (?, ?, ?)",
+                          [(m.get("name"), i, json.dumps(m, ensure_ascii=False)) for i, m in enumerate(self.data["manual"])
+                           if isinstance(m, dict) and m.get("name")])
 
     # settings
     @property
@@ -1856,48 +1994,61 @@ class GitRepo:
 
 # ----------------------------------------------------------------------------- activity history
 class Activity:
-    """What you did, newest last: one JSON object per line in activity.jsonl."""
-    LIMIT = 5000
+    """What you did (newest first when listed), in the activity table."""
+    LIMIT = 50000
 
     def __init__(self, path: Path = None):
-        self.path = path or (config_dir() / "activity.jsonl")
-        self.lock = threading.Lock()
+        self.db, legacy = db_and_legacy(path, "activity.jsonl")
+        self.path = self.db.path
+
+        def load(f):
+            rows = []
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    it = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(it, dict) and it.get("kind"):
+                    rows.append(self._row(it))
+            with self.db.tx() as c:
+                c.executemany("INSERT INTO activity (t, kind, project, text, extra) VALUES (?, ?, ?, ?, ?)", rows)
+        self.db.import_once("activity.jsonl", legacy, load)
+
+    @staticmethod
+    def _row(it: dict) -> tuple:
+        extra = {k: v for k, v in it.items() if k not in ("t", "kind", "project", "text")}
+        return (float(it.get("t") or 0), str(it.get("kind")), str(it.get("project") or ""), str(it.get("text") or "")[:500],
+                json.dumps(extra, ensure_ascii=False))
 
     def add(self, kind: str, project: str = "", text: str = "", **extra):
         item = {"t": round(time.time(), 3), "kind": kind, "project": project or "", "text": (text or "")[:500]}
         item.update({k: v for k, v in extra.items() if v not in (None, "")})
-        line = json.dumps(item, ensure_ascii=False) + "\n"
-        with self.lock:
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(line)
-                os.chmod(self.path, 0o600)
-                if self.path.stat().st_size > 2_000_000:
-                    lines = self.path.read_text(encoding="utf-8").splitlines()[-self.LIMIT:]
-                    self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            except OSError:
-                pass
+        try:
+            cur = self.db.run("INSERT INTO activity (t, kind, project, text, extra) VALUES (?, ?, ?, ?, ?)", self._row(item))
+            if cur.lastrowid and cur.lastrowid % 1000 == 0:
+                self.db.run("DELETE FROM activity WHERE id <= ?", (cur.lastrowid - self.LIMIT,))
+        except sqlite3.Error as e:
+            log_line(f"history: {e}")
         return item
 
     def list(self, limit=500, project="", query="") -> list:
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        out, q = [], (query or "").lower()
-        for line in reversed(lines):
+        sql, args = "SELECT t, kind, project, text, extra FROM activity WHERE 1=1", []
+        if project:
+            sql += " AND project = ?"
+            args.append(project)
+        if query:
+            sql += " AND instr(lower(text || ' ' || project || ' ' || kind), ?) > 0"
+            args.append(query.lower())
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 5000)))
+        out = []
+        for t, kind, proj, text, extra in self.db.rows(sql, args):
+            it = {"t": t, "kind": kind, "project": proj, "text": text}
             try:
-                it = json.loads(line)
+                it.update(json.loads(extra))
             except ValueError:
-                continue
-            if project and it.get("project") != project:
-                continue
-            if q and q not in (it.get("text", "") + " " + it.get("project", "") + " " + it.get("kind", "")).lower():
-                continue
+                pass
             out.append(it)
-            if len(out) >= limit:
-                break
         return out
 
 
@@ -2179,52 +2330,50 @@ class Usage:
     KEEP_DAYS = 60
 
     def __init__(self, path: Path = None):
-        self.path = path or (config_dir() / "usage.json")
+        self.db, legacy = db_and_legacy(path, "usage.json")
+        self.path = self.db.path
         self.lock = threading.Lock()
-        try:
-            d = json.loads(self.path.read_text())
-            d = d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            d = {}
-        self.data = {"limits": d.get("limits") if isinstance(d.get("limits"), dict) else {},
-                     "days": d.get("days") if isinstance(d.get("days"), dict) else {}}
-        self._dirty = 0.0
 
-    def _save(self, force=False):
-        if not force and time.time() - self._dirty < 5:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data))
-            os.replace(tmp, self.path)
-            self._dirty = time.time()
-        except OSError:
-            pass
+        def load(f):
+            try:
+                d = json.loads(f.read_text())
+            except (OSError, ValueError):
+                return
+            if not isinstance(d, dict):
+                return
+            if isinstance(d.get("limits"), dict):
+                self.db.put("claudeLimits", d["limits"])
+            for day, per in (d.get("days") or {}).items():
+                for proj, usd in (per or {}).items():
+                    if isinstance(usd, (int, float)):
+                        self._add(day, proj, usd)
+        self.db.import_once("usage.json", legacy, load)
+
+    def _add(self, day, project, usd):
+        self.db.run("INSERT INTO cost (day, project, usd) VALUES (?, ?, ?) "
+                    "ON CONFLICT(day, project) DO UPDATE SET usd = usd + excluded.usd", (day, project, float(usd)))
 
     def limits(self, info: dict):
         with self.lock:
-            self.data["limits"] = merge_limits(self.data["limits"], info)
-            self._save()
+            self.db.put("claudeLimits", merge_limits(self.db.get("claudeLimits", {}), info))
 
     def cost(self, project: str, usd: float, day: str = None):
-        if not isinstance(usd, (int, float)) or usd <= 0:
+        if not isinstance(usd, (int, float)) or isinstance(usd, bool) or usd <= 0:
             return
-        day = day or time.strftime("%Y-%m-%d")
         with self.lock:
-            d = self.data["days"].setdefault(day, {})
-            d[project or "home"] = round(d.get(project or "home", 0.0) + float(usd), 6)
-            for old in sorted(self.data["days"])[:-self.KEEP_DAYS]:
-                self.data["days"].pop(old, None)
-            self._save(force=True)
+            self._add(day or time.strftime("%Y-%m-%d"), project or "home", usd)
+            self.db.run("DELETE FROM cost WHERE day NOT IN (SELECT DISTINCT day FROM cost ORDER BY day DESC LIMIT ?)",
+                        (self.KEEP_DAYS,))
 
     def summary(self, now: float = None) -> dict:
         now = time.time() if now is None else now
-        with self.lock:
-            lim = merge_limits(self.data["limits"], None, now) if self.data["limits"] else {}
-            if self.data["limits"]:
-                lim["updated"] = self.data["limits"].get("updated", 0)
-            days = {k: dict(v) for k, v in self.data["days"].items()}
+        stored = self.db.get("claudeLimits", {}) or {}
+        lim = merge_limits(stored, None, now) if stored else {}
+        if stored:
+            lim["updated"] = stored.get("updated", 0)
+        days = {}
+        for day, proj, usd in self.db.rows("SELECT day, project, usd FROM cost"):
+            days.setdefault(day, {})[proj] = round(usd, 6)
         today = time.strftime("%Y-%m-%d", time.localtime(now))
         week = [time.strftime("%Y-%m-%d", time.localtime(now - i * 86400)) for i in range(7)]
         return {"limits": lim, "today": round(sum(days.get(today, {}).values()), 4),
@@ -2399,7 +2548,7 @@ class App:
     def __init__(self, store: Store = None, conf: ServerConf = None, web: bool = False):
         self.web = web                # a workspace of the web version: server only, no local side
         self.store = store or Store()
-        self.activity = Activity(self.store.path.parent / "activity.jsonl")
+        self.activity = Activity(self.store.path.parent / "activity.jsonl")      # same simab.db; imports the old file
         self._conf = conf
         tok = os.environ.pop("SIMAB_TOKEN", "")
         self.token = tok if re.fullmatch(r"[A-Za-z0-9_-]{20,64}", tok or "") else secrets.token_urlsafe(24)
@@ -3499,25 +3648,22 @@ class WebGate:
         self.apps = {}
         self.fails = {}
         self.all_fails = collections.deque()
-        self.sessions_path = self.root / "sessions.json"
-        try:
-            self.sessions = json.loads(self.sessions_path.read_text())
-            if not isinstance(self.sessions, dict):
-                self.sessions = {}
-        except (OSError, ValueError):
-            self.sessions = {}
-        self._saved = 0.0
+        self.db = open_db(self.root / "gate.db")
+
+        def load(f):
+            try:
+                old = json.loads(f.read_text())
+            except (OSError, ValueError):
+                return
+            for h, rec in (old.items() if isinstance(old, dict) else []):
+                if isinstance(rec, dict) and rec.get("ws"):
+                    self.db.run("INSERT OR REPLACE INTO web_sessions (hash, ws, exp, last, ip) VALUES (?, ?, ?, ?, ?)",
+                                (h, rec["ws"], rec.get("exp", 0), rec.get("last", 0), rec.get("ip", "")))
+        self.db.import_once("sessions.json", self.root / "sessions.json", load)
 
     @staticmethod
     def _hash(tok: str) -> str:
         return hashlib.sha256(tok.encode()).hexdigest()
-
-    def _save(self):
-        tmp = self.sessions_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.sessions))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.sessions_path)
-        self._saved = time.time()
 
     def info(self) -> dict:
         one = self.hosts[0] if len(self.hosts) == 1 else ""
@@ -3572,37 +3718,34 @@ class WebGate:
         (d / "workspace.json").write_text(json.dumps({"user": user, "host": host, "port": port}))
         tok = secrets.token_urlsafe(32)
         now = time.time()
-        with self.lock:
-            self.sessions = {k: v for k, v in self.sessions.items() if v.get("exp", 0) > now}
-            self.sessions[self._hash(tok)] = {"ws": wsid, "exp": now + self.SESSION_DAYS * 86400, "last": now, "ip": ip}
-            self._save()
+        with self.db.tx() as c:
+            c.execute("DELETE FROM web_sessions WHERE exp < ? OR last < ?", (now, now - self.IDLE_DAYS * 86400))
+            c.execute("INSERT INTO web_sessions (hash, ws, exp, last, ip) VALUES (?, ?, ?, ?, ?)",
+                      (self._hash(tok), wsid, now + self.SESSION_DAYS * 86400, now, ip))
         log_line(f"web: {user}@{host}:{port} signed in from {ip}")
         return tok
 
     def logout(self, tok: str):
         if not tok:
             return
-        with self.lock:
-            if self.sessions.pop(self._hash(tok), None) is not None:
-                self._save()
+        self.db.run("DELETE FROM web_sessions WHERE hash = ?", (self._hash(tok),))
 
     def app_for(self, tok: str):
         if not tok or len(tok) > 200:
             return None
         h = self._hash(tok)
         now = time.time()
+        r = self.db.rows("SELECT ws, exp, last FROM web_sessions WHERE hash = ?", (h,))
+        if not r:
+            return None
+        ws, exp, last = r[0]
+        if exp < now or now - last > self.IDLE_DAYS * 86400:
+            self.db.run("DELETE FROM web_sessions WHERE hash = ?", (h,))
+            return None
+        if now - last > 60:
+            self.db.run("UPDATE web_sessions SET last = ? WHERE hash = ?", (now, h))
         with self.lock:
-            rec = self.sessions.get(h)
-            if not rec:
-                return None
-            if rec.get("exp", 0) < now or now - rec.get("last", 0) > self.IDLE_DAYS * 86400:
-                self.sessions.pop(h, None)
-                self._save()
-                return None
-            rec["last"] = now
-            if now - self._saved > 300:
-                self._save()
-            return self._app(rec["ws"])
+            return self._app(ws)
 
     def _app(self, wsid: str):
         app = self.apps.get(wsid)
@@ -3613,7 +3756,7 @@ class WebGate:
             meta = json.loads((d / "workspace.json").read_text())
         except (OSError, ValueError):
             return None
-        app = App(Store(d / "gui.json"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
+        app = App(Store(d / "simab.db"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
         self.apps[wsid] = app
         if self.start_loops:
             threading.Thread(target=app.git_watch_loop, daemon=True).start()

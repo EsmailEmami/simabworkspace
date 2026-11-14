@@ -651,6 +651,8 @@ class WebHttp(unittest.TestCase):
                 w, h = struct.unpack(">II", raw[16:24])
                 self.assertEqual(f"{w}x{h}", icon["sizes"])
         self.assertEqual(sorted(i["purpose"] for i in m["icons"]).count("maskable"), 1)
+        self.assertEqual(self.req(port, "GET", "/icon.svg")[2].getheader("Cache-Control"), "public, max-age=86400")
+        self.assertEqual(self.req(port, "GET", "/app.js")[2].getheader("Cache-Control"), "no-store")     # code: always fresh
         st, js, r = self.req(port, "GET", "/sw.js")
         self.assertEqual((st, r.getheader("Service-Worker-Allowed")), (200, "/"))
         self.assertIn(b"/api/", js)                                          # it leaves the API alone

@@ -3949,7 +3949,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        extra = dict(extra or {})
+        self.send_header("Cache-Control", extra.pop("Cache-Control", "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (extra or {}).items():
@@ -4033,6 +4034,8 @@ class Handler(BaseHTTPRequestHandler):
                                             "img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; "
                                             "frame-ancestors 'none'",
                  "X-Frame-Options": "DENY"} if f.suffix == ".html" else None
+        if f.suffix in (".svg", ".png", ".woff2", ".ico") or rel.startswith("vendor/"):
+            extra = {"Cache-Control": "public, max-age=86400"}     # icons, fonts, libraries: rarely change
         self._send(200, f.read_bytes(), MIME.get(f.suffix, "application/octet-stream"), extra)
 
     def _api(self, method: str, path: str, query: dict):

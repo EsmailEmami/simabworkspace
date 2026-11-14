@@ -500,3 +500,6 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .ag-type { font: 10px var(--mono); color: var(--accent); flex: none; }
 .ag-last { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 11.5px var(--mono); unicode-bidi: plaintext; }
 .ag-time { font: 10.5px var(--mono); color: var(--faint); flex: none; }
+
+.update-note { margin: 0 10px 8px; height: 28px; border-radius: 6px; border: 1px solid #1f5f4f; background: #0f2a24; color: var(--ok); font: 12px var(--mono); }
+.update-note:hover { filter: brightness(1.2); }

@@ -2251,6 +2251,47 @@
     toast('Error: ' + msg + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''), 'err', { timeout: 15000 });
   });
 
+  // ------------------------------------------------------------------ updates
+  function checkUpdate(force) {
+    api('GET', 'update' + (force ? '?force=1' : '')).then(function (u) {
+      S.update = u;
+      var el = $('#update-note');
+      el.classList.toggle('hidden', !u.available);
+      if (u.available) {
+        el.textContent = 'Update to ' + u.latest;
+        if (!S.updateToasted) { S.updateToasted = true; toast('Simab Workspace ' + u.latest + ' is available', 'ok', { timeout: 8000, onclick: updateDialog }); }
+      }
+      if (force && !u.available) toast(u.error ? 'Could not check: ' + u.error : 'Up to date (' + u.current + ')', u.error ? 'warn' : 'ok');
+    }).catch(function () {});
+  }
+
+  function updateDialog() {
+    var u = S.update || {};
+    var go = h('button', { class: 'btn primary', onclick: function () {
+      go.disabled = true; go.textContent = 'Downloading…';
+      api('POST', 'update').then(function (d) { md.close(); waitForRestart(d.version); })
+        .catch(function (e) { go.disabled = false; go.textContent = 'Update now'; fail(e); });
+    } }, 'Update now');
+    var md = openModal({ title: 'Update to ' + u.latest, body: [
+      h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'You have ' + u.current + '. The update downloads and installs here, then the app restarts and this window reloads. Open terminals and chats restart too — reopen them with “Reopen last session”; Claude conversations continue where they were.'),
+      h('pre', { class: 'tool-pre', style: 'max-height:300px' }, (u.notes || '').replace(/```/g, '').trim() || '—'),
+      u.url ? h('a', { href: u.url, target: '_blank', style: 'font-size:12px;color:var(--accent)' }, 'Release page') : null],
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Later'), go] });
+  }
+
+  function waitForRestart(version) {
+    S.tabs.forEach(function (t) { t.closed = true; });
+    var box = h('div', { class: 'empty stale' }, h('div', { class: 'empty-inner' }, h('p', { class: 'empty-title' }, 'Updating to ' + version + '…'), h('p', { class: 'muted' }, 'The app restarts; this window reloads by itself.')));
+    document.body.append(box);
+    var tries = 0;
+    (function poll() {
+      tries++;
+      fetch('/api/ping', { headers: { 'X-Token': token } }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.version === version) location.reload(); else setTimeout(poll, 1000);
+      }).catch(function () { if (tries < 90) setTimeout(poll, 1000); else box.querySelector('.muted').textContent = 'The app did not come back — run: simabworkspace gui'; });
+    })();
+  }
+
   // ------------------------------------------------------------------ shared with chat.js
   window.SW = {
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
@@ -2263,10 +2304,12 @@
   // ------------------------------------------------------------------ boot
   function wire() {
     $('#btn-palette').addEventListener('click', openPalette);
+    $('#update-note').addEventListener('click', updateDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, [
         { label: 'History…', action: function () { historyDialog(); } },
+        { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
         { label: 'Grid: all tabs side by side', action: gridAll },
         { label: 'Single section', disabled: L.groups.length < 2, action: mergeAll },
@@ -2321,6 +2364,8 @@
       // first run on a new machine: everything is set up in Settings
       if (!st.server.configured) { toast('Welcome — set up this machine and your server here', 'ok', { timeout: 8000 }); settingsDialog(); }
       setInterval(refreshProjects, 5000);
+      setTimeout(function () { checkUpdate(false); }, 3000);
+      setInterval(function () { checkUpdate(false); }, 6 * 3600 * 1000);
       refreshGit();
       setInterval(function () { refreshGit(); }, 10000);
       setInterval(function () { refreshStatus(false); }, 20000);

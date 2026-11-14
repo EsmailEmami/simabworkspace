@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-palette', 'btn-history', 'btn-settings', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-palette', 'btn-history', 'btn-settings', 'update-note', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -67,6 +67,8 @@ global.fetch = (url, opts) => {
   else if (url === '/api/sync/cheshmeh/resolve') res = { ok: true };
   else if (url === '/api/server-folders') res = { folders: [{ path: '/home/esi/shop', name: 'shop', git: 'repo', mtime: 1, project: '' }, { path: '/home/esi/cheshmeh', name: 'cheshmeh', git: 'repos inside', mtime: 2, project: 'cheshmeh' }] };
   else if (url === '/api/add-project') res = { ok: true, project: 'shop' };
+  else if (url.startsWith('/api/update') && method === 'GET') res = { current: '9', latest: '10.0.0', available: true, notes: '## Changes\n- faster', url: 'https://x' };
+  else if (url === '/api/update' && method === 'POST') res = { ok: true, version: '10.0.0' };
   else if (url.startsWith('/api/activity')) res = { items: [
     { t: Date.now() / 1000, kind: 'prompt', project: 'cheshmeh', text: 'باگ پرداخت را درست کن', session: '11111111-2222-3333-4444-555555555555' },
     { t: Date.now() / 1000 - 60, kind: 'run-exit', project: 'cheshmeh', text: 'web', code: 1, seconds: 12.5, cmdId: 'c1' },
@@ -304,6 +306,22 @@ const tests = {
     const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/resolve').pop();
     assert.deepStrictEqual(post.body, { path: 'web/app.ts', keep: 'server' });
     document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'a new version shows a notice; clicking updates in place'() {
+    await new Promise((r) => setTimeout(r, 3200));          // first check runs 3 s after start
+    await settle();
+    const note = document.body.querySelector('#update-note');
+    assert.ok(!note.classList.contains('hidden'));
+    assert.strictEqual(note.textContent, 'Update to 10.0.0');
+    document.body.querySelector('#modal-root').replaceChildren();
+    note.click();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /faster/);
+    q('.btn.primary', modal).pop().click();
+    await settle();
+    assert.ok(calls.some((c) => c.url === '/api/update' && c.method === 'POST'));
+    assert.ok(q('.stale').some((e) => /Updating to 10\.0\.0/.test(e.textContent)));
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

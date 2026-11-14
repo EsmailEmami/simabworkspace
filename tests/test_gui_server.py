@@ -1396,6 +1396,63 @@ class Release(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class Updates(TmpHome):
+    def test_versions(self):
+        self.assertGreater(sw.version_tuple("1.17.10"), sw.version_tuple("1.17.9"))
+        self.assertGreater(sw.version_tuple("v2.0.0"), sw.version_tuple("1.99.99"))
+        self.assertEqual(sw.version_tuple("x"), (0,))
+
+    def test_check_and_install(self):
+        app = sw.App(self.store, sw.ServerConf("", "h"))
+        newer = ".".join(str(x + (1 if i == 0 else 0)) for i, x in enumerate(sw.version_tuple(sw.VERSION)))
+        fake_installer = Path(self.tmp.name, "inst.sh")
+        fake_installer.write_text("#!/bin/bash\necho \"installed $1\" > " + str(Path(self.tmp.name, "ran")) + "\n")
+        rel = {"version": newer, "notes": "## Changes\n- x", "url": "https://example/r", "installer": "file://" + str(fake_installer)}
+        with mock.patch.object(sw, "fetch_latest_release", return_value=rel):
+            u = app.check_update(force=True)
+            self.assertTrue(u["available"])
+            self.assertEqual((u["current"], u["latest"]), (sw.VERSION, newer))
+            started = []
+            real_popen = subprocess.Popen
+
+            def popen(argv, *a, **kw):
+                if "serve" in argv:                     # the restart of the new version: record it only
+                    started.append((argv, kw["env"]))
+                    return mock.Mock()
+                return real_popen(argv, *a, **kw)        # subprocess.run (the installer) runs for real
+            with mock.patch.object(sw.subprocess, "Popen", side_effect=popen), \
+                    mock.patch.object(sw, "shutdown_app"):
+                r = app.install_update()
+            self.assertEqual(r["version"], newer)
+            self.assertEqual(Path(self.tmp.name, "ran").read_text().strip(), "installed --no-open")
+            argv, env = started[0]
+            self.assertIn("serve", argv)
+            self.assertEqual((env["SIMAB_TOKEN"], env["SIMAB_RESTART"]), (app.token, "1"))
+        with mock.patch.object(sw, "fetch_latest_release", return_value=dict(rel, version=sw.VERSION)):
+            self.assertFalse(app.check_update(force=True)["available"])
+            with self.assertRaises(sw.ApiError):
+                app.install_update()
+        with mock.patch.object(sw, "fetch_latest_release", side_effect=OSError("offline")):
+            u = app.check_update(force=True)
+            self.assertFalse(u["available"])
+            self.assertIn("offline", u["error"])
+
+    def test_restart_keeps_address_and_key(self):
+        with mock.patch.dict(os.environ, {"SIMAB_TOKEN": "k" * 32}):
+            self.assertEqual(sw.App(self.store, sw.ServerConf("", "h")).token, "k" * 32)
+        self.assertNotEqual(sw.App(self.store, sw.ServerConf("", "h")).token, "k" * 32)
+        busy = socket.socket()
+        busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        port = busy.getsockname()[1]
+        threading.Timer(1.0, busy.close).start()                 # the old copy goes away a moment later
+        app = sw.App(self.store, sw.ServerConf("", "h"))
+        httpd = sw.make_server(app, port, wait=8)
+        self.assertEqual(app.port, port)
+        httpd.server_close()
+
+
 class BashScript(unittest.TestCase):
     def test_syntax_and_gui_command(self):
         import subprocess
@@ -1403,7 +1460,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.17.0"', text)
+        self.assertIn('VERSION="1.18.0"', text)
 
 
 if __name__ == "__main__":

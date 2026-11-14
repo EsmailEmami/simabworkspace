@@ -28,6 +28,7 @@
 #    simabworkspace reconnect       start the daemon and resume everything
 #    simabworkspace gui             open the workspace window (tabs, Claude, VS Code, run buttons)
 #    simabworkspace self-install    install the `simabworkspace` command and window files (used by the installer)
+#    simabworkspace update          download and install the latest release
 #    simabworkspace gui stop|status|url   stop / check the window's background server
 #    simabworkspace ssh             open a shell on the server
 #    simabworkspace key             choose / create the SSH key used for the server
@@ -38,6 +39,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.18.0 2026-11-14  updates: the window says when a new version is out and installs it
+#                       in place (restarts and reloads by itself); `simabworkspace update`
 #    1.17.0 2026-11-14  chat: send while Claude works (queued, picked up next), live list
 #                       of running agents; public release: one-line installers for
 #                       Linux/macOS/WSL and Windows, no built-in server address
@@ -114,7 +117,7 @@
 
 set -u -o pipefail
 
-VERSION="1.17.0"
+VERSION="1.18.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1321,6 +1324,28 @@ self_install() {
   esac
 }
 
+# ----------------------------------------------------------------------------- updates
+GITHUB_REPO="EsmailEmami/simabworkspace"
+
+# self_update: download the latest release installer and run it (settings are kept)
+self_update() {
+  title "Update"
+  local latest tmp
+  latest=$(curl -fsSL --max-time 15 "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null \
+           | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$latest" ] || { err "Could not reach GitHub to check for updates."; return 1; }
+  if [ "$(printf '%s\n%s\n' "$VERSION" "$latest" | sort -V | tail -n 1)" = "$VERSION" ]; then
+    ok "Up to date ($VERSION)."; return 0
+  fi
+  info "Updating $VERSION → $latest…"
+  tmp=$(mktemp -d)
+  curl -fsSL --retry 3 "https://github.com/$GITHUB_REPO/releases/download/v$latest/simabworkspace-install.sh" -o "$tmp/install.sh" \
+    || { rm -rf "$tmp"; err "Download failed."; return 1; }
+  bash "$tmp/install.sh" --no-open || { rm -rf "$tmp"; err "Update failed."; return 1; }
+  rm -rf "$tmp"
+  ok "Updated to $latest. If the window is open, restart it: simabworkspace gui"
+}
+
 # ----------------------------------------------------------------------------- GUI
 GUI_SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/$APP/gui"
 
@@ -1473,6 +1498,7 @@ main() {
     help|-h|--help) usage; exit 0 ;;
     version|--version) echo "$APP $VERSION"; exit 0 ;;
     setup)     [ -x "$BIN_DIR/mutagen" ] && ensure_path; run_setup; exit $? ;;
+    update)    self_update; exit $? ;;
     # installer: put the command + window files in place, nothing else
     self-install) self_install; [ -x "$BIN_DIR/mutagen" ] && ensure_path; ensure_path; exit 0 ;;
     # used by the window: never start the interactive setup for these

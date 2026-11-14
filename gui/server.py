@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "simabworkspace"
-VERSION = "1.17.0"
+VERSION = "1.18.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1986,13 +1986,32 @@ def set_autostart(on: bool):
             text = text.rstrip("\n") + f"\n\n{RC_MARK_BEGIN}\ncommand -v mutagen >/dev/null 2>&1 && mutagen daemon start >/dev/null 2>&1\n{RC_MARK_END}\n"
         f.write_text(text)
 
+
+# ----------------------------------------------------------------------------- updates (GitHub releases)
+GITHUB_REPO = "EsmailEmami/simabworkspace"
+
+
+def version_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+
+
+def fetch_latest_release(timeout=10) -> dict:
+    req = urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "simabworkspace"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        d = json.loads(r.read().decode("utf-8"))
+    asset = next((a for a in d.get("assets") or [] if a.get("name") == "simabworkspace-install.sh"), None)
+    return {"version": (d.get("tag_name") or "").lstrip("v"), "notes": (d.get("body") or "")[:6000],
+            "url": d.get("html_url") or "", "installer": (asset or {}).get("browser_download_url") or ""}
+
 # ----------------------------------------------------------------------------- application
 class App:
     def __init__(self, store: Store = None, conf: ServerConf = None):
         self.store = store or Store()
         self.activity = Activity(self.store.path.parent / "activity.jsonl")
         self._conf = conf
-        self.token = secrets.token_urlsafe(24)
+        tok = os.environ.pop("SIMAB_TOKEN", "")
+        self.token = tok if re.fullmatch(r"[A-Za-z0-9_-]{20,64}", tok or "") else secrets.token_urlsafe(24)
         self.port = 0
         self.sessions = {}            # id -> Session (insertion order = tab order)
         self.lock = threading.RLock()
@@ -2472,6 +2491,51 @@ class App:
             made.append("app menu")
         self.activity.add("shortcut", "", "added to " + ", ".join(made))
         return {"ok": True, "where": made}
+
+    # updates ------------------------------------------------------------------------
+    def check_update(self, force=False) -> dict:
+        cache = self.__dict__.setdefault("_upd", {"t": 0, "data": None})
+        if force or not cache["data"] or time.time() - cache["t"] > 6 * 3600:
+            try:
+                cache["data"] = fetch_latest_release()
+                cache["error"] = ""
+            except Exception as e:  # noqa: BLE001 - offline / filtered: just no update notice
+                cache["error"] = str(e)[:200]
+            cache["t"] = time.time()
+        d = cache["data"] or {}
+        latest = d.get("version") or ""
+        return {"current": VERSION, "latest": latest, "available": bool(latest) and version_tuple(latest) > version_tuple(VERSION) and bool(d.get("installer")),
+                "notes": d.get("notes", ""), "url": d.get("url", ""), "error": cache.get("error", "")}
+
+    def install_update(self) -> dict:
+        info = self.check_update(force=True)
+        if not info["available"]:
+            raise ApiError(400, "no newer version" + (f" ({info['error']})" if info["error"] else ""))
+        url = (self._upd["data"] or {}).get("installer")
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "simabworkspace-install.sh")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "simabworkspace"})
+            with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+                shutil.copyfileobj(r, f)
+        except Exception as e:  # noqa: BLE001
+            raise ApiError(502, f"download failed: {e}")
+        r = subprocess.run([which("bash") or "/bin/bash", path, "--no-open"], stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=300, env=dict(os.environ, PATH=tool_path()), cwd=os.path.expanduser("~"))
+        shutil.rmtree(tmp, ignore_errors=True)
+        if r.returncode != 0:
+            raise ApiError(500, "update failed: " + re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", (r.stdout + r.stderr).decode("utf-8", "replace")).strip()[-400:])
+        self.activity.add("update", "", f"updated {VERSION} → {info['latest']}")
+        # start the new version on the same address with the same key, then stop this one
+        cmd = home_path(".local", "bin", "simabworkspace")
+        argv = [str(cmd), "gui", "serve"] if cmd.is_file() else [sys.executable, str(HERE / "server.py"), "serve"]
+        log = config_dir() / "gui.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "ab") as lf:
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, start_new_session=True,
+                             cwd=os.path.expanduser("~"), env=dict(os.environ, PATH=tool_path(), SIMAB_TOKEN=self.token, SIMAB_RESTART="1"))
+        threading.Thread(target=shutdown_app, args=(self,), daemon=True).start()
+        return {"ok": True, "version": info["latest"]}
 
     # git badges ---------------------------------------------------------------
     def git_summary_one(self, p: dict, fetch=False) -> dict:
@@ -2970,6 +3034,10 @@ class Handler(BaseHTTPRequestHandler):
             return app.resolve_conflict(parts[1], b.get("path") or "", b.get("keep") or "")
         if route == ("POST", "shortcut"):
             return app.create_shortcut()
+        if route == ("GET", "update"):
+            return app.check_update(force=query.get("force") == ["1"])
+        if route == ("POST", "update"):
+            return app.install_update()
         if route == ("GET", "prereqs"):
             return app.prereqs()
         if route == ("POST", "prereqs") and len(parts) == 2:
@@ -3055,15 +3123,20 @@ class Handler(BaseHTTPRequestHandler):
             sess.detach(ws)
 
 
-def make_server(app: App, port: int = 0) -> ThreadingHTTPServer:
+def make_server(app: App, port: int = 0, wait: float = 0) -> ThreadingHTTPServer:
+    """wait: keep trying the preferred port for a while (the old copy is still closing after an update)."""
     handler = type("BoundHandler", (Handler,), {"app": app})
     httpd = None
-    for p in ([port] if port else []) + [0]:
+    end = time.time() + wait
+    while port and httpd is None:
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", p), handler)
-            break
+            httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         except OSError:
-            continue
+            if time.time() >= end:
+                break
+            time.sleep(0.3)
+    if httpd is None:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
     app.port = httpd.server_address[1]
     app.httpd = httpd
@@ -3127,7 +3200,7 @@ def app_url(st) -> str:
 def serve(foreground_msg=True):
     store = Store()
     app = App(store)
-    httpd = make_server(app, int(store.settings.get("port") or 0))
+    httpd = make_server(app, int(store.settings.get("port") or 0), wait=15 if os.environ.get("SIMAB_RESTART") else 0)
     if store.settings.get("port") != app.port:
         store.update_settings({"port": app.port})
     st = {"pid": os.getpid(), "port": app.port, "token": app.token, "version": VERSION,

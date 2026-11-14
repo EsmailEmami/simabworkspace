@@ -1626,6 +1626,15 @@
       h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'Terminal on the server, in the project' : 'Local terminal', onclick: function () { openTerminal(p); } }, 'Terminal'),
       h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name))));
+    var dk = S.docker[p.name], tn = projectTunnels(p.name), tup = tn.filter(function (t) { return t.state === 'up'; }).length;
+    body.append(h('div', { class: 'acts' },
+      h('button', { class: 'act dock', disabled: !r, title: 'Docker containers on the server: state, logs, shell, restart, rebuild'
+        + (dk && dk.total ? '\n' + dk.running + ' of ' + dk.total + ' running' + (dk.bad ? ', ' + dk.bad + ' with problems' : '') : ''),
+        onclick: function () { dockerDialog(p); } }, 'Docker',
+        dk && dk.total ? h('span', { class: 'gb dk ' + (dk.bad ? 'err' : dk.running < dk.total ? 'warn' : 'ok') }, dk.running + '/' + dk.total) : null),
+      h('button', { class: 'act ports', disabled: !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
+        tn.length ? h('span', { class: 'gb dk ' + (tup ? 'ok' : '') }, tup + '/' + tn.length) : null),
+      h('button', { class: 'act', title: 'What you did in this project', onclick: function () { historyDialog(p.name); } }, 'History')));
     p.commands.forEach(function (c) {
       var t = runningCmd(p.name, c.id);
       body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (t ? '\nclick to stop' : ''),
@@ -1634,8 +1643,6 @@
         h('span', { class: 'tag' }, c.where === 'server' ? 'srv' : 'loc')));
     });
     if (!p.commands.length) body.append(h('button', { class: 'add-link', onclick: function () { editCommands(p); } }, '+ run command'));
-    var dl = dockerLine(p);
-    if (dl) body.append(dl);
     projectTunnels(p.name).forEach(function (t) { var tl = tunnelLine(t); if (tl) body.append(tl); });
     el.append(body);
     return el;
@@ -2267,12 +2274,38 @@
     }
     var mine = projectTunnels(p.name);
     mine.forEach(function (t) { list.append(row(t)); });
+    // what can be forwarded: the ports the project's containers publish on the server
+    var avail = h('div', { class: 'tavail' }, h('span', { class: 'muted' }, 'Looking for open ports on the server…'));
+    function rowsNow() { return Array.prototype.map.call(list.children, function (b) { return b._get(); }); }
+    function renderAvail(cs) {
+      var items = [];
+      cs.forEach(function (c) {
+        c.ports.filter(function (pt) { return pt.proto === 'tcp'; }).forEach(function (pt) {
+          items.push({ name: c.service || c.name, port: pt.host, inner: pt.port, up: c.state === 'running', image: c.image });
+        });
+      });
+      if (!items.length) { avail.replaceChildren(h('span', { class: 'muted' }, 'No published container ports found — add one by hand below.')); return; }
+      avail.replaceChildren.apply(avail, items.map(function (it) {
+        var done = rowsNow().some(function (t) { return String(t.remotePort) === String(it.port) && /^(127\.0\.0\.1|localhost)$/.test(t.remoteHost); });
+        var b = h('button', { class: 'pchip' + (done ? ' on' : ''), disabled: done, title: done ? 'Already in the list' : it.name + ' (' + it.image + ')' + (it.up ? '' : ' — not running') + '\nclick to add',
+          onclick: function () {
+            list.append(row({ name: it.name, remoteHost: '127.0.0.1', remotePort: it.port, localPort: it.port < 1024 ? it.port + 10000 : it.port, http: false }));
+            b.classList.add('on'); b.disabled = true;
+          } }, h('b', null, it.name), ' :' + it.port + (it.inner !== it.port ? '→' + it.inner : ''), done ? ' ✓' : ' +');
+        return b;
+      }));
+    }
+    if (hasRemote(p)) api('GET', 'docker/' + encodeURIComponent(p.name)).then(function (d) { renderAvail(d.containers || []); })
+      .catch(function (e) { avail.replaceChildren(h('span', { class: 'muted' }, 'Could not read the server’s ports: ' + e.message)); });
+    else avail.replaceChildren(h('span', { class: 'muted' }, 'This project has no server folder.'));
     if (!mine.length) list.append(row({}));
     var md = openModal({
       title: 'Port forwarding — ' + p.name,
       body: [h('div', { class: 'muted', style: 'margin-bottom:10px;font-size:12px' },
         'Reach a port of the server from this machine, through SSH: a database for DBeaver, an API for Postman, a page in the browser. ',
-        'Nothing is opened to the internet. A tunnel that is on reconnects by itself while the app runs.'), list],
+        'Nothing is opened to the internet. A tunnel that is on reconnects by itself while the app runs.'),
+        h('div', { class: 'sec' }, 'Open on the server — click to add'), avail,
+        h('div', { class: 'sec' }, 'Forwarded'), list],
       foot: [h('button', { class: 'btn left', onclick: function () { list.append(row({})); } }, '+ Add'),
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: function () {
@@ -2674,6 +2707,7 @@
     $('#btn-palette').addEventListener('click', openPalette);
     $('#update-note').addEventListener('click', updateDialog);
     $('#usage').addEventListener('click', usageDialog);
+    $('#btn-usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, [

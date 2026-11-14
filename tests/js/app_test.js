@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-palette', 'btn-history', 'btn-settings', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -225,11 +225,11 @@ const tests = {
 
   async 'docker: the project shows its containers; logs, restart and a crash notice'() {
     document.body.querySelector('#modal-root').replaceChildren();
-    const line = q('.dkline')[0];
-    assert.ok(line, 'docker line under the project');
-    assert.strictEqual(line.querySelector('.gb').textContent, '2/3');
+    const line = byText('.act', 'Docker2/3');
+    assert.ok(line, 'Docker button under the project, with running/total');
     assert.ok(line.querySelector('.gb').classList.contains('err'), 'a crashed container makes it red');
-    line.dispatch('click');
+    assert.ok(byText('.act', 'Ports1/1'), 'Ports button shows forwarded ports');
+    line.click();
     await settle();
     const modal = q('.modal').pop();
     const rows = q('.dkrow', modal);
@@ -274,6 +274,11 @@ const tests = {
     await settle();
     const modal = q('.modal').pop();
     assert.strictEqual(q('.cmd-edit', modal).length, 2);
+    // what can be forwarded: the containers' published ports, already-forwarded ones marked
+    await settle(); await settle();
+    const avail = q('.pchip', q('.tavail', modal)[0]);
+    assert.deepStrictEqual(avail.map((b) => b.textContent), ['api :18080→8080 ✓', 'db :5432 ✓']);
+    assert.ok(avail.every((b) => b.disabled));
     q('.btn', modal).find((b) => b.textContent === '+ Add').click();
     const boxes = q('.cmd-edit', modal);
     const ins = q('input', boxes[2]);
@@ -290,7 +295,7 @@ const tests = {
     assert.ok(!el.classList.contains('hidden'));
     assert.deepStrictEqual(q('.um', el).map((m) => m.textContent), ['5h38%', '7d12%']);
     assert.match(el.title, /5-hour limit: 38% used, resets in (59m|1h 0m)/);
-    el.click();
+    document.body.querySelector('#btn-usage').click();
     const modal = q('.modal').pop();
     assert.match(modal.textContent, /today \$1\.50 · last 7 days \$7\.25/);
     assert.match(modal.textContent, /cheshmeh \$1\.20 · shop \$0\.30/);

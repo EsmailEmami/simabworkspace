@@ -550,3 +550,14 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .ubig { margin-bottom: 12px; }
 .ubig .uhead { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 5px; }
 .ubig .ub { height: 6px; border-radius: 3px; }
+.tavail { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.tavail .pchip { height: 24px; }
+.tavail .pchip b { font-weight: 600; color: var(--text); margin-right: 2px; }
+
+/* sidebar footer: labelled buttons */
+.side-foot { gap: 2px; padding: 6px 6px; }
+.fbtn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--muted); font-size: 10.5px; }
+.fbtn i { font-style: normal; font-size: 14px; line-height: 16px; }
+.fbtn:hover { background: var(--bg3); color: var(--text); }
+.act .gb.dk { margin-left: 4px; }

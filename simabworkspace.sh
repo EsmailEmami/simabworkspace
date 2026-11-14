@@ -41,6 +41,9 @@
 #  Changelog:
 #    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
 #                       (low ports need admin rights) and say so instead of "in use"
+#                       Port forwarding lists the ports open on the server (click to add);
+#                       sidebar shows everything: Docker / Ports / History under each project,
+#                       Search / History / Usage / Menu at the bottom
 #    1.19.0 2026-11-14  Window: Docker panel per project (containers on the server, logs,
 #                       shell, restart, rebuild; a notice when one crashes), port forwarding
 #                       (ssh tunnels to localhost, one click, reconnect by themselves) and

@@ -582,3 +582,13 @@ body.web #st-sync { display: none; }
   .btn.sm { height: 30px; }
   .fbtn { padding: 8px 0; }
 }
+
+/* server folder picker */
+.fpick { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.fpick .flist { max-height: 260px; border: 0; border-radius: 0; margin-top: 0; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.crumb { border: 0; background: transparent; color: var(--muted); font: 12px var(--mono); padding: 2px 4px; border-radius: 4px; }
+.crumb:hover { background: var(--bg3); color: var(--text); }
+.crumb.on { color: var(--text); font-weight: 600; }
+.fpick-foot { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--line); background: var(--bg); }
+.fpick-foot .inp { flex: 1; }

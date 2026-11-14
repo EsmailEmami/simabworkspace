@@ -1636,9 +1636,11 @@
     if (!root) return;
     var f = S.filter.trim().toLowerCase();
     if (!S.projects.length) {
-      root.replaceChildren(h('div', { class: 'side-note' },
-        'No projects yet. Run ', h('code', null, 'simabworkspace add'), ' to sync one from the server, or ',
-        h('button', { class: 'add-link', onclick: addManualProject }, 'add one by hand'), '.'));
+      root.replaceChildren(S.web
+        ? h('div', { class: 'side-note' }, 'No projects yet. ', h('button', { class: 'add-link', onclick: addManualProject }, '+ add a project'), ' — pick its folder on the server.')
+        : h('div', { class: 'side-note' },
+        'No projects yet. ', h('button', { class: 'add-link', onclick: addManualProject }, '+ add a project'),
+        ' — from the server, from this machine, or a server folder.'));
       return;
     }
     var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0; });
@@ -1744,9 +1746,57 @@
     });
   }
 
+  // Browse folders on the server: click a folder to go into it; the folder you are in is the one picked.
+  function folderPicker(onChange) {
+    var cur = '', showHidden = false, data = null;
+    var pathIn = h('input', { class: 'inp mono', placeholder: '~/my-project', spellcheck: 'false', autocomplete: 'off' });
+    var list = h('div', { class: 'flist' }, h('div', { class: 'muted', style: 'padding:10px' }, 'Loading folders on the server…'));
+    var crumbs = h('div', { class: 'crumbs' });
+    var hid = h('input', { type: 'checkbox' });
+    hid.addEventListener('change', function () { showHidden = hid.checked; render(); });
+    pathIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); go(pathIn.value.trim() || '~'); } });
+    function render() {
+      if (!data) return;
+      var parts = data.path.split('/').filter(Boolean), acc = '';
+      crumbs.replaceChildren.apply(crumbs, [h('button', { class: 'crumb', title: 'Your home folder', onclick: function () { go('~'); } }, '⌂')]
+        .concat([h('button', { class: 'crumb', onclick: function () { go('/'); } }, '/')])
+        .concat(parts.map(function (p, i) {
+          acc += '/' + p;
+          var to = acc;
+          return h('button', { class: 'crumb' + (i === parts.length - 1 ? ' on' : ''), onclick: function () { go(to); } }, p + (i < parts.length - 1 ? ' /' : ''));
+        })));
+      var dirs = data.dirs.filter(function (d) { return showHidden || !d.hidden; });
+      var rows = [];
+      if (data.parent) rows.push(h('button', { class: 'frow', onclick: function () { go(data.parent); } }, h('span', { class: 'fname mono' }, '..'), h('span', { class: 'ftag' }, 'up')));
+      dirs.forEach(function (d) {
+        var full = data.path.replace(/\/$/, '') + '/' + d.name;
+        rows.push(h('button', { class: 'frow', title: full + (d.project ? '\nalready added as ' + d.project : ''), onclick: function () { go(full); } },
+          h('span', { class: 'fname mono' }, d.name),
+          d.git ? h('span', { class: 'ftag' }, 'git') : null,
+          d.project ? h('span', { class: 'ftag done' }, d.project) : null));
+      });
+      if (!dirs.length) rows.push(h('div', { class: 'muted', style: 'padding:10px' }, 'No folders inside'));
+      list.replaceChildren.apply(list, rows);
+    }
+    function go(path) {
+      api('GET', 'browse?path=' + encodeURIComponent(path)).then(function (d) {
+        data = d; cur = d.path;
+        pathIn.value = d.path;
+        list.scrollTop = 0;
+        render();
+        onChange(d);
+      }).catch(function (e) { list.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
+    }
+    go('~');
+    var el = h('div', { class: 'fpick' }, crumbs, list,
+      h('div', { class: 'fpick-foot' }, pathIn, h('label', { class: 'check', style: 'margin:0;flex:none' }, hid, h('span', null, 'hidden'))));
+    el.value = function () { return pathIn.value.trim(); };
+    return el;
+  }
+
   // Add project — all in the window: download from the server, upload from this machine, or server-only
   function addManualProject() {
-    var mode = 'download', folders = null, pickedRemote = '';
+    var mode = 'download', folders = null, pickedRemote = '', picker = null, pickedInfo = null;
     var name = h('input', { class: 'inp mono', placeholder: 'empty = folder name' });
     var local = h('input', { class: 'inp mono', placeholder: '~/projects/my-project' });
     var remote = h('input', { class: 'inp mono', placeholder: '~/my-project' });
@@ -1780,6 +1830,7 @@
         .catch(function (e) { list.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
     }
     local.addEventListener('input', function () { delete local.dataset.auto; });
+    name.addEventListener('input', function () { delete name.dataset.auto; });
 
     var gitRow = function () { return h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))); };
     var forms = {
@@ -1798,11 +1849,18 @@
           h('div', { class: 'muted', style: 'font-size:11.5px;margin:-6px 0 10px' }, 'Empty server folder = ~/<folder name>. It must be new or empty.'), gitRow()];
       },
       list: function () {
-        return [h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'Work on a project right on the server (Claude, terminal, Git, run commands) without copying it to this machine.'),
+        picker = folderPicker(function (d) {
+          pickedInfo = d;
+          var base = d.path.split('/').filter(Boolean).pop() || '';
+          if (!name.value || name.dataset.auto) { name.value = base.replace(/[^A-Za-z0-9._-]/g, '-'); name.dataset.auto = '1'; }
+          note.textContent = d.project ? 'Already added as “' + d.project + '”.' : d.git ? 'A Git repository.' : (d.dirs.some(function (x) { return x.git; }) ? 'Has Git repositories inside.' : '');
+        });
+        var note = h('div', { class: 'muted', style: 'font-size:11.5px;min-height:15px;margin:-4px 0 8px' });
+        return [h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'Pick the project folder on the server: click a folder to open it — the folder you are in is the one added.'),
+          h('div', { class: 'field' }, h('label', null, 'Folder on the server'), picker), note,
           h('div', { class: 'row' },
-            h('div', { class: 'field' }, h('label', null, 'Folder on the server'), remote),
-            h('div', { class: 'field' }, h('label', null, 'Name'), name)),
-          S.web ? null : h('div', { class: 'field' }, h('label', null, 'Folder on this machine (optional)'), local)];
+            h('div', { class: 'field' }, h('label', null, 'Name'), name),
+            S.web ? null : h('div', { class: 'field' }, h('label', null, 'Folder on this machine (optional)'), local))];
       }
     };
     var area = h('div');
@@ -1816,15 +1874,22 @@
       seg.replaceChildren.apply(seg, modes.map(function (x) {
         return h('button', { class: 'segb' + (x[0] === m ? ' on' : ''), onclick: function () { show(x[0]); } }, h('b', null, x[1]), h('small', null, x[2]));
       }));
-      area.replaceChildren.apply(area, forms[m]());
+      area.replaceChildren.apply(area, forms[m]().filter(Boolean));
       go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add' }[m];
     }
     function fail2(e) { go.disabled = false; go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add' }[mode]; errBox.textContent = e.message; errBox.classList.remove('hidden'); }
     function submit() {
       errBox.classList.add('hidden');
       if (mode === 'list') {
-        if (!name.value.trim()) { name.focus(); return; }
-        api('POST', 'manual', { name: name.value, local: local.value, remote: remote.value }).then(function () { md.close(); refreshProjects(); }).catch(fail2);
+        var rp = picker ? picker.value() : remote.value.trim();
+        if (!rp) { errBox.textContent = 'Pick a folder on the server.'; errBox.classList.remove('hidden'); return; }
+        if (pickedInfo && pickedInfo.project && pickedInfo.path === rp) { errBox.textContent = 'This folder is already the project “' + pickedInfo.project + '”.'; errBox.classList.remove('hidden'); return; }
+        if (!name.value.trim()) { name.focus(); errBox.textContent = 'Give it a name.'; errBox.classList.remove('hidden'); return; }
+        api('POST', 'manual', { name: name.value.trim(), local: S.web ? '' : local.value, remote: rp }).then(function () {
+          md.close();
+          S.open.add(name.value.trim()); localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
+          refreshProjects();
+        }).catch(fail2);
         return;
       }
       if (mode === 'download' && !pickedRemote) { errBox.textContent = 'Pick a folder on the server.'; errBox.classList.remove('hidden'); return; }

@@ -1221,6 +1221,28 @@ def remote_python(conf: ServerConf, code: str, args: list, multiplex=True, timeo
         raise ApiError(502, "bad answer from the server")
 
 
+BROWSE_PY = r'''
+import sys, os, json
+p = os.path.realpath(os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "~"))
+if not os.path.isdir(p):
+    print(json.dumps({"error": "not a folder: " + p})); sys.exit()
+try:
+    names = sorted(os.listdir(p), key=lambda n: (n.startswith("."), n.lower()))
+except OSError as e:
+    print(json.dumps({"error": "cannot open " + p + ": " + (e.strerror or str(e))})); sys.exit()
+dirs = []
+for n in names:
+    f = os.path.join(p, n)
+    if not os.path.isdir(f):
+        continue
+    git = "repo" if os.path.exists(os.path.join(f, ".git")) else ""
+    dirs.append({"name": n, "git": git, "hidden": n.startswith(".")})
+    if len(dirs) >= 1000:
+        break
+print(json.dumps({"path": p, "parent": os.path.dirname(p) if p != "/" else "", "home": os.path.expanduser("~"),
+                  "git": os.path.exists(os.path.join(p, ".git")), "dirs": dirs}))
+'''
+
 FILE_SKIP = {"node_modules", ".git", "dist", "build", ".angular", "vendor", "tmp", ".next", ".cache", ".dart_tool",
              "__pycache__", ".venv", ".gradle", ".nuxt", ".idea", "coverage", "docker/data"}
 FILE_LIMIT = 30000
@@ -2664,6 +2686,23 @@ class App:
                         "mtime": int(mt) if mt.isdigit() else 0, "project": synced.get(path, "")})
         return out
 
+    def browse(self, path) -> dict:
+        """Folders inside one folder on the server — for picking a project folder."""
+        path = clean_str(path, 1000, "folder") or "~"
+        r = remote_python(self.conf, BROWSE_PY, [path], multiplex=bool(self.store.settings.get("sshMultiplex"))) or {}
+        if r.get("error"):
+            raise ApiError(400, str(r["error"])[:300])
+        used = {}
+        for p in self.projects(max_age=10):
+            if p.get("remote"):
+                used[p["remote"].rstrip("/")] = p["name"]
+                if p["remote"].startswith("~/") and r.get("home"):
+                    used[r["home"] + p["remote"][1:].rstrip("/")] = p["name"]
+        for d in r.get("dirs") or []:
+            d["project"] = used.get(r["path"].rstrip("/") + "/" + d["name"], "")
+        r["project"] = used.get(r["path"].rstrip("/"), "")
+        return r
+
     def add_project(self, body: dict) -> dict:
         mode = body.get("mode")
         if mode not in ("download", "upload"):
@@ -4009,6 +4048,8 @@ class Handler(BaseHTTPRequestHandler):
             if self._body().get("confirm") != "uninstall":
                 raise ApiError(400, "type uninstall to confirm")
             return app.uninstall()
+        if route == ("GET", "browse"):
+            return app.browse((query.get("path") or [""])[0])
         if route == ("GET", "server-folders"):
             return {"folders": app.server_folders()}
         if route == ("POST", "add-project"):

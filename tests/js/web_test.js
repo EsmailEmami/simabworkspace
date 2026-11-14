@@ -50,6 +50,13 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/git-summary')) res = { summary: {} };
   else if (url.startsWith('/api/docker-summary')) res = { summary: {}, events: [], seq: 0 };
   else if (url === '/api/usage') res = { limits: {}, today: 0, week: 0, days: [] };
+  else if (url.startsWith('/api/browse')) {
+    const p = decodeURIComponent(url.split('path=')[1] || '~');
+    const tree = { '/home/esi': ['cheshmeh', 'hamava', '.cache'], '/home/esi/cheshmeh': ['cheshmeh-api-service', 'cheshmeh-web-app'] };
+    const path = p === '~' ? '/home/esi' : p;
+    res = { path, parent: path === '/' ? '' : path.replace(/\/[^/]+$/, '') || '/', home: '/home/esi', git: false,
+      dirs: (tree[path] || []).map((n) => ({ name: n, git: n.startsWith('cheshmeh-') ? 'repo' : '', hidden: n[0] === '.', project: '' })) };
+  } else if (url === '/api/manual') res = { project: body };
   else if (url === '/api/logout') res = { ok: true };
   else if (url === '/api/sessions' && method === 'POST') res = { id: 's1', title: 'cheshmeh · server', alive: true, exitCode: null, url: '',
     spec: { kind: body.kind, project: body.project, where: body.where, cmdId: '' } };
@@ -122,6 +129,23 @@ const tests = {
     const items = q('button').map((b) => b.textContent.trim());
     assert.ok(items.includes('Server terminal'));
     assert.ok(!items.some((t) => /Local terminal|VS Code|Port forwarding/.test(t)));
+    // add a project: browse the server's folders and pick one
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.add-link').find((b) => /add project/.test(b.textContent)).click();
+    await settle();
+    const addModal = q('.modal').pop();
+    assert.ok(!/null/.test(addModal.textContent), 'no stray "null"');
+    assert.deepStrictEqual(q('.segb', addModal).map((b) => b.querySelector('b').textContent), ['Server folder']);
+    assert.deepStrictEqual(q('.fname', addModal).map((e) => e.textContent), ['..', 'cheshmeh', 'hamava'], 'hidden folders are hidden');
+    q('.frow', addModal).find((r) => r.querySelector('.fname').textContent === 'cheshmeh').click();
+    await settle();
+    assert.deepStrictEqual(q('.fname', addModal).map((e) => e.textContent), ['..', 'cheshmeh-api-service', 'cheshmeh-web-app']);
+    assert.match(addModal.textContent, /Has Git repositories inside/);
+    assert.ok(q('input', addModal).some((i) => i.value === 'cheshmeh'), 'name filled from the folder');
+    q('.btn.primary', addModal).pop().click();
+    await settle();
+    const add = calls.filter((c) => c.url === '/api/manual').pop();
+    assert.deepStrictEqual(add.body, { name: 'cheshmeh', local: '', remote: '/home/esi/cheshmeh' });
     // terminals connect over wss on https
     q('.act').find((b) => b.textContent === 'Terminal').click();
     await settle();

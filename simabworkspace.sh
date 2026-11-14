@@ -41,6 +41,7 @@
 #
 #  Changelog:
 #    1.20.0 2026-11-14  Web version: `simabworkspace web` serves the workspace to a browser
+#                       (add project: browse the server's folders and pick one);
 #                       (tablet…) over HTTPS; sign in with an SSH user and password of an
 #                       allowed server (checked, never stored); one workspace per user;
 #                       server-only (no local terminals, sync, VS Code, port forwarding)

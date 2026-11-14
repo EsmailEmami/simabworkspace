@@ -523,6 +523,34 @@ class WebVersion(unittest.TestCase):
         self.assertEqual(info["spec"]["where"], "server")
 
 
+class BrowseServerFolders(TmpHome):
+    def test_browse_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            for sub in ("b", "a/.git", ".hidden", "Z"):
+                os.makedirs(os.path.join(root, sub))
+            Path(root, "file.txt").write_text("x")
+            r = subprocess.run([sys.executable, "-c", sw.BROWSE_PY, root], capture_output=True, text=True, timeout=20)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["path"], root)
+            self.assertEqual(out["parent"], os.path.dirname(root))
+            self.assertEqual([(x["name"], x["git"], x["hidden"]) for x in out["dirs"]],
+                             [("a", "repo", False), ("b", "", False), ("Z", "", False), (".hidden", "", True)])
+            r = subprocess.run([sys.executable, "-c", sw.BROWSE_PY, root + "/file.txt"], capture_output=True, text=True, timeout=20)
+            self.assertIn("not a folder", json.loads(r.stdout)["error"])
+
+    def test_marks_folders_that_are_projects(self):
+        ans = {"path": "/home/esi", "parent": "/home", "home": "/home/esi", "git": False,
+               "dirs": [{"name": "cheshmeh", "git": "", "hidden": False}, {"name": "x", "git": "", "hidden": False}]}
+        with mock.patch.object(sw, "remote_python", return_value=ans) as rp:
+            out = self.app.browse("~")
+        self.assertEqual(rp.call_args[0][2], ["~"])
+        self.assertEqual([d["project"] for d in out["dirs"]], ["cheshmeh", ""])       # ~/cheshmeh is a project
+        with mock.patch.object(sw, "remote_python", return_value={"error": "cannot open /root: Permission denied"}):
+            with self.assertRaises(sw.ApiError):
+                self.app.browse("/root")
+
+
 class WebHttp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

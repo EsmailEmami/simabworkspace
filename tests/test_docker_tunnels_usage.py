@@ -265,6 +265,13 @@ class Tunnels(TmpHome):
         self.assertIn("already used on this machine", t.error)
         self.assertFalse(t.info()["on"])
 
+    def test_low_ports_get_a_usable_local_port(self):
+        t = sw.clean_tunnels([{"remotePort": 501}, {"remotePort": 80, "localPort": 8080}])
+        self.assertEqual([x["localPort"] for x in t], [10501, 8080])
+        if os.geteuid() != 0:
+            self.assertIn("use a local port like 10501", sw.port_problem(501))
+        self.assertIn("already used", sw.port_problem(15432))
+
     def test_local_port_free(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))

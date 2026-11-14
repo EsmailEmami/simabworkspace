@@ -281,7 +281,7 @@ const tests = {
     q('.btn.primary', modal).pop().click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/tunnels/cheshmeh').pop();
-    assert.deepStrictEqual(post.body.tunnels[2], { name: 'web', localPort: '4200', remoteHost: '127.0.0.1', remotePort: '4200', on: true, http: false });
+    assert.deepStrictEqual(post.body.tunnels[2], { name: 'web', localPort: '', remoteHost: '127.0.0.1', remotePort: '4200', on: true, http: false });
     assert.strictEqual(q('.modal').length, 0);
   },
 

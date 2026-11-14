@@ -2196,6 +2196,7 @@
   }
 
   function addTunnel(p, spec) {
+    if (spec.localPort < 1024) spec.localPort += 10000;     // low ports need admin rights on this machine
     var used = S.tunnels.map(function (t) { return t.localPort; });
     while (used.indexOf(spec.localPort) >= 0 && spec.localPort < 65535) spec.localPort++;
     var list = projectTunnels(p.name).map(plainTunnel).concat([spec]);
@@ -2244,7 +2245,7 @@
     var list = h('div');
     function row(t) {
       var name = h('input', { class: 'inp', value: t.name || '', placeholder: 'Name, e.g. postgres' });
-      var lp = h('input', { class: 'inp mono', value: t.localPort ? String(t.localPort) : '', placeholder: 'same', inputmode: 'numeric' });
+      var lp = h('input', { class: 'inp mono', value: t.localPort ? String(t.localPort) : '', placeholder: 'same (≥1024)', inputmode: 'numeric' });
       var host = h('input', { class: 'inp mono', value: t.remoteHost || '127.0.0.1', placeholder: '127.0.0.1' });
       var rp = h('input', { class: 'inp mono', value: t.remotePort ? String(t.remotePort) : '', placeholder: '5432', inputmode: 'numeric' });
       var http = h('input', { type: 'checkbox' });
@@ -2259,7 +2260,7 @@
         h('label', { class: 'check', style: 'margin-top:6px' }, http, ' a web page — show an ↗ link to open it'),
         t.error ? h('div', { class: 'add-err', style: 'margin-top:6px' }, t.error) : null);
       box._get = function () {
-        return { id: t.id, name: name.value, localPort: lp.value.trim() || rp.value.trim(), remoteHost: host.value.trim(), remotePort: rp.value.trim(),
+        return { id: t.id, name: name.value, localPort: lp.value.trim() || '', remoteHost: host.value.trim(), remotePort: rp.value.trim(),
           on: t.id ? !!t.on : true, http: http.checked };
       };
       return box;

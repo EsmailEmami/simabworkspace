@@ -39,6 +39,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
+#                       (low ports need admin rights) and say so instead of "in use"
 #    1.19.0 2026-11-14  Window: Docker panel per project (containers on the server, logs,
 #                       shell, restart, rebuild; a notice when one crashes), port forwarding
 #                       (ssh tunnels to localhost, one click, reconnect by themselves) and
@@ -126,7 +128,7 @@
 
 set -u -o pipefail
 
-VERSION="1.19.0"
+VERSION="1.19.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

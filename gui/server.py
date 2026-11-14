@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "simabworkspace"
-VERSION = "1.19.0"
+VERSION = "1.19.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2005,7 +2005,7 @@ def clean_tunnels(items) -> list:
         if not re.fullmatch(r"[A-Za-z0-9.:_-]+", host):
             raise ApiError(400, "the address on the server may only contain letters, digits, . : - _")
         rp = clean_port(t.get("remotePort"), "the server port")
-        lp = clean_port(t.get("localPort") or rp, "the local port")
+        lp = clean_port(t.get("localPort") or (rp if rp >= 1024 else rp + 10000), "the local port")
         if lp in ports:
             raise ApiError(400, f"local port {lp} is used twice")
         ports.add(lp)
@@ -2024,6 +2024,14 @@ def local_port_free(port: int) -> bool:
         return False
     finally:
         s.close()
+
+
+def port_problem(port: int) -> str:
+    """Why this local port cannot be used (it was found not free)."""
+    if port < 1024 and hasattr(os, "geteuid") and os.geteuid() != 0:
+        return (f"port {port} is below 1024 — only an administrator may use it on this machine; "
+                f"use a local port like {port + 10000}")
+    return f"port {port} is already used on this machine — pick another local port"
 
 
 def tunnel_argv(conf: ServerConf, t: dict) -> list:
@@ -2076,7 +2084,7 @@ class Tunnel:
         while self.wanted:
             lp = self.spec["localPort"]
             if not self.free(lp):
-                self.state, self.error = "error", f"port {lp} is already used on this machine — pick another local port"
+                self.state, self.error = "error", port_problem(lp)
                 self.wanted = False
                 return
             self.state = "connecting"
@@ -3206,7 +3214,7 @@ class App:
         if on:
             t = self.tunnels.get((project, tid))
             if (not t or not t.wanted) and not local_port_free(hit["localPort"]):
-                raise ApiError(409, f"port {hit['localPort']} is already used on this machine — pick another local port")
+                raise ApiError(409, port_problem(hit["localPort"]))
         return self.set_tunnels(project, specs)
 
     # editor

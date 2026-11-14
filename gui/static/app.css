@@ -646,3 +646,6 @@ body.compact .empty-inner { padding: 0 20px; text-align: center; }
 .empty-actions:empty { display: none; }
 body.touch .empty-actions .btn { height: 40px; padding: 0 18px; font-size: 14px; }
 #restore-box { margin-top: 10px; }
+.act.more { flex: 0 0 34px; font-size: 14px; letter-spacing: 1px; }
+.install-help p { margin: 0 0 10px; line-height: 1.7; }
+.install-help a { color: var(--accent); }

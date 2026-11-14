@@ -123,10 +123,7 @@ const tests = {
     assert.ok(document.body.classList.contains('side-open'), 'opens the projects drawer');
     q('#side-backdrop')[0].click();
     q('.proj-head')[0].dispatch('click');
-    const acts = q('.act').map((b) => [b.textContent, !!b.disabled]);
-    assert.deepStrictEqual(acts, [['Claude', false], ['Terminal', false], ['Code', true], ['Git', false], ['Docker', false], ['Ports', true], ['History', false]],
-      'Code and Ports are shown, disabled');
-    assert.match(q('.act').find((b) => b.textContent === 'Code').getAttribute('title'), /installed app/);
+    assert.deepStrictEqual(q('.act').map((b) => b.textContent), ['Claude', 'Git', '⋯']);
     assert.deepStrictEqual(q('.cmd').map((e) => [e.querySelector('.nm').textContent, e.classList.contains('off')]), [['web', true], ['logs', false]],
       'a local run command is shown, disabled');
     document.body.querySelector('#btn-settings').click();
@@ -169,7 +166,9 @@ const tests = {
     const add = calls.filter((c) => c.url === '/api/manual').pop();
     assert.deepStrictEqual(add.body, { name: 'cheshmeh', local: '', remote: '/home/esi/cheshmeh' });
     // terminals connect over wss on https
-    q('.act').find((b) => b.textContent === 'Terminal').click();
+    document.body.querySelector('#menu-root').replaceChildren();
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.trim() === 'Server terminal').click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/sessions').pop();
     assert.ok(post, 'session asked for');

@@ -636,6 +636,34 @@ class WebHttp(unittest.TestCase):
         self.assertIn("Max-Age=0", r.getheader("Set-Cookie"))
         self.assertEqual(self.req(port, "GET", "/api/state", cookie=tok)[0], 401)
 
+    def test_pwa_files_and_certificate(self):
+        import struct
+        port = self.serve()
+        st, d, r = self.req(port, "GET", "/manifest.webmanifest")
+        self.assertEqual((st, r.getheader("Content-Type")), (200, "application/manifest+json"))
+        m = d if isinstance(d, dict) else json.loads(d)
+        self.assertEqual((m["display"], m["start_url"]), ("standalone", "/"))
+        for icon in m["icons"]:
+            st, raw, _ = self.req(port, "GET", "/" + icon["src"])
+            self.assertEqual(st, 200, icon["src"])
+            if icon["type"] == "image/png":
+                self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+                w, h = struct.unpack(">II", raw[16:24])
+                self.assertEqual(f"{w}x{h}", icon["sizes"])
+        self.assertEqual(sorted(i["purpose"] for i in m["icons"]).count("maskable"), 1)
+        st, js, r = self.req(port, "GET", "/sw.js")
+        self.assertEqual((st, r.getheader("Service-Worker-Allowed")), (200, "/"))
+        self.assertIn(b"/api/", js)                                          # it leaves the API alone
+        self.assertEqual(self.req(port, "GET", "/simab-server.crt")[0], 404)  # nothing to offer
+        pem = Path(self.tmp.name) / "c.pem"
+        pem.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+        self.gate.cert_download = str(pem)
+        st, raw, r = self.req(port, "GET", "/simab-server.crt")
+        self.assertEqual((st, r.getheader("Content-Type")), (200, "application/x-x509-ca-cert"))
+        self.assertTrue(self.req(port, "GET", "/api/web-info")[1]["cert"])
+        pem.write_text("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+        self.assertEqual(self.req(port, "GET", "/simab-server.crt")[0], 404)  # never a key
+
     def test_https(self):
         if not sw.which("openssl"):
             self.skipTest("openssl missing")

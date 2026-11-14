@@ -48,6 +48,8 @@
 #                       Phone/tablet layout (projects drawer, full-screen dialogs, keys
 #                       bar for terminals, add to home screen); installed-app features
 #                       shown disabled on the web. Storage moved to SQLite (simab.db).
+#                       Installable as an app (PWA: service worker, icons); project row
+#                       has only Claude, Git and ⋯; --cert-download for self-signed servers.
 #    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
 #                       (low ports need admin rights) and say so instead of "in use"
 #                       Port forwarding lists the ports open on the server (click to add);

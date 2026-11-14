@@ -123,7 +123,9 @@ const tests = {
 
   async 'project actions open tabs; Terminal goes to the server'() {
     q('.proj-head')[0].dispatch('click');
-    byText('.act', 'Terminal').click();
+    assert.deepStrictEqual(q('.act', q('.proj')[0]).map((b) => b.textContent.replace(/[0-9↑↓!✓]+$/, '')), ['Claude', 'Git', '⋯'], 'only Claude and Git as buttons');
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.trim() === 'Server terminal').click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/sessions' && c.method === 'POST').pop();
     assert.deepStrictEqual([post.body.kind, post.body.where, post.body.project], ['shell', 'server', 'cheshmeh']);
@@ -225,11 +227,12 @@ const tests = {
 
   async 'docker: the project shows its containers; logs, restart and a crash notice'() {
     document.body.querySelector('#modal-root').replaceChildren();
-    const line = byText('.act', 'Docker2/3');
-    assert.ok(line, 'Docker button under the project, with running/total');
-    assert.ok(line.querySelector('.gb').classList.contains('err'), 'a crashed container makes it red');
-    assert.ok(byText('.act', 'Ports1/1'), 'Ports button shows forwarded ports');
-    line.click();
+    assert.ok(q('.gb', q('.proj-head')[0]).some((b) => b.textContent === '▣1'), 'a crashed container shows on the project');
+    q('.act.more')[0].click();
+    const dk = q('button').find((b) => b.textContent.indexOf('Docker containers…') === 0);
+    assert.strictEqual(dk.querySelector('.k').textContent, '2/3 · 1 down', 'the menu shows running/total');
+    assert.strictEqual(q('button').find((b) => b.textContent.indexOf('Port forwarding…') === 0).querySelector('.k').textContent, '1/1');
+    dk.click();
     await settle();
     const modal = q('.modal').pop();
     const rows = q('.dkrow', modal);
@@ -270,7 +273,7 @@ const tests = {
 
   async 'ports dialog edits tunnels'() {
     q('.proj-head')[0].querySelector('.icon-btn').click();
-    q('button').find((b) => b.textContent.trim() === 'Port forwarding…').click();
+    q('button').find((b) => b.textContent.indexOf('Port forwarding…') === 0).click();
     await settle();
     const modal = q('.modal').pop();
     assert.strictEqual(q('.cmd-edit', modal).length, 2);

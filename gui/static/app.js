@@ -131,6 +131,27 @@
     });
   }
 
+  // PWA: the browser offers to install the web version as an app.
+  var installEvt = null;
+  window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); installEvt = e; });
+  window.addEventListener('appinstalled', function () { installEvt = null; toast('Installed — open it from your home screen', 'ok'); });
+  function standalone() { return !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; }
+  function installApp() {
+    if (installEvt) { installEvt.prompt(); installEvt = null; return; }
+    var ios = /iPad|iPhone|Macintosh/.test(navigator.userAgent || '') && 'ontouchend' in document;
+    var md = openModal({ title: 'Install as an app', size: 'sm', body: h('div', { class: 'install-help' },
+      ios ? h('p', null, 'In Safari: tap Share, then “Add to Home Screen”.')
+        : h('p', null, 'In Chrome: open the ⋮ menu, then “Install app” (or “Add to Home screen”).'),
+      h('p', { class: 'muted' }, 'If Chrome does not offer it: this server uses its own certificate, so install it once on the device — ',
+        h('a', { href: '/simab-server.crt', download: 'simab-server.crt' }, 'download the certificate'),
+        ', then Settings → Security → Encryption & credentials → Install a certificate → CA certificate. Reload this page afterwards.')),
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+  }
+  function registerWorker() {
+    if (!S.web || !('serviceWorker' in navigator) || location.protocol !== 'https:') return;
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () { /* untrusted certificate: no offline copy, still works */ });
+  }
+
   function logout() {
     fetch('/api/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-SW': '1' } }).then(function () { location.reload(); }, function () { location.reload(); });
   }
@@ -783,7 +804,7 @@
   }
 
   function splitGroup(g, side, noRender) {
-    if (compact()) { toast('Split sections need a wider screen', 'warn'); return g; }
+    if (compact()) return g;                  // one section at a time on narrow screens
     if (S.active && S.active.info.spec.project) L.lastProject = S.active.info.spec.project;
     var dir = side === 'left' || side === 'right' ? 'h' : 'v';
     var before = side === 'left' || side === 'top';
@@ -1049,6 +1070,7 @@
   }
 
   function layoutItems(tab) {
+    if (compact()) return [];
     return [
       '-',
       { label: 'Split right', k: 'Alt+\\', action: function () { var ng = splitGroup(tab.group, 'right', true); moveTab(tab, ng, 0); } },
@@ -1306,6 +1328,15 @@
     });
   }
 
+  function dockerCount(name) {
+    var d = S.docker[name];
+    return d && d.total ? d.running + '/' + d.total + (d.bad ? ' · ' + d.bad + ' down' : '') : '';
+  }
+  function tunnelCount(name) {
+    var t = projectTunnels(name);
+    return t.length ? t.filter(function (x) { return x.state === 'up'; }).length + '/' + t.length : '';
+  }
+
   function projectMenu(p, anchor) {
     var sync = p.source === 'mutagen';
     var r = hasRemote(p);
@@ -1322,8 +1353,8 @@
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
       '-',
       { label: 'Git…', action: function () { gitDialog(p); } },
-      { label: 'Docker containers…', disabled: !r, action: function () { dockerDialog(p); } },
-      { label: 'Port forwarding…', disabled: !r, action: function () { tunnelsDialog(p); } },
+      { label: 'Docker containers…', disabled: !r, k: dockerCount(p.name), action: function () { dockerDialog(p); } },
+      { label: 'Port forwarding…', disabled: !r, k: tunnelCount(p.name), action: function () { tunnelsDialog(p); } },
       { label: 'Colour…', action: function () { colorDialog(p); } },
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
@@ -1715,18 +1746,8 @@
     var body = h('div', { class: 'proj-body' });
     body.append(h('div', { class: 'acts' },
       h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
-      h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'Terminal on the server, in the project' : 'Local terminal', onclick: function () { openTerminal(p); } }, 'Terminal'),
-      h('button', { class: 'act', disabled: S.web || (!r && !p.localExists), title: S.web ? 'VS Code — ' + APP_ONLY : r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
-      h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name))));
-    var dk = S.docker[p.name], tn = projectTunnels(p.name), tup = tn.filter(function (t) { return t.state === 'up'; }).length;
-    body.append(h('div', { class: 'acts' },
-      h('button', { class: 'act dock', disabled: !r, title: 'Docker containers on the server: state, logs, shell, restart, rebuild'
-        + (dk && dk.total ? '\n' + dk.running + ' of ' + dk.total + ' running' + (dk.bad ? ', ' + dk.bad + ' with problems' : '') : ''),
-        onclick: function () { dockerDialog(p); } }, 'Docker',
-        dk && dk.total ? h('span', { class: 'gb dk ' + (dk.bad ? 'err' : dk.running < dk.total ? 'warn' : 'ok') }, dk.running + '/' + dk.total) : null),
-      h('button', { class: 'act ports', disabled: S.web || !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
-        tn.length ? h('span', { class: 'gb dk ' + (tup ? 'ok' : '') }, tup + '/' + tn.length) : null),
-      h('button', { class: 'act', title: 'What you did in this project', onclick: function () { historyDialog(p.name); } }, 'History')));
+      h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name)),
+      h('button', { class: 'act more', title: 'Terminal, VS Code, Docker, ports, history…', onclick: function (e) { e.stopPropagation(); projectMenu(p, e.currentTarget); } }, '⋯')));
     p.commands.forEach(function (c) {
       if (S.web && c.where !== 'server') {
         body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — ' + APP_ONLY },
@@ -2614,14 +2635,17 @@
     items.push({ label: 'Server terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'server' }); } });
     items.push({ label: 'Local terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'local' }); } });
     items.push({ label: 'Grid: all tabs side by side', grp: 'layout', action: gridAll });
-    items.push({ label: 'Split right', grp: 'layout', action: function () { splitGroup(L.focused, 'right'); } });
-    items.push({ label: 'Split down', grp: 'layout', action: function () { splitGroup(L.focused, 'bottom'); } });
+    if (!compact()) {
+      items.push({ label: 'Split right', grp: 'layout', action: function () { splitGroup(L.focused, 'right'); } });
+      items.push({ label: 'Split down', grp: 'layout', action: function () { splitGroup(L.focused, 'bottom'); } });
+    }
     items.push({ label: 'Single section', grp: 'layout', action: mergeAll });
     items.push({ label: 'Toggle sidebar', grp: 'layout', action: toggleWorkMode });
     items.push({ label: 'Add project…', grp: 'app', action: addManualProject });
     items.push({ label: 'History — what you did', grp: 'app', action: function () { historyDialog(); } });
     items.push({ label: 'Claude usage — limits and cost', grp: 'app', action: usageDialog });
     items.push({ label: 'Settings', grp: 'app', action: settingsDialog });
+    if (S.web && !standalone()) items.push({ label: 'Install as an app', grp: 'app', action: installApp });
     if (S.web) items.push({ label: 'Sign out', grp: 'app', action: logout });
     else items.push({ label: 'Quit (stop every terminal)', grp: 'app', action: quitApp });
     if (S.web) items = items.filter(function (it) { return !/local terminal|VS Code|port forwarding|\(localhost:/.test(it.label); });
@@ -2689,6 +2713,7 @@
 
   // ------------------------------------------------------------------ keyboard
   function isGlobalShortcut(e) {
+    if (e.isComposing || e.keyCode === 229) return false;      // on-screen keyboards (Android), IME input
     if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyP') return true;
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       if (/^Digit[1-9]$/.test(e.code)) return true;
@@ -2763,6 +2788,7 @@
         S.projects = d.projects;
         renderProjects();
         repaintTabs();
+        if (!S.tabs.length) renderEmpty();
         refreshStatus(false);
       }
     }).catch(function () {});
@@ -2943,6 +2969,7 @@
         { label: 'Single section', disabled: L.groups.length < 2, action: mergeAll },
         { label: 'Hide sidebar', k: 'Alt+M', action: toggleWorkMode },
         '-',
+        S.web && !standalone() ? { label: 'Install as an app…', action: installApp } : null,
         S.web ? { label: 'Sign out', action: logout } : null,
         { label: 'Quit', action: quitApp }
       ]));
@@ -2979,6 +3006,7 @@
     api('GET', 'state').then(function (st) {
       S.web = !!st.web;
       document.body.classList.toggle('web', S.web);
+      registerWorker();
       S.settings = st.settings;
       S.server = st.server;
       S.projects = st.projects;

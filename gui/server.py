@@ -3635,7 +3635,8 @@ class WebGate:
     FAILS_PER_IP = 5
     FAILS_ALL = 30
 
-    def __init__(self, root: Path, hosts=None, trust_proxy=False, secure=True, verify=None, start_loops=True):
+    def __init__(self, root: Path, hosts=None, trust_proxy=False, secure=True, verify=None, start_loops=True, cert_download=""):
+        self.cert_download = cert_download      # the server's own certificate, offered for installing on a device
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
@@ -3669,7 +3670,7 @@ class WebGate:
         one = self.hosts[0] if len(self.hosts) == 1 else ""
         host, _, port = one.rpartition(":") if ":" in one and not one.startswith("[") else (one, "", "")
         return {"web": True, "version": VERSION, "hosts": self.hosts,
-                "host": host or one, "port": port or ("22" if one else "")}
+                "host": host or one, "port": port or ("22" if one else ""), "cert": bool(self.cert_download)}
 
     def host_allowed(self, host: str, port: str) -> bool:
         return not self.hosts or host in self.hosts or f"{host}:{port}" in self.hosts
@@ -3820,6 +3821,7 @@ def serve_web(args: list):
     ap.add_argument("--name", default="", help="address in the self-signed certificate (IP or domain)")
     ap.add_argument("--proxy", action="store_true", help="behind an HTTPS proxy (nginx…): plain HTTP, trust X-Real-IP")
     ap.add_argument("--data", default="", help="folder for workspaces (default ~/.config/simabworkspace/web)")
+    ap.add_argument("--cert-download", default="", help="certificate (PEM, no key) people may download to trust this server")
     a = ap.parse_args(args)
     install_crash_logging()
     root = Path(a.data or (config_dir() / "web")).expanduser()
@@ -3827,6 +3829,9 @@ def serve_web(args: list):
     cert, key = a.cert, a.key
     if not a.proxy and not cert:
         cert, key = self_signed_cert(root, a.name or "localhost")
+        gate.cert_download = cert
+    if a.cert_download:
+        gate.cert_download = a.cert_download
     httpd = make_web_server(gate, a.bind, a.port, "" if a.proxy else cert, key)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: threading.Thread(target=httpd.shutdown, daemon=True).start())
@@ -3843,7 +3848,7 @@ def serve_web(args: list):
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8",
-        ".webmanifest": "application/manifest+json"}
+        ".webmanifest": "application/manifest+json", ".crt": "application/x-x509-ca-cert"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3885,6 +3890,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(403, "forbidden")
             if path == "/api/web-info" and method == "GET":
                 return self._json(200, gate.info())
+            if path == "/simab-server.crt" and method == "GET":
+                if not gate.cert_download or not os.path.isfile(gate.cert_download):
+                    raise ApiError(404, "not found")
+                pem = Path(gate.cert_download).read_bytes()
+                if b"PRIVATE KEY" in pem:                       # never hand out a key by mistake
+                    raise ApiError(404, "not found")
+                return self._send(200, pem, "application/x-x509-ca-cert",
+                                  {"Content-Disposition": 'attachment; filename="simab-server.crt"'})
+            if path == "/sw.js" and method == "GET":
+                return self._send(200, (STATIC / "sw.js").read_bytes(), MIME[".js"], {"Service-Worker-Allowed": "/"})
             if path == "/api/login" and method == "POST":
                 if self.headers.get("X-SW") != "1":
                     raise ApiError(403, "forbidden")

@@ -39,6 +39,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.18.2 2026-11-14  WSL: the app keeps WSL running while it runs (closing the last
+#                       terminal no longer kills it); lost connection → one notice and
+#                       automatic reconnect instead of "Failed to fetch"; crash log
 #    1.18.1 2026-11-14  setup never looks frozen: numbered steps, sudo asked first, a
 #                       spinner with seconds and the latest output line for long steps
 #    1.18.0 2026-11-14  updates: the window says when a new version is out and installs it
@@ -119,7 +122,7 @@
 
 set -u -o pipefail
 
-VERSION="1.18.1"
+VERSION="1.18.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

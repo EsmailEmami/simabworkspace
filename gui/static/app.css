@@ -503,3 +503,7 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 
 .update-note { margin: 0 10px 8px; height: 28px; border-radius: 6px; border: 1px solid #1f5f4f; background: #0f2a24; color: var(--ok); font: 12px var(--mono); }
 .update-note:hover { filter: brightness(1.2); }
+
+.conn-lost { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 95; max-width: 640px;
+  padding: 9px 14px; border-radius: 8px; background: #2a1d0b; border: 1px solid #6b4f1d; color: #f0d29a; font-size: 12.5px; box-shadow: 0 10px 30px #000a; }
+.conn-lost kbd { color: #f0d29a; }

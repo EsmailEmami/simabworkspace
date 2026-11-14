@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "simabworkspace"
-VERSION = "1.18.1"
+VERSION = "1.18.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -3197,7 +3197,45 @@ def app_url(st) -> str:
     return f"http://127.0.0.1:{st['port']}/#t={st['token']}"
 
 
+def log_line(msg: str):
+    """Timestamped line in gui.log (stdout/stderr of the background service go there)."""
+    print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, file=sys.stderr, flush=True)
+
+
+def install_crash_logging():
+    def hook(exc_type, exc, tb):
+        import traceback
+        log_line("CRASH " + "".join(traceback.format_exception(exc_type, exc, tb)).strip())
+    sys.excepthook = hook
+    threading.excepthook = lambda a: hook(a.exc_type, a.exc_value, a.exc_traceback)
+
+
+def wsl_keepalive_argv(distro: str, pid: int) -> list:
+    """WSL stops a distro (killing every process in it) a few seconds after its last
+    terminal window closes. A hidden Windows-side `wsl.exe` that lives exactly as long
+    as this service keeps it running."""
+    if distro and not re.fullmatch(r"[A-Za-z0-9._-]+", distro):
+        distro = ""
+    # one argument string with explicit quotes (Windows PowerShell 5.1 does not quote list items)
+    line = (f"-d {distro} " if distro else "") + f'-e sh -c "while kill -0 {int(pid)} 2>/dev/null; do sleep 10; done"'
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
+            "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList '" + line.replace("'", "''") + "'"]
+
+
+def start_wsl_keepalive():
+    if not is_wsl() or not shutil.which("powershell.exe"):
+        return
+    try:
+        subprocess.Popen(wsl_keepalive_argv(os.environ.get("WSL_DISTRO_NAME", ""), os.getpid()),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
+        log_line("WSL keep-alive started")
+    except OSError as e:
+        log_line(f"WSL keep-alive failed: {e}")
+
+
 def serve(foreground_msg=True):
+    install_crash_logging()
     store = Store()
     app = App(store)
     httpd = make_server(app, int(store.settings.get("port") or 0), wait=15 if os.environ.get("SIMAB_RESTART") else 0)
@@ -3215,6 +3253,8 @@ def serve(foreground_msg=True):
         subprocess.Popen([exe, "daemon", "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          stdin=subprocess.DEVNULL, env=dict(os.environ, PATH=tool_path()))
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
+    start_wsl_keepalive()
+    log_line(f"started {VERSION} on 127.0.0.1:{app.port} (pid {os.getpid()})")
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: threading.Thread(target=shutdown_app, args=(app,), daemon=True).start())
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -3224,6 +3264,7 @@ def serve(foreground_msg=True):
         httpd.serve_forever(poll_interval=0.5)
     finally:
         app.shutdown_sessions()
+        log_line("stopped")
 
 
 def stop_running(st) -> bool:

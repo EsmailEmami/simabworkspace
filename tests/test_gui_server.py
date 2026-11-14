@@ -1492,6 +1492,30 @@ class BashProgress(unittest.TestCase):
         self.assertIn("OK Updating the package list", text)
 
 
+class StayingAlive(unittest.TestCase):
+    def test_wsl_keepalive_command(self):
+        argv = sw.wsl_keepalive_argv("Ubuntu-22.04", 4321)
+        self.assertEqual(argv[:2], ["powershell.exe", "-NoProfile"])
+        self.assertEqual(argv[-1], "Start-Process -WindowStyle Hidden -FilePath wsl.exe -ArgumentList "
+                                   "'-d Ubuntu-22.04 -e sh -c \"while kill -0 4321 2>/dev/null; do sleep 10; done\"'")
+        self.assertNotIn("-d", sw.wsl_keepalive_argv("bad name;rm", 1)[-1].split("ArgumentList")[1].split("-e")[0])
+
+    def test_keepalive_only_on_wsl(self):
+        with mock.patch.object(sw, "is_wsl", return_value=False), mock.patch.object(sw.subprocess, "Popen") as p:
+            sw.start_wsl_keepalive()
+            p.assert_not_called()
+        with mock.patch.object(sw, "is_wsl", return_value=True), mock.patch.object(sw.shutil, "which", return_value="/x/powershell.exe"), \
+                mock.patch.object(sw.subprocess, "Popen") as p:
+            sw.start_wsl_keepalive()
+            self.assertEqual(p.call_args[0][0][0], "powershell.exe")
+
+    def test_crashes_are_logged_with_a_time(self):
+        code = ("import sys,threading; sys.path.insert(0, %r); import server as s; s.install_crash_logging(); "
+                "t=threading.Thread(target=lambda: 1/0); t.start(); t.join()") % str(ROOT / "gui")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertRegex(r.stderr, r"(?s)\d{4}-\d\d-\d\d \d\d:\d\d:\d\d CRASH .*ZeroDivisionError")
+
+
 class BashScript(unittest.TestCase):
     def test_syntax_and_gui_command(self):
         import subprocess
@@ -1499,7 +1523,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.18.1"', text)
+        self.assertIn('VERSION="1.18.2"', text)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,14 @@
   function api(method, path, body) {
     var opts = { method: method, headers: { 'X-Token': token } };
     if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-    return fetch('/api/' + path, opts).then(function (r) {
+    return fetch('/api/' + path, opts).catch(function () {
+      // the app's background service is not reachable (stopped, crashed, WSL shut down…)
+      connectionLost();
+      var e = new Error('The app is not reachable — reconnecting…');
+      e.offline = true;
+      throw e;
+    }).then(function (r) {
+      if (connLost) connectionBack();
       if (r.status === 401) staleWindow();
       return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) { var er = new Error(d.error || ('HTTP ' + r.status)); er.status = r.status; throw er; }
@@ -59,15 +66,39 @@
     });
   }
 
+  // Lost connection: one clear notice (not a toast per request), retry until it is back.
+  var connLost = null;
+  function connectionLost() {
+    if (connLost || staleShown) return;
+    connLost = h('div', { class: 'conn-lost' }, h('b', null, 'Lost connection to the app.'),
+      ' Reconnecting… If it does not come back, start it again: Start menu → ', h('i', null, 'Simab Workspace'),
+      ', or run ', h('kbd', null, 'simabworkspace gui'), '.');
+    document.body.append(connLost);
+    (function poll() {
+      if (!connLost) return;
+      fetch('/api/ping', { headers: { 'X-Token': token } }).then(function (r) {
+        if (r.status === 401) { connectionBack(); staleWindow(); return; }
+        if (r.ok) { connectionBack(); return; }
+        setTimeout(poll, 2000);
+      }).catch(function () { setTimeout(poll, 2000); });
+    })();
+  }
+  function connectionBack() {
+    if (!connLost) return;
+    connLost.remove();
+    connLost = null;
+    if (typeof refreshProjects === 'function') { refreshProjects(); refreshStatus(true); }
+    S.tabs.forEach(function (t) { if (t.ws && t.ws.readyState > 1 && !t.closed && !t.gone && t.connect) t.connect(); });
+  }
+
   // The app was restarted (e.g. updated): this window's key no longer works.
   var staleShown = false;
   function staleWindow() {
     if (staleShown) return;
     staleShown = true;
-    var el = document.createElement('div');
-    el.className = 'empty stale';
-    el.innerHTML = '<div class="empty-inner"><p class="empty-title">This window is from an older run of the app</p>' +
-      '<p class="muted">The app was restarted (probably updated). Use the window that just opened, or run <kbd>simabworkspace gui</kbd>. You can close this one.</p></div>';
+    var el = h('div', { class: 'empty stale' }, h('div', { class: 'empty-inner' },
+      h('p', { class: 'empty-title' }, 'This window is from an older run of the app'),
+      h('p', { class: 'muted' }, 'The app was restarted (probably updated). Use the window that just opened, or run ', h('kbd', null, 'simabworkspace gui'), '. You can close this one.')));
     document.body.append(el);
   }
 
@@ -142,7 +173,7 @@
     $('#toasts').append(el);
     setTimeout(function () { el.remove(); }, opts.timeout || (type === 'err' ? 7000 : 3500));
   }
-  function fail(e) { toast(e && e.message ? e.message : String(e), 'err'); }
+  function fail(e) { if (e && e.offline) return; toast(e && e.message ? e.message : String(e), 'err'); }
 
   // ------------------------------------------------------------------ menus
   var menuEl = null;

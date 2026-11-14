@@ -44,7 +44,9 @@ const state = {
     { name: 'shop', source: 'manual', local: '', remote: '/srv/shop', localExists: false, sync: null, endpoint: {}, commands: [] }
   ]
 };
+let offline = false;
 global.fetch = (url, opts) => {
+  if (offline) return Promise.reject(new TypeError('Failed to fetch'));
   const method = (opts && opts.method) || 'GET';
   const body = opts && opts.body ? JSON.parse(opts.body) : undefined;
   calls.push({ method, url, body });
@@ -83,6 +85,8 @@ global.fetch = (url, opts) => {
 };
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+// the sidebar's ⟲ button calls the API (like the periodic refreshes do)
+const refreshFromOutside = async () => { document.body.querySelector('#btn-history').click(); await settle(); document.body.querySelector('#modal-root').replaceChildren(); };
 async function settle() { for (let i = 0; i < 8; i++) await tick(); }
 const q = (sel, root) => (root || document.body).querySelectorAll(sel);
 const byText = (sel, text) => q(sel).find((e) => e.textContent.trim() === text);
@@ -322,6 +326,21 @@ const tests = {
     await settle();
     assert.ok(calls.some((c) => c.url === '/api/update' && c.method === 'POST'));
     assert.ok(q('.stale').some((e) => /Updating to 10\.0\.0/.test(e.textContent)));
+  },
+
+  async 'when the app is unreachable: one notice, no toast storm, back by itself'() {
+    const toastsBefore = q('.toast').length;
+    offline = true;
+    await refreshFromOutside();
+    await settle();
+    const lost = q('.conn-lost');
+    assert.strictEqual(lost.length, 1);
+    assert.match(lost[0].textContent, /Lost connection to the app/);
+    assert.strictEqual(q('.toast').length, toastsBefore, 'no "Failed to fetch" toasts');
+    offline = false;
+    await new Promise((r) => setTimeout(r, 2300));
+    await settle();
+    assert.strictEqual(q('.conn-lost').length, 0, 'gone when the app is back');
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

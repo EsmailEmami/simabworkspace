@@ -1,0 +1,55 @@
+name: release
+
+# Push a tag like v1.16.3 → tests run, the installer is built and a GitHub
+# release is published with everything people download.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tests
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq jq >/dev/null
+          python3 -m unittest discover -s tests
+
+      - name: Build
+        run: |
+          bash release.sh
+          cp install.sh install.ps1 dist/
+          (cd dist && sha256sum install.sh install.ps1 >> SHA256SUMS)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          notes=$(awk -v v="$version" '$0 ~ "^#    "v" " {p=1} p && /^#    [0-9]/ && $0 !~ "^#    "v" " {exit} p {sub(/^#    /, ""); print}' simabworkspace.sh)
+          {
+            echo "## Install"
+            echo
+            echo 'Linux / macOS / WSL:'
+            echo '```'
+            echo 'curl -fsSL https://raw.githubusercontent.com/EsmailEmami/simabworkspace/main/install.sh | bash'
+            echo '```'
+            echo 'Windows (PowerShell):'
+            echo '```'
+            echo 'irm https://raw.githubusercontent.com/EsmailEmami/simabworkspace/main/install.ps1 | iex'
+            echo '```'
+            echo
+            echo "## Changes"
+            echo '```'
+            echo "$notes"
+            echo '```'
+          } > notes.md
+          gh release create "$tag" dist/* --title "Simab Workspace $version" --notes-file notes.md

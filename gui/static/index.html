@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simab Workspace</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="side-head">
+      <span class="brand">simab</span>
+      <span class="status">
+        <i class="dot" id="st-ssh" title="Server"></i>
+        <i class="dot" id="st-sync" title="Sync"></i>
+      </span>
+      <button class="icon-btn" id="btn-hide-side" title="Hide sidebar (Alt+M)">‹</button>
+    </header>
+    <input id="proj-filter" type="search" placeholder="Filter projects" autocomplete="off" spellcheck="false">
+    <div id="projects"></div>
+    <footer class="side-foot">
+      <button class="link" id="btn-palette" title="Search everything">Ctrl+Shift+P</button>
+      <span>
+        <button class="icon-btn" id="btn-history" title="History — what you did">⟲</button>
+        <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
+      </span>
+    </footer>
+  </aside>
+  <div id="resizer"></div>
+  <main id="workspace">
+    <div id="layout"></div>
+    <div id="empty" class="empty hidden">
+      <div class="empty-inner">
+        <p class="empty-title">No tabs open</p>
+        <p class="muted">Pick a project on the left, or press <kbd>Ctrl+Shift+P</kbd>.</p>
+        <div id="restore-box" class="hidden"></div>
+      </div>
+    </div>
+  </main>
+</div>
+<button id="show-side" title="Show sidebar (Alt+M)">›</button>
+<div id="modal-root"></div>
+<div id="menu-root"></div>
+<div id="toasts"></div>
+
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+<script src="vendor/addon-web-links.js"></script>
+<script src="vendor/addon-search.js"></script>
+<script src="vendor/addon-unicode11.js"></script>
+<script src="vendor/addon-webgl.js"></script>
+<script src="app.js"></script>
+<script src="chat.js"></script>
+</body>
+</html>

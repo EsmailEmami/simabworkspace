@@ -1,0 +1,322 @@
+// Runs chat.js against a real recorded Claude stream:  node tests/js/chat_test.js
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+const { install } = require('./dom');
+
+const ROOT = path.resolve(__dirname, '..', '..');
+install();
+
+// the real h() from app.js
+const app = fs.readFileSync(path.join(ROOT, 'gui/static/app.js'), 'utf8');
+const hSrc = app.slice(app.indexOf('  function h(tag, props) {'), app.indexOf('  var FA_RE'));
+const h = new Function(hSrc + '; return h;')();
+
+const toasts = [];
+function makeSW() {
+  return {
+    h, api: (...a) => global.apiImpl(...a), toast: (m) => toasts.push(m), fail: (e) => { throw e; },
+    S: { settings: {}, active: null }, faNum: String, token: 't', project: () => ({ remote: '/home/esi/p' }),
+    closeTab() {}, activate() {}, setupDrag() {}, isGlobalShortcut: () => false,
+    confirmDlg: () => Promise.resolve(true), openSession() {}, showMenu() {}, renameTab() {},
+    notify() {}, pickClaudeSession() {}, layoutItemsFor: () => [], viewImage(src) { global.viewed = src; },
+    tabEl(tab) { tab.ttlEl = h('span', { class: 'ttl' }, tab.info.title); tab.el = h('div', { class: 'tab' }, tab.ttlEl); }
+  };
+}
+global.apiImpl = () => Promise.resolve({});
+global.SW = makeSW();
+require(path.join(ROOT, 'gui/static/chat.js'));
+const { ChatTab } = global.SWChat;
+global.SWChat.instant = true;     // no typewriter delay in most tests
+
+function newTab() {
+  const tab = new ChatTab({ id: 'c1', title: 'Claude · p', spec: { kind: 'chat', project: 'p', where: 'server' }, alive: true });
+  global.SW.S.active = tab;
+  const ws = global.sockets[global.sockets.length - 1];
+  return { tab, feed: (m) => ws.onmessage({ data: JSON.stringify(m) }), ws };
+}
+const byClass = (el, c) => el.querySelectorAll('.' + c);
+
+const tests = {
+  'reply of a real stream is shown once'() {
+    const { tab, feed } = newTab();
+    const stream = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/chat_stream_fa.json'), 'utf8'));
+    stream.forEach(feed);
+    const answers = byClass(tab.msgs, 'amsg');
+    assert.strictEqual(answers.length, 1, 'one assistant block');
+    assert.match(answers[0].textContent, /سلام/);
+    assert.strictEqual(byClass(answers[0], 'live-text').length, 0, 'live draft replaced by the final text');
+    assert.strictEqual(byClass(answers[0], 'md').length, 1);
+    assert.strictEqual(byClass(tab.msgs, 'umsg').length, 1);
+    assert.strictEqual(byClass(tab.msgs, 'result-line').length, 1);
+    assert.strictEqual(tab.busy, false);
+  },
+
+  'text streams in while typing (before the final message)'() {
+    const { tab, feed } = newTab();
+    const se = (event) => feed({ t: 'e', e: { type: 'stream_event', event, parent_tool_use_id: null } });
+    se({ type: 'message_start', message: { id: 'm1' } });
+    se({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+    se({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'سلام، ' } });
+    se({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'خوبم' } });
+    assert.strictEqual(byClass(tab.msgs, 'live-text')[0].textContent, 'سلام، خوبم');
+    assert.strictEqual(tab.busy, true);
+  },
+
+  'thinking + text + tool: final message replaces drafts, tool result fills the card'() {
+    const { tab, feed } = newTab();
+    const se = (event) => feed({ t: 'e', e: { type: 'stream_event', event, parent_tool_use_id: null } });
+    const asst = (content) => feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content } } });
+    se({ type: 'message_start', message: { id: 'm1' } });
+    se({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } });
+    asst([{ type: 'thinking', thinking: '' }]);
+    se({ type: 'content_block_stop', index: 0 });
+    se({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
+    se({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'بررسی می‌کنم' } });
+    asst([{ type: 'text', text: 'بررسی می‌کنم' }]);
+    se({ type: 'content_block_stop', index: 1 });
+    se({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', name: 'Bash' } });
+    asst([{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }]);
+    se({ type: 'content_block_stop', index: 2 });
+    feed({ t: 'e', e: { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'a.txt' }] } } });
+    const g = byClass(tab.msgs, 'amsg')[0];
+    assert.strictEqual(byClass(g, 'live-text').length, 0);
+    assert.strictEqual(byClass(g, 'md').length, 1);
+    assert.strictEqual(byClass(g, 'tool-card').length, 1, 'one tool card, the draft card is gone');
+    assert.match(byClass(g, 'tool-result')[0].textContent, /a\.txt/);
+    assert.strictEqual(byClass(g, 'thinking').length, 0, 'empty thinking is not shown');
+  },
+
+  'question card answers with the extension format'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q1', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+      input: { questions: [{ question: 'کدام؟', header: 'انتخاب', multiSelect: false, options: [{ label: 'اول' }, { label: 'دوم' }] }] } } } });
+    const opts = byClass(tab.msgs, 'q-opt');
+    assert.strictEqual(opts.length, 2);
+    opts[1].click();
+    const sent = ws.sent[ws.sent.length - 1];
+    assert.deepStrictEqual(sent, { t: 'perm', id: 'q1', allow: true, always: false, message: '', input: { answers: { 'کدام؟': 'دوم' } } });
+  },
+
+  'plan card: approve with auto-edit'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'p1', request: { subtype: 'can_use_tool', tool_name: 'ExitPlanMode', input: { plan: '## برنامه\n- یک' } } } });
+    const card = byClass(tab.msgs, 'plan-card')[0];
+    assert.match(card.textContent, /برنامه/);
+    card.querySelector('.btn').click();
+    const sent = ws.sent[ws.sent.length - 1];
+    assert.strictEqual(sent.allow, true);
+    assert.deepStrictEqual(sent.permissions, [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
+  },
+
+  'answer is shown from the result if no text block arrived'() {
+    const { tab, feed } = newTab();
+    feed({ t: 'e', e: { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'سلام' }] } } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'سلام! خوبم.', duration_ms: 3100, num_turns: 1 } });
+    const g = byClass(tab.msgs, 'amsg');
+    assert.strictEqual(g.length, 1);
+    assert.match(g[0].textContent, /خوبم/);
+  },
+
+  'no duplicate answer from the result when text was shown'() {
+    const { tab, feed } = newTab();
+    const stream = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/chat_stream_fa.json'), 'utf8'));
+    stream.forEach(feed);
+    assert.strictEqual(byClass(tab.msgs, 'amsg').length, 1);
+  },
+
+  'live status follows what Claude is doing'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    feed({ t: 's', events: [], state: { alive: true, busy: false } });
+    assert.strictEqual(tab.stText.textContent, 'ready');
+    const se = (event) => feed({ t: 'e', e: { type: 'stream_event', event, parent_tool_use_id: null } });
+    feed({ t: 'e', e: { type: 'system', subtype: 'status', status: 'requesting' } });
+    assert.strictEqual(tab.stText.textContent, 'requesting…');
+    assert.strictEqual(byClass(tab.msgs, 'sysline').length, 0, 'status is not written into the chat');
+    se({ type: 'message_start', message: { id: 'm1' } });
+    se({ type: 'content_block_start', index: 0, content_block: { type: 'text' } });
+    assert.strictEqual(tab.stText.textContent, 'writing…');
+    se({ type: 'message_delta', usage: { output_tokens: 1500 } });
+    assert.match(tab.stExtra.textContent, /1\.5k tokens/);
+    feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command: 'npm test' } }] } } });
+    assert.strictEqual(tab.stText.textContent, 'running Bash npm test');
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: { questions: [] } } } });
+    assert.strictEqual(tab.stText.textContent, 'waiting for your answer');
+    assert.match(tab.statusEl.className, /wait/);
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'x' } });
+    assert.strictEqual(tab.stText.textContent, 'ready');
+    ws.onclose();
+    assert.match(tab.stText.textContent, /disconnected/);
+  },
+
+  'Persian question cards are right-to-left'() {
+    const { tab, feed } = newTab();
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q1', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+      input: { questions: [{ question: 'کدام؟', options: [{ label: 'اول' }] }] } } } });
+    assert.strictEqual(byClass(tab.msgs, 'q-block')[0].getAttribute('dir'), 'auto');
+    assert.strictEqual(byClass(tab.msgs, 'q-opt')[0].getAttribute('dir'), 'auto');
+  },
+
+  'your message shows at once and the echo does not duplicate it'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    tab.ta.value = 'سلام، یک تست';
+    tab.submit();
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1].content, [{ type: 'text', text: 'سلام، یک تست' }]);
+    let bubbles = byClass(tab.msgs, 'umsg');
+    assert.strictEqual(bubbles.length, 1);
+    assert.ok(bubbles[0].classList.contains('pending'));
+    assert.strictEqual(tab.stText.textContent, 'sending…');
+    feed({ t: 'e', e: { type: 'user', isReplay: true, parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'سلام، یک تست' }] } } });
+    bubbles = byClass(tab.msgs, 'umsg');
+    assert.strictEqual(bubbles.length, 1, 'echo merged into the bubble');
+    assert.ok(!bubbles[0].classList.contains('pending'));
+  },
+
+  async 'text is typed out live, then becomes markdown in place'() {
+    global.SWChat.instant = false;
+    try {
+      const { tab, feed } = newTab();
+      const se = (event) => feed({ t: 'e', e: { type: 'stream_event', event, parent_tool_use_id: null } });
+      se({ type: 'message_start', message: { id: 'm9' } });
+      se({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } });
+      const th = byClass(tab.msgs, 'thinking')[0];
+      assert.strictEqual(th.open, true, 'thinking is open while it streams');
+      feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm9', content: [{ type: 'thinking', thinking: 'hmm' }] } } });
+      se({ type: 'content_block_start', index: 1, content_block: { type: 'text' } });
+      const long = 'یک جملهٔ نسبتاً طولانی برای دیدن تایپ زنده. '.repeat(6);
+      se({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: long } });
+      const live = byClass(tab.msgs, 'live-text')[0];
+      assert.ok(live.textContent.length < long.length, 'not all at once');
+      feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm9', content: [{ type: 'text', text: long }] } } });
+      assert.strictEqual(byClass(tab.msgs, 'md').length, 0, 'final waits until typing is done');
+      await new Promise((r) => setTimeout(r, 600));
+      assert.strictEqual(byClass(tab.msgs, 'live-text').length, 0);
+      assert.strictEqual(byClass(tab.msgs, 'md').length, 1);
+      const g = byClass(tab.msgs, 'amsg')[0];
+      assert.ok(g.children[0].classList.contains('thinking') && g.children[1].classList.contains('md'), 'order kept');
+    } finally { global.SWChat.instant = true; }
+  },
+
+  'a broken stored event does not break echo matching or the status'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    // snapshot with a corrupt event in the middle (content block is null)
+    feed({ t: 's', state: { alive: true, busy: false }, events: [
+      { type: 'user', message: { content: [{ type: 'text', text: 'قبلی' }] } },
+      { type: 'user', message: { content: [null] } },
+      { type: 'result', subtype: 'success', result: 'ok' }] });
+    assert.strictEqual(tab.replaying, false, 'not stuck in replay');
+    tab.ta.value = 'چطوی';
+    tab.submit();
+    // the echo may differ slightly (e.g. normalised text) — it is matched by order
+    feed({ t: 'e', e: { type: 'user', isReplay: true, parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'چطوی ' }] } } });
+    const bubbles = byClass(tab.msgs, 'umsg').map((b) => b.textContent);
+    assert.deepStrictEqual(bubbles, ['قبلی', 'چطوی']);
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'خوبم' } });
+    assert.strictEqual(tab.stText.textContent, 'ready');
+    assert.strictEqual(tab.turnStart, 0, 'timer stopped');
+  },
+
+  'images in messages are shown and open large on click'() {
+    const { tab, feed } = newTab();
+    feed({ t: 'e', e: { type: 'user', parent_tool_use_id: null, message: { content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }, { type: 'text', text: 'این چیه؟' }] } } });
+    const img = byClass(tab.msgs, 'uthumbs')[0].querySelector('img');
+    img.click();
+    assert.strictEqual(global.viewed, 'data:image/png;base64,iVBORw0KGgo=');
+    tab.attachments = [{ type: 'image/png', data: 'AAA=', url: 'data:image/png;base64,AAA=' }];
+    tab.renderAttach();
+    tab.attachEl.querySelector('img').click();
+    assert.strictEqual(global.viewed, 'data:image/png;base64,AAA=');
+  },
+
+  async 'long chats load the last page first and earlier pages on scroll-up'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    const msg = (i) => [{ type: 'user', message: { content: [{ type: 'text', text: 'q' + i }] } },
+      { type: 'assistant', message: { id: 'm' + i, content: [{ type: 'text', text: 'a' + i }] } }];
+    let entries = [];
+    for (let i = 80; i < 100; i++) entries = entries.concat(msg(i));
+    feed({ t: 's', state: { alive: true }, events: [{ type: '_history', entries, start: 160, total: 200 }] });
+    assert.strictEqual(byClass(tab.msgs, 'umsg').length, 20);
+    assert.match(tab.topEl.textContent, /scroll up/);
+    let older = [];
+    for (let i = 60; i < 80; i++) older = older.concat(msg(i));
+    const asked = [];
+    global.apiImpl = (method, path) => { asked.push(path); return Promise.resolve({ total: 200, start: 120, entries: older }); };
+    tab.scroller.scrollTop = 0;
+    tab.scroller.dispatch('scroll');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepStrictEqual(asked, ['chat-history/c1?before=160']);
+    const texts = byClass(tab.msgs, 'umsg').map((b) => b.textContent);
+    assert.strictEqual(texts.length, 40);
+    assert.strictEqual(texts[0], 'q60', 'older messages are added above');
+    assert.strictEqual(texts[20], 'q80');
+    assert.strictEqual(tab.histStart, 120);
+    global.apiImpl = () => Promise.resolve({});
+  },
+
+  'a message sent while Claude works is queued, then picked up'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    tab.ta.value = 'first';
+    tab.submit();
+    feed({ t: 'e', e: { type: 'user', isReplay: true, parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'first' }] } } });
+    feed({ t: 'e', e: { type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'm1' } } } });
+    assert.strictEqual(tab.busy, true);
+    tab.ta.value = 'also do this';
+    tab.submit();
+    const sent = ws.sent.filter((m) => m.t === 'send');
+    assert.strictEqual(sent.length, 2, 'sent right away (Claude queues it)');
+    const q2 = byClass(tab.msgs, 'umsg').pop();
+    assert.ok(q2.classList.contains('queued'));
+    assert.match(q2.textContent, /queued/);
+    assert.match(tab.stExtra.textContent, /1 queued/);
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'done 1' } });
+    assert.strictEqual(tab.stText.textContent, 'next: your queued message…');
+    feed({ t: 'e', e: { type: 'user', isReplay: true, parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'also do this' }] } } });
+    assert.ok(!q2.classList.contains('queued'));
+    assert.ok(!/queued/.test(q2.textContent));
+    assert.strictEqual(byClass(tab.msgs, 'umsg').length, 2, 'no duplicate bubbles');
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'done 2' } });
+    assert.strictEqual(tab.stText.textContent, 'ready');
+  },
+
+  'running agents are listed with what they are doing'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [
+      { type: 'tool_use', id: 'ag1', name: 'Task', input: { description: 'Find payment bug', subagent_type: 'Explore' } },
+      { type: 'tool_use', id: 'ag2', name: 'Agent', input: { description: 'بررسی فرانت', subagent_type: 'general-purpose' } }] } } });
+    assert.ok(!tab.agentsEl.classList.contains('hidden'));
+    assert.strictEqual(byClass(tab.agentsEl, 'ag').length, 2);
+    assert.match(tab.agentsEl.textContent, /2 agents working/);
+    feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: 'ag1', message: { id: 's1', content: [{ type: 'tool_use', id: 'x', name: 'Grep', input: { pattern: 'refund' } }] } } });
+    assert.match(byClass(tab.agentsEl, 'ag')[0].textContent, /Grep refund/);
+    assert.match(byClass(tab.agentsEl, 'ag')[0].textContent, /1 steps/);
+    feed({ t: 'e', e: { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'ag1', content: 'found it' }] } } });
+    assert.strictEqual(byClass(tab.agentsEl, 'ag').length, 1);
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'ok' } });
+    assert.ok(tab.agentsEl.classList.contains('hidden'), 'cleared when the turn ends');
+  },
+
+  'markdown: code, lists, tables, links'() {
+    const md = global.SWChat.markdown('# عنوان\n\nمتن `کد` و **پررنگ** https://x.dev\n\n- یک\n- دو\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfmt.Println(1)\n```');
+    assert.strictEqual(md.querySelectorAll('h3').length, 1);
+    assert.strictEqual(md.querySelectorAll('li').length, 2);
+    assert.strictEqual(md.querySelectorAll('td').length, 2);
+    assert.strictEqual(md.querySelectorAll('a').length, 1);
+    assert.match(md.querySelector('.codeblock').textContent, /fmt\.Println/);
+  }
+};
+
+(async () => {
+let failed = 0;
+for (const [name, fn] of Object.entries(tests)) {
+  try { await fn(); console.log('ok   ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + (e.stack || e).toString().split('\n').slice(0, 4).join('\n     ')); }
+}
+process.exit(failed ? 1 : 0);
+})();

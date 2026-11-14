@@ -988,6 +988,13 @@ class FrontendJs(unittest.TestCase):
         self.assertIn("group", props)
         self.assertEqual(props & methods, set())
 
+    def test_web_version(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not found")
+        r = subprocess.run([node, str(ROOT / "tests" / "js" / "web_test.js")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_chat_panel(self):
         node = find_node()
         if not node:
@@ -1523,7 +1530,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.19.1"', text)
+        self.assertIn('VERSION="1.20.0"', text)
 
 
 if __name__ == "__main__":

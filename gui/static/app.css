@@ -561,3 +561,24 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .fbtn i { font-style: normal; font-size: 14px; line-height: 16px; }
 .fbtn:hover { background: var(--bg3); color: var(--text); }
 .act .gb.dk { margin-left: 4px; }
+
+/* web version: sign-in page */
+body.web #st-sync { display: none; }
+.login-wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: var(--bg); }
+.login { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 2px; }
+.login-brand { font: 600 22px var(--mono); letter-spacing: .5px; margin-bottom: 4px; }
+.login-brand span { color: var(--faint); font-weight: 400; margin-left: 6px; }
+.login-sub { font-size: 12.5px; margin-bottom: 16px; }
+.login-host { padding: 8px 10px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 12.5px; }
+.login .btn.primary { height: 36px; margin-top: 6px; }
+.login .add-err { margin-bottom: 6px; }
+.login-note { font-size: 11px; margin-top: 12px; text-align: center; }
+
+/* touch screens (tablet): bigger targets */
+@media (pointer: coarse) {
+  .act { height: 32px; font-size: 12.5px; }
+  .cmd { padding: 6px 4px; }
+  .icon-btn { min-width: 32px; min-height: 32px; }
+  .btn.sm { height: 30px; }
+  .fbtn { padding: 8px 0; }
+}

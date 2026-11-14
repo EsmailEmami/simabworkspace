@@ -315,7 +315,7 @@
   P.connect = function () {
     var self = this;
     if (this.closed || this.gone) return;
-    var ws = new WebSocket('ws://' + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(SW.token));
+    var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(SW.token));
     this.ws = ws;
     ws.onopen = function () { self.retry = 0; self.conn = 'online'; self.renderStatus(); };
     ws.onmessage = function (ev) {

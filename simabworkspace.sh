@@ -30,6 +30,7 @@
 #    simabworkspace self-install    install the `simabworkspace` command and window files (used by the installer)
 #    simabworkspace update          download and install the latest release
 #    simabworkspace gui stop|status|url   stop / check the window's background server
+#    simabworkspace web --hosts SERVER   the workspace in the browser (tablet…), sign in with SSH user+password
 #    simabworkspace ssh             open a shell on the server
 #    simabworkspace key             choose / create the SSH key used for the server
 #    simabworkspace setup           (re)check prerequisites, SSH key, settings
@@ -39,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.20.0 2026-11-14  Web version: `simabworkspace web` serves the workspace to a browser
+#                       (tablet…) over HTTPS; sign in with an SSH user and password of an
+#                       allowed server (checked, never stored); one workspace per user;
+#                       server-only (no local terminals, sync, VS Code, port forwarding)
 #    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
 #                       (low ports need admin rights) and say so instead of "in use"
 #                       Port forwarding lists the ports open on the server (click to add);
@@ -131,7 +136,7 @@
 
 set -u -o pipefail
 
-VERSION="1.19.1"
+VERSION="1.20.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1456,6 +1461,14 @@ run_gui() {
   "$py" "$d/server.py" "${1:-open}"
 }
 
+# The workspace in the browser, for a tablet or another computer (see `simabworkspace web --help`).
+run_web() {
+  local d py
+  py=$(command -v python3 2>/dev/null) || { err "The web version needs python3."; return 1; }
+  d=$(gui_dir) || { err "GUI files not found. Keep the 'gui' folder next to $APP.sh."; return 1; }
+  "$py" "$d/server.py" web "$@"
+}
+
 uninstall_all() {
   title "Uninstall"
   warn "This stops syncing ALL projects (your files stay on both sides),"
@@ -1566,6 +1579,7 @@ main() {
     # used by the window: never start the interactive setup for these
     install)   [ -x "$BIN_DIR/mutagen" ] && ensure_path; install_one "${2:-}"; exit $? ;;
     gui)       [ -x "$BIN_DIR/mutagen" ] && ensure_path; run_gui "${2:-open}"; exit $? ;;
+    web)       shift; run_web "$@"; exit $? ;;
   esac
 
   # first run, or a tool went missing: full setup (prereqs → user → SSH key)

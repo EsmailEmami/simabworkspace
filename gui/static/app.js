@@ -48,7 +48,7 @@
   }
 
   function api(method, path, body) {
-    var opts = { method: method, headers: { 'X-Token': token } };
+    var opts = { method: method, headers: { 'X-Token': token, 'X-SW': '1' }, credentials: 'same-origin' };
     if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     return fetch('/api/' + path, opts).catch(function () {
       // the app's background service is not reachable (stopped, crashed, WSL shut down…)
@@ -58,8 +58,8 @@
       throw e;
     }).then(function (r) {
       if (connLost) connectionBack();
-      if (r.status === 401) staleWindow();
       return r.json().catch(function () { return {}; }).then(function (d) {
+        if (r.status === 401) { if (d.login) showLogin(); else staleWindow(); }
         if (!r.ok) { var er = new Error(d.error || ('HTTP ' + r.status)); er.status = r.status; throw er; }
         return d;
       });
@@ -70,14 +70,15 @@
   var connLost = null;
   function connectionLost() {
     if (connLost || staleShown) return;
-    connLost = h('div', { class: 'conn-lost' }, h('b', null, 'Lost connection to the app.'),
+    connLost = S.web ? h('div', { class: 'conn-lost' }, h('b', null, 'Lost connection.'), ' Reconnecting…')
+      : h('div', { class: 'conn-lost' }, h('b', null, 'Lost connection to the app.'),
       ' Reconnecting… If it does not come back, start it again: Start menu → ', h('i', null, 'Simab Workspace'),
       ', or run ', h('kbd', null, 'simabworkspace gui'), '.');
     document.body.append(connLost);
     (function poll() {
       if (!connLost) return;
-      fetch('/api/ping', { headers: { 'X-Token': token } }).then(function (r) {
-        if (r.status === 401) { connectionBack(); staleWindow(); return; }
+      fetch('/api/ping', { headers: { 'X-Token': token, 'X-SW': '1' }, credentials: 'same-origin' }).then(function (r) {
+        if (r.status === 401) { connectionBack(); if (S.web) showLogin(); else staleWindow(); return; }
         if (r.ok) { connectionBack(); return; }
         setTimeout(poll, 2000);
       }).catch(function () { setTimeout(poll, 2000); });
@@ -89,6 +90,49 @@
     connLost = null;
     if (typeof refreshProjects === 'function') { refreshProjects(); refreshStatus(true); }
     S.tabs.forEach(function (t) { if (t.ws && t.ws.readyState > 1 && !t.closed && !t.gone && t.connect) t.connect(); });
+  }
+
+  // Web version: sign in with an SSH user and password of an allowed server.
+  var loginShown = false;
+  function showLogin() {
+    if (loginShown) return;
+    loginShown = true;
+    fetch('/api/web-info', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).catch(function () { return {}; }).then(function (info) {
+      var host = h('input', { class: 'inp mono', value: info.host || '', placeholder: 'server address', autocomplete: 'off', spellcheck: 'false' });
+      var port = h('input', { class: 'inp mono', value: info.port || '22', placeholder: '22', inputmode: 'numeric' });
+      var user = h('input', { class: 'inp mono', placeholder: 'user', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
+      var pw = h('input', { class: 'inp', type: 'password', placeholder: 'password', autocomplete: 'current-password' });
+      var err = h('div', { class: 'add-err hidden' });
+      var go = h('button', { class: 'btn primary', type: 'submit' }, 'Sign in');
+      var fixed = (info.hosts || []).length === 1;
+      function submit(e) {
+        e.preventDefault();
+        if (!user.value.trim()) { user.focus(); return; }
+        if (!pw.value) { pw.focus(); return; }
+        go.disabled = true; go.textContent = 'Signing in…'; err.classList.add('hidden');
+        fetch('/api/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-SW': '1' },
+          body: JSON.stringify({ host: host.value.trim(), port: port.value.trim(), user: user.value.trim(), password: pw.value }) })
+          .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); }); })
+          .then(function () { location.reload(); })
+          .catch(function (e2) { pw.value = ''; go.disabled = false; go.textContent = 'Sign in'; err.textContent = e2.message; err.classList.remove('hidden'); pw.focus(); });
+      }
+      var form = h('form', { class: 'login', onsubmit: submit },
+        h('div', { class: 'login-brand' }, 'simab', h('span', null, 'workspace')),
+        h('div', { class: 'muted login-sub' }, 'Sign in with your SSH user on the server.'),
+        fixed ? h('div', { class: 'login-host mono' }, info.host + (info.port && info.port !== '22' ? ':' + info.port : '')) :
+          h('div', { class: 'row' }, h('div', { class: 'field' }, h('label', null, 'Server'), host),
+            h('div', { class: 'field', style: 'flex:0 0 80px' }, h('label', null, 'SSH port'), port)),
+        h('div', { class: 'field' }, h('label', null, 'User'), user),
+        h('div', { class: 'field' }, h('label', null, 'Password'), pw),
+        err, go,
+        h('div', { class: 'muted login-note' }, 'The password is only used to sign in; it is not stored.'));
+      document.body.replaceChildren(h('div', { class: 'login-wrap' }, form));
+      setTimeout(function () { user.focus(); }, 50);
+    });
+  }
+
+  function logout() {
+    fetch('/api/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-SW': '1' } }).then(function () { location.reload(); }, function () { location.reload(); });
   }
 
   // The app was restarted (e.g. updated): this window's key no longer works.
@@ -376,7 +420,7 @@
   Tab.prototype.connect = function () {
     var self = this;
     if (this.closed || this.gone) return;
-    var ws = new WebSocket('ws://' + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(token));
+    var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(token));
     this.ws = ws;
     ws.onopen = function () {
       self.retry = 0;
@@ -1216,10 +1260,15 @@
   function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) ? 'server' : 'local', project: p.name }); }
   function openCode(p) { openEditor(p, hasRemote(p) ? 'server' : 'local'); }
 
+  var WEB_HIDDEN = ['Local terminal', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
+  function webItems(items) {
+    return S.web ? items.filter(function (it) { return !(it && it.label && WEB_HIDDEN.indexOf(it.label) >= 0); }) : items;
+  }
+
   function projectMenu(p, anchor) {
     var sync = p.source === 'mutagen';
     var r = hasRemote(p);
-    menuAt(anchor, [
+    menuAt(anchor, webItems([
       { header: 'Claude' },
       { label: 'New chat', disabled: !r, action: function () { openSession({ kind: 'chat', project: p.name }); } },
       { label: 'Continue last chat', disabled: !r, action: function () { resumeLatest(p.name); } },
@@ -1260,7 +1309,7 @@
           if (ok) api('DELETE', 'manual/' + encodeURIComponent(p.name)).then(refreshProjects).catch(fail);
         });
       } } : null
-    ]);
+    ]));
   }
 
 
@@ -1624,7 +1673,7 @@
     body.append(h('div', { class: 'acts' },
       h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
       h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'Terminal on the server, in the project' : 'Local terminal', onclick: function () { openTerminal(p); } }, 'Terminal'),
-      h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
+      S.web ? null : h('button', { class: 'act', disabled: !r && !p.localExists, title: r ? 'VS Code connected to the server folder (Remote-SSH)' : 'VS Code, local folder', onclick: function () { openCode(p); } }, 'Code'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name))));
     var dk = S.docker[p.name], tn = projectTunnels(p.name), tup = tn.filter(function (t) { return t.state === 'up'; }).length;
     body.append(h('div', { class: 'acts' },
@@ -1632,10 +1681,11 @@
         + (dk && dk.total ? '\n' + dk.running + ' of ' + dk.total + ' running' + (dk.bad ? ', ' + dk.bad + ' with problems' : '') : ''),
         onclick: function () { dockerDialog(p); } }, 'Docker',
         dk && dk.total ? h('span', { class: 'gb dk ' + (dk.bad ? 'err' : dk.running < dk.total ? 'warn' : 'ok') }, dk.running + '/' + dk.total) : null),
-      h('button', { class: 'act ports', disabled: !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
+      S.web ? null : h('button', { class: 'act ports', disabled: !r, title: 'Port forwarding: reach a server port (database, API, page) on localhost', onclick: function () { tunnelsDialog(p); } }, 'Ports',
         tn.length ? h('span', { class: 'gb dk ' + (tup ? 'ok' : '') }, tup + '/' + tn.length) : null),
       h('button', { class: 'act', title: 'What you did in this project', onclick: function () { historyDialog(p.name); } }, 'History')));
     p.commands.forEach(function (c) {
+      if (S.web && c.where !== 'server') return;
       var t = runningCmd(p.name, c.id);
       body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
@@ -1660,7 +1710,8 @@
     function row(c) {
       var name = h('input', { class: 'inp', value: c.name || '', placeholder: 'Name, e.g. web' });
       var where = h('select', { class: 'inp' }, h('option', { value: 'local' }, 'Local'), h('option', { value: 'server' }, 'Server'));
-      where.value = c.where || 'local';
+      where.value = S.web ? 'server' : (c.where || 'local');
+      if (S.web) where.classList.add('hidden');
       var cmd = h('textarea', { class: 'inp mono', rows: 2, value: c.cmd || '', placeholder: 'npm start', spellcheck: 'false' });
       var cwd = h('input', { class: 'inp mono', value: c.cwd || '', placeholder: 'folder (empty = project root)', list: dirsId });
       var url = h('input', { class: 'inp mono', value: c.url || '', placeholder: 'URL to open (optional)' });
@@ -1751,12 +1802,13 @@
           h('div', { class: 'row' },
             h('div', { class: 'field' }, h('label', null, 'Folder on the server'), remote),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)),
-          h('div', { class: 'field' }, h('label', null, 'Folder on this machine (optional)'), local)];
+          S.web ? null : h('div', { class: 'field' }, h('label', null, 'Folder on this machine (optional)'), local)];
       }
     };
     var area = h('div');
     var go = h('button', { class: 'btn primary', onclick: submit });
-    var modes = [['download', 'From the server', 'Download, then keep in sync'], ['upload', 'From this machine', 'Upload, then keep in sync'], ['list', 'Server only', 'No sync, work on the server']];
+    var modes = S.web ? [['list', 'Server folder', 'Work on it on the server']]
+      : [['download', 'From the server', 'Download, then keep in sync'], ['upload', 'From this machine', 'Upload, then keep in sync'], ['list', 'Server only', 'No sync, work on the server']];
     var seg = h('div', { class: 'seg' });
     function show(m) {
       mode = m;
@@ -1789,7 +1841,7 @@
     }
     var md = openModal({ title: 'Add project', body: [seg, h('div', { style: 'height:12px' }), area, errBox],
       foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
-    show('download');
+    show(S.web ? 'list' : 'download');
   }
 
   // ------------------------------------------------------------------ settings
@@ -1827,13 +1879,6 @@
         pwRow.classList.remove('hidden');
       }
     }
-    api('GET', 'connection').then(function (c) {
-      cUser.value = c.user; cHost.value = c.host; cPort.value = c.port;
-      fillKeys(c.keys, c.key);
-      autostart.checked = c.autostart;
-      daemonInfo.textContent = c.daemon ? 'running' : 'stopped';
-      api('GET', 'status?force=1').then(showStatus);
-    }).catch(fail);
     function saveConn() {
       connMsg.className = 'conn-msg muted'; connMsg.textContent = 'Testing…';
       return api('POST', 'connection', { user: cUser.value, host: cHost.value, port: cPort.value, key: cKey.value })
@@ -1856,9 +1901,32 @@
     }
     autostart.addEventListener('change', function () { api('POST', 'autostart', { on: autostart.checked }).catch(fail); });
 
+    var webBody = S.web ? [
+      h('div', { class: 'sec' }, 'Account'),
+      h('div', { class: 'svc' }, h('span', null, 'Signed in as ', h('b', { class: 'mono' }, S.server.user + '@' + S.server.host + (String(S.server.port) !== '22' ? ':' + S.server.port : ''))),
+        h('button', { class: 'btn sm', onclick: logout }, 'Sign out')),
+      chk('serverPersist', 'Keep server terminals alive (tmux)', 'Shells survive a dropped connection; reopening attaches to the same one.'),
+      h('div', { class: 'sec' }, 'Claude'),
+      h('div', { class: 'row' },
+        field('Command', inp('claudeCmd', { class: 'inp mono' })),
+        field('Default mode', sel('chatMode', [['default', 'Ask before edits'], ['acceptEdits', 'Auto-accept edits'], ['plan', 'Plan'], ['auto', 'Auto']]))),
+      h('div', { class: 'sec' }, 'Terminal'),
+      h('div', { class: 'row' }, field('Font size', inp('fontSize', { type: 'number', min: 9, max: 32, class: 'inp mono' }))),
+      chk('copyOnSelect', 'Copy on select'),
+      chk('persianView', 'Show the Persian reading view automatically', 'When Persian text appears in a terminal.'),
+      chk('bellNotify', 'Notification when a tab needs you'),
+      chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.')
+    ] : null;
+    if (!S.web) api('GET', 'connection').then(function (c) {
+      cUser.value = c.user; cHost.value = c.host; cPort.value = c.port;
+      fillKeys(c.keys, c.key);
+      autostart.checked = c.autostart;
+      daemonInfo.textContent = c.daemon ? 'running' : 'stopped';
+      api('GET', 'status?force=1').then(showStatus);
+    }).catch(fail);
     var md = openModal({
       title: 'Settings',
-      body: [
+      body: webBody || [
         h('div', { class: 'sec' }, 'Server'),
         h('div', { class: 'row' }, field('User', cUser), field('Address', cHost), h('div', { style: 'flex:0 0 90px' }, field('SSH port', cPort))),
         h('div', { class: 'row', style: 'align-items:flex-end' }, field('SSH key', cKey),
@@ -1920,6 +1988,7 @@
     });
     f.persianView.checked = s.persianView === 'auto';
   }
+
 
   function applySettings() {
     S.tabs.forEach(function (t) { if (t.term) t.term.options.fontSize = S.settings.fontSize; });
@@ -2108,6 +2177,7 @@
         return h('button', { class: 'pchip on ' + t.state, title: 'Forwarded: localhost:' + t.localPort + ' on this machine' + (t.state === 'up' ? '' : ' (' + t.state + ')') + '\nclick for options',
           onclick: function (e) { tunnelMenu(t, e.currentTarget); } }, label, h('span', { class: 'pto' }, '⇄ ' + t.localPort));
       }
+      if (S.web) return h('span', { class: 'pchip', title: 'Port ' + pt.host + ' on the server (' + pt.proto + ')' }, label);
       return h('button', { class: 'pchip', title: 'Port ' + pt.host + ' on the server (' + pt.proto + ')\nclick: reach it from this machine (localhost:' + pt.host + ')',
         onclick: function () { addTunnel(p, { name: c.service || c.name, remoteHost: '127.0.0.1', remotePort: pt.host, localPort: pt.host, on: true, http: false }); setTimeout(load, 300); } }, label);
     }
@@ -2437,7 +2507,9 @@
     items.push({ label: 'History — what you did', grp: 'app', action: function () { historyDialog(); } });
     items.push({ label: 'Claude usage — limits and cost', grp: 'app', action: usageDialog });
     items.push({ label: 'Settings', grp: 'app', action: settingsDialog });
-    items.push({ label: 'Quit (stop every terminal)', grp: 'app', action: quitApp });
+    if (S.web) items.push({ label: 'Sign out', grp: 'app', action: logout });
+    else items.push({ label: 'Quit (stop every terminal)', grp: 'app', action: quitApp });
+    if (S.web) items = items.filter(function (it) { return !/local terminal|VS Code|port forwarding|\(localhost:/.test(it.label); });
     return items;
   }
 
@@ -2495,6 +2567,7 @@
     items.push({ label: 'Local terminal', action: function () { openSession({ kind: 'shell', where: 'local' }); } });
     items.push('-');
     items.push({ label: 'Everything…', k: 'Ctrl+Shift+P', action: openPalette });
+    items = webItems(items);
     if (anchor) menuAt(anchor, items);
     else { var r = (L.focused ? L.focused.bar : $('#layout')).getBoundingClientRect(); showMenu(r.left + 8, r.bottom + 4, items); }
   }
@@ -2710,7 +2783,7 @@
     $('#btn-usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     $('#btn-settings').addEventListener('click', function (e) {
-      menuAt(e.currentTarget, [
+      menuAt(e.currentTarget, webItems([
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
@@ -2718,8 +2791,9 @@
         { label: 'Single section', disabled: L.groups.length < 2, action: mergeAll },
         { label: 'Hide sidebar', k: 'Alt+M', action: toggleWorkMode },
         '-',
+        S.web ? { label: 'Sign out', action: logout } : null,
         { label: 'Quit', action: quitApp }
-      ]);
+      ]));
     });
     $('#btn-hide-side').addEventListener('click', function () { setWorkMode(true); });
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
@@ -2737,12 +2811,21 @@
 
   function boot() {
     if (!token) {
-      document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' },
-        h('p', { class: 'empty-title' }, 'Open this window with: simabworkspace gui'))));
+      fetch('/api/web-info', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : {}; }).catch(function () { return {}; }).then(function (info) {
+        if (info.web) { S.web = true; start(); return; }
+        document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' },
+          h('p', { class: 'empty-title' }, 'Open this window with: simabworkspace gui'))));
+      });
       return;
     }
+    start();
+  }
+
+  function start() {
     wire();
     api('GET', 'state').then(function (st) {
+      S.web = !!st.web;
+      document.body.classList.toggle('web', S.web);
       S.settings = st.settings;
       S.server = st.server;
       S.projects = st.projects;
@@ -2765,21 +2848,23 @@
       if (t) activate(t); else renderEmpty();
       refreshStatus(true);
       // first run on a new machine: everything is set up in Settings
-      if (!st.server.configured) { toast('Welcome — set up this machine and your server here', 'ok', { timeout: 8000 }); settingsDialog(); }
+      if (!st.server.configured && !S.web) { toast('Welcome — set up this machine and your server here', 'ok', { timeout: 8000 }); settingsDialog(); }
       setInterval(refreshProjects, 5000);
-      setTimeout(function () { checkUpdate(false); }, 3000);
-      setInterval(function () { checkUpdate(false); }, 6 * 3600 * 1000);
+      if (!S.web) {
+        setTimeout(function () { checkUpdate(false); }, 3000);
+        setInterval(function () { checkUpdate(false); }, 6 * 3600 * 1000);
+      }
       refreshGit();
       setInterval(function () { refreshGit(); }, 10000);
       setInterval(function () { refreshStatus(false); }, 20000);
       refreshDocker();
       setInterval(refreshDocker, 15000);
-      refreshTunnels();
-      setInterval(refreshTunnels, 5000);
+      if (!S.web) { refreshTunnels(); setInterval(refreshTunnels, 5000); }
       refreshUsage();
       setInterval(refreshUsage, 30000);
       window.addEventListener('sw-usage', debounce(refreshUsage, 500));
     }).catch(function (e) {
+      if (e.status === 401 && S.web) return;          // the sign-in page is shown
       document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' },
         h('p', { class: 'empty-title' }, 'Cannot reach the app'), h('p', { class: 'muted' }, e.message + ' — run simabworkspace gui'))));
     });

@@ -407,3 +407,210 @@ class Routes(TmpHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- web version
+FAKE_SSH = r'''#!/usr/bin/env python3
+import sys, os, subprocess, getpass
+pw = getpass.getpass(sys.argv[-2] + "'s password: ")
+if pw != "right":
+    print("Permission denied, please try again."); sys.exit(255)
+sys.exit(subprocess.call(["sh", "-c", sys.argv[-1]]))
+'''
+
+
+class WebVersion(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "web"
+        self.checked = []
+
+        def verify(conf, pw):
+            self.checked.append((conf.user, conf.host, conf.port, conf.key))
+            if pw != "right":
+                raise sw.ApiError(401, "wrong user or password")
+        self.verify = verify
+        self.gate = sw.WebGate(self.root, ["127.0.0.1:22"], verify=verify, start_loops=False)
+        self.keygen = mock.patch.object(sw, "ensure_ssh_key", lambda p: None)
+        self.keygen.start()
+
+    def tearDown(self):
+        self.keygen.stop()
+        self.gate.shutdown()
+        self.tmp.cleanup()
+
+    def login(self, pw="right", ip="1.2.3.4", **kw):
+        body = dict({"host": "127.0.0.1", "port": "22", "user": "esi", "password": pw}, **kw)
+        return self.gate.login(ip, body)
+
+    def test_sign_in_makes_a_workspace(self):
+        tok = self.login()
+        app = self.gate.app_for(tok)
+        self.assertTrue(app.web)
+        self.assertEqual((app.conf.user, app.conf.host, app.conf.port), ("esi", "127.0.0.1", "22"))
+        self.assertTrue(app.conf.key.startswith(str(self.root)))
+        self.assertIsNone(self.gate.app_for("forged"))
+        self.assertIs(self.gate.app_for(self.login()), app)                       # same user@server, same workspace
+        self.assertNotIn(tok, (self.root / "sessions.json").read_text())          # only hashes are stored
+        # sessions survive a restart; signing out ends one
+        gate2 = sw.WebGate(self.root, ["127.0.0.1:22"], verify=self.verify, start_loops=False)
+        self.assertIsNotNone(gate2.app_for(tok))
+        gate2.logout(tok)
+        self.assertIsNone(gate2.app_for(tok))
+
+    def test_expired_and_idle_sessions(self):
+        tok = self.login()
+        rec = next(iter(self.gate.sessions.values()))
+        rec["last"] = time.time() - 8 * 86400
+        self.assertIsNone(self.gate.app_for(tok))
+
+    def test_only_allowed_servers_and_valid_input(self):
+        with self.assertRaises(sw.ApiError) as cm:
+            self.login(host="10.0.0.9")
+        self.assertEqual(cm.exception.status, 403)
+        for bad in ({"user": "x;rm"}, {"user": ""}, {"port": "x"}, {"host": "a b"}, {"password": ""}, {"password": "a\nb"}):
+            with self.assertRaises(sw.ApiError, msg=bad):
+                self.login(**bad)
+        self.assertEqual(self.checked, [])                                        # nothing reached ssh
+        open_gate = sw.WebGate(self.root, [], verify=self.verify, start_loops=False)
+        self.assertTrue(open_gate.host_allowed("anything", "22"))
+
+    def test_brute_force_is_slowed_down(self):
+        for _ in range(5):
+            with self.assertRaises(sw.ApiError):
+                self.login("wrong")
+        with self.assertRaises(sw.ApiError) as cm:
+            self.login("right")                                                   # even the right one now
+        self.assertEqual(cm.exception.status, 429)
+        self.assertTrue(self.login("right", ip="5.6.7.8"))                        # another address still can
+
+    def test_verify_password_with_a_fake_ssh(self):
+        self.keygen.stop()
+        home = Path(self.tmp.name) / "home"
+        bindir = Path(self.tmp.name) / "bin"
+        bindir.mkdir()
+        (bindir / "ssh").write_text(FAKE_SSH)
+        (bindir / "ssh").chmod(0o755)
+        key = Path(self.tmp.name) / "k" / "id_ed25519"
+        if not sw.which("ssh-keygen"):
+            self.skipTest("ssh-keygen missing")
+        sw.ensure_ssh_key(key)
+        conf = sw.ServerConf("esi", "127.0.0.1", "22", str(key))
+        with mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(home)}):
+            with self.assertRaises(sw.ApiError) as cm:
+                sw.web_verify_password(conf, "wrong")
+            self.assertEqual(cm.exception.status, 401)
+            sw.web_verify_password(conf, "right")
+            sw.web_verify_password(conf, "right")
+        keys = (home / ".ssh" / "authorized_keys").read_text().splitlines()
+        self.assertEqual(keys, [Path(str(key) + ".pub").read_text().strip()])     # added once
+        self.keygen.start()
+
+    def test_web_workspace_has_no_local_side(self):
+        app = self.gate.app_for(self.login())
+        app.store.add_manual({"name": "p", "remote": "/srv/p", "local": "/"})
+        self.assertEqual([(p["local"], p["localExists"]) for p in app.projects(max_age=0)], [("", False)])
+        for body in ({"kind": "add-local", "local": "/"}, {"kind": "sync-info", "project": "p"}, {"kind": "run", "project": "p"}):
+            with self.assertRaises(sw.ApiError):
+                app.create_session(body)
+        app.store.set_commands("p", [{"name": "x", "cmd": "ls", "where": "local"}])
+        cid = app.store.commands("p")[0]["id"]
+        with self.assertRaises(sw.ApiError) as cm:
+            app.create_session({"kind": "run", "project": "p", "cmdId": cid})
+        self.assertEqual(cm.exception.status, 403)
+        with mock.patch.object(sw.Session, "start", lambda self: None):
+            info = app.create_session({"kind": "shell", "project": "p", "where": "local"})
+        self.assertEqual(info["spec"]["where"], "server")
+
+
+class WebHttp(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keygen = mock.patch.object(sw, "ensure_ssh_key", lambda p: None)
+        self.keygen.start()
+
+        def verify(conf, pw):
+            if pw != "right":
+                raise sw.ApiError(401, "wrong user or password")
+        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1"], verify=verify, start_loops=False)
+
+    def tearDown(self):
+        self.keygen.stop()
+        self.gate.shutdown()
+        self.tmp.cleanup()
+
+    def serve(self, cert="", key=""):
+        httpd = sw.make_web_server(self.gate, "127.0.0.1", 0, cert, key)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return httpd.server_address[1]
+
+    def req(self, port, method, path, body=None, cookie="", origin=True, xsw=True, tls=False):
+        import http.client
+        import ssl
+        c = http.client.HTTPSConnection("127.0.0.1", port, timeout=5, context=ssl._create_unverified_context()) if tls \
+            else http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {"Host": f"tablet.example:{port}"}
+        if origin:
+            h["Origin"] = f"https://tablet.example:{port}"
+        if xsw:
+            h["X-SW"] = "1"
+        if cookie:
+            h["Cookie"] = f"other=1; sw_web={cookie}"
+        if body is not None:
+            h["Content-Type"] = "application/json"
+        c.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=h)
+        r = c.getresponse()
+        raw = r.read()
+        c.close()
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = raw
+        return r.status, data, r
+
+    def test_sign_in_flow_and_blocked_routes(self):
+        port = self.serve()
+        st, d, r = self.req(port, "GET", "/")
+        self.assertEqual(st, 200)
+        self.assertIn("wss://tablet.example", r.getheader("Content-Security-Policy"))
+        self.assertIn("frame-ancestors 'none'", r.getheader("Content-Security-Policy"))
+        self.assertEqual(self.req(port, "GET", "/api/web-info")[1]["host"], "127.0.0.1")
+        st, d, _ = self.req(port, "GET", "/api/state")
+        self.assertEqual((st, d.get("login")), (401, True))
+        creds = {"host": "127.0.0.1", "user": "esi", "password": "right"}
+        self.assertEqual(self.req(port, "POST", "/api/login", creds, origin=False)[0], 403)   # another site
+        self.assertEqual(self.req(port, "POST", "/api/login", creds, xsw=False)[0], 403)
+        self.assertEqual(self.req(port, "POST", "/api/login", dict(creds, password="no"))[0], 401)
+        st, d, r = self.req(port, "POST", "/api/login", creds)
+        self.assertEqual(st, 200)
+        ck = r.getheader("Set-Cookie")
+        for part in ("HttpOnly", "SameSite=Strict", "Secure", "Path=/"):
+            self.assertIn(part, ck)
+        tok = ck.split(";")[0].split("=", 1)[1]
+        st, d, _ = self.req(port, "GET", "/api/state", cookie=tok)
+        self.assertEqual((st, d["web"], d["server"]["user"]), (200, True, "esi"))
+        self.assertEqual(self.req(port, "GET", "/api/state", cookie=tok, xsw=False)[0], 403)
+        for method, path in (("POST", "/api/quit"), ("POST", "/api/uninstall"), ("POST", "/api/editor"), ("GET", "/api/connection"),
+                             ("POST", "/api/ssh-key/create"), ("POST", "/api/update"), ("POST", "/api/tunnels/x"), ("POST", "/api/add-project")):
+            self.assertEqual(self.req(port, method, path, {}, cookie=tok)[0], 403, path)
+        self.assertEqual(self.req(port, "POST", "/api/manual", {"name": "p", "remote": "/srv/p", "local": "/etc"}, cookie=tok)[0], 200)
+        st, d, _ = self.req(port, "POST", "/api/commands/p", {"commands": [{"name": "x", "cmd": "ls", "where": "local"}]}, cookie=tok)
+        self.assertEqual(d["commands"][0]["where"], "server")
+        app = next(iter(self.gate.apps.values()))
+        self.assertEqual(app.store.manual()[0]["local"], "")
+        # the websocket needs the sign-in too, and the same origin
+        self.assertEqual(self.req(port, "GET", "/ws?id=x", origin=True)[0], 401)
+        self.assertEqual(self.req(port, "GET", "/ws?id=x", cookie=tok, origin=False)[0], 403)
+        st, _, r = self.req(port, "POST", "/api/logout", {}, cookie=tok)
+        self.assertIn("Max-Age=0", r.getheader("Set-Cookie"))
+        self.assertEqual(self.req(port, "GET", "/api/state", cookie=tok)[0], 401)
+
+    def test_https(self):
+        if not sw.which("openssl"):
+            self.skipTest("openssl missing")
+        cert, key = sw.self_signed_cert(Path(self.tmp.name), "127.0.0.1")
+        port = self.serve(cert, key)
+        st, d, _ = self.req(port, "GET", "/api/web-info", tls=True)
+        self.assertEqual((st, d["web"]), (200, True))

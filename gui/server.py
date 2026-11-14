@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP = "simabworkspace"
-VERSION = "1.19.1"
+VERSION = "1.20.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2272,7 +2272,6 @@ def create_ssh_key() -> str:
 
 def install_ssh_key(conf: ServerConf, password: str, timeout=45) -> str:
     """ssh-copy-id with the server password typed into its prompt (once). The password is never stored."""
-    import pty
     if not conf.key or not os.path.isfile(conf.key + ".pub"):
         raise ApiError(400, "choose or create a key first")
     tool = which("ssh-copy-id")
@@ -2282,6 +2281,16 @@ def install_ssh_key(conf: ServerConf, password: str, timeout=45) -> str:
         pub = Path(conf.key + ".pub").read_text().strip()
         argv = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", str(conf.port), conf.target,
                 "umask 077; mkdir -p ~/.ssh; grep -qxF " + shlex.quote(pub) + " ~/.ssh/authorized_keys 2>/dev/null || echo " + shlex.quote(pub) + " >> ~/.ssh/authorized_keys"]
+    sent, text = ssh_with_password(argv, password, timeout)
+    if sent >= 2 or re.search(r"Permission denied", text):
+        raise ApiError(400, "wrong password (or password login is disabled on the server)")
+    return text[-500:]
+
+
+def ssh_with_password(argv: list, password: str, timeout=45) -> tuple:
+    """Run argv in a terminal and type the password at each NEW password prompt (at most twice).
+    Returns (prompts answered, output)."""
+    import pty
     pid, fd = pty.fork()
     if pid == 0:
         try:
@@ -2317,10 +2326,11 @@ def install_ssh_key(conf: ServerConf, password: str, timeout=45) -> str:
         _, st = os.waitpid(pid, 0)
     except OSError:
         st = 1
-    text = out.decode("utf-8", "replace")
-    if sent >= 2 or re.search(r"Permission denied", text):
-        raise ApiError(400, "wrong password (or password login is disabled on the server)")
-    return text[-500:]
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return sent, out.decode("utf-8", "replace")
 
 
 def desktop_quote(arg: str) -> str:
@@ -2364,7 +2374,8 @@ def fetch_latest_release(timeout=10) -> dict:
 
 # ----------------------------------------------------------------------------- application
 class App:
-    def __init__(self, store: Store = None, conf: ServerConf = None):
+    def __init__(self, store: Store = None, conf: ServerConf = None, web: bool = False):
+        self.web = web                # a workspace of the web version: server only, no local side
         self.store = store or Store()
         self.activity = Activity(self.store.path.parent / "activity.jsonl")
         self._conf = conf
@@ -2395,7 +2406,10 @@ class App:
         t, cached = self._projects_cache
         if time.time() - t < max_age:
             return cached
-        p = merge_projects(mutagen_sessions(), self.store.manual(), self.store.data["projects"])
+        p = merge_projects([] if self.web else mutagen_sessions(), self.store.manual(), self.store.data["projects"])
+        if self.web:                  # "local" would be the web server's own disk
+            for x in p:
+                x["local"], x["localExists"] = "", False
         self._projects_cache = (time.time(), p)
         return p
 
@@ -2456,9 +2470,20 @@ class App:
             self._remember()
             return c.info()
         body = {k: v for k, v in body.items() if k != "_docker"}
+        if self.web:
+            if body.get("kind") not in WEB_KINDS:
+                raise ApiError(403, "not available in the web version")
+            if body.get("kind") == "shell":
+                body["where"] = "server"
+            if body.get("kind") == "run":
+                c = self.store.command(body.get("project") or "", body.get("cmdId") or "")
+                if c and c.get("where") != "server":
+                    raise ApiError(403, "only server commands run in the web version")
         if body.get("kind") == "docker":
             body["_docker"] = self.docker_tab(body.get("project") or "", body.get("container"), body.get("action"))
         built = build_spec(body, self.conf, self.store, self.projects(max_age=10))
+        if self.web and built["spec"]["where"] != "server":
+            raise ApiError(403, "only server commands run in the web version")
         cols, rows = body.get("cols"), body.get("rows")
         cols = int(cols) if isinstance(cols, (int, float)) and not isinstance(cols, bool) else 120
         rows = int(rows) if isinstance(rows, (int, float)) and not isinstance(rows, bool) else 32
@@ -3287,8 +3312,8 @@ class App:
     def state(self) -> dict:
         return {"version": VERSION, "server": self.conf.to_dict(), "settings": self.store.settings,
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
-                "lastTabs": self.store.data.get("lastTabs") or [], "wsl": is_wsl(),
-                "platform": sys.platform}
+                "lastTabs": self.store.data.get("lastTabs") or [], "wsl": False if self.web else is_wsl(),
+                "platform": sys.platform, "web": self.web}
 
 
 def daemon_running() -> bool:
@@ -3369,6 +3394,269 @@ def write_vscode_ssh_alias(conf: ServerConf, ssh_config: Path = None, chmod=True
         os.chmod(f, 0o600)
 
 
+# ----------------------------------------------------------------------------- web version
+# `server.py web` serves the same window to browsers (a tablet…) over the network. People
+# sign in with an SSH user and password of an allowed server; the password is only used
+# to check it and to put a key of this workspace on that server — never stored. Each
+# user@server gets its own workspace (projects, chats, history). Nothing runs on the
+# web server's own disk: no local terminals, sync, VS Code, port forwarding or upkeep.
+WEB_COOKIE = "sw_web"
+WEB_KINDS = ("chat", "shell", "claude", "run", "docker")
+WEB_BLOCKED = {("POST", "editor"), ("POST", "sync"), ("POST", "git-sync"), ("GET", "connection"), ("POST", "connection"),
+               ("POST", "ssh-key"), ("POST", "autostart"), ("POST", "sync-service"), ("POST", "shortcut"),
+               ("GET", "update"), ("POST", "update"), ("GET", "prereqs"), ("POST", "prereqs"), ("POST", "move"),
+               ("POST", "uninstall"), ("POST", "quit"), ("POST", "tunnels"), ("GET", "suggest"), ("POST", "add-project")}
+SSH_USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
+SSH_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}|\[?[0-9A-Fa-f:]+\]?")
+
+
+def web_verify_password(conf: ServerConf, password: str) -> None:
+    """Sign in with the password only (keys off) and, in the same call, put this workspace's key
+    on the server. Raises ApiError when the password is wrong."""
+    pub = Path(conf.key + ".pub").read_text().strip()
+    marker = "SW-OK-" + secrets.token_hex(8)
+    q = shlex.quote(pub)
+    argv = ["ssh", "-p", str(conf.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no",
+            "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ConnectTimeout=10", "-o", "ControlMaster=no", "-o", "ControlPath=none", conf.target,
+            f"umask 077; mkdir -p ~/.ssh && {{ grep -qxF {q} ~/.ssh/authorized_keys 2>/dev/null || echo {q} >> ~/.ssh/authorized_keys; }} && echo {marker}"]
+    sent, text = ssh_with_password(argv, password, timeout=30)
+    if marker in text:
+        return
+    if sent == 0 and re.search(r"Could not resolve|Connection refused|timed out|No route", text):
+        raise ApiError(502, "cannot reach " + conf.host + ":" + str(conf.port))
+    if sent == 0:
+        raise ApiError(401, "this server does not accept password sign-in")
+    raise ApiError(401, "wrong user or password")
+
+
+def ensure_ssh_key(path: Path):
+    if path.is_file() and Path(str(path) + ".pub").is_file():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "simabworkspace-web", "-f", str(path)],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    if r.returncode != 0:
+        raise ApiError(500, "could not create a key: " + r.stderr.decode("utf-8", "replace")[-200:])
+
+
+class WebGate:
+    SESSION_DAYS = 30
+    IDLE_DAYS = 7
+    FAIL_WINDOW = 900
+    FAILS_PER_IP = 5
+    FAILS_ALL = 30
+
+    def __init__(self, root: Path, hosts=None, trust_proxy=False, secure=True, verify=None, start_loops=True):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.root, 0o700)
+        self.hosts = [h for h in (hosts or []) if h]          # "host" or "host:port"; empty = any server
+        self.trust_proxy = trust_proxy
+        self.secure = secure
+        self.verify = verify or web_verify_password
+        self.start_loops = start_loops
+        self.lock = threading.RLock()
+        self.apps = {}
+        self.fails = {}
+        self.all_fails = collections.deque()
+        self.sessions_path = self.root / "sessions.json"
+        try:
+            self.sessions = json.loads(self.sessions_path.read_text())
+            if not isinstance(self.sessions, dict):
+                self.sessions = {}
+        except (OSError, ValueError):
+            self.sessions = {}
+        self._saved = 0.0
+
+    @staticmethod
+    def _hash(tok: str) -> str:
+        return hashlib.sha256(tok.encode()).hexdigest()
+
+    def _save(self):
+        tmp = self.sessions_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.sessions))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.sessions_path)
+        self._saved = time.time()
+
+    def info(self) -> dict:
+        one = self.hosts[0] if len(self.hosts) == 1 else ""
+        host, _, port = one.rpartition(":") if ":" in one and not one.startswith("[") else (one, "", "")
+        return {"web": True, "version": VERSION, "hosts": self.hosts,
+                "host": host or one, "port": port or ("22" if one else "")}
+
+    def host_allowed(self, host: str, port: str) -> bool:
+        return not self.hosts or host in self.hosts or f"{host}:{port}" in self.hosts
+
+    def _throttle(self, ip: str):
+        now = time.time()
+        with self.lock:
+            while self.all_fails and now - self.all_fails[0] > self.FAIL_WINDOW:
+                self.all_fails.popleft()
+            mine = [t for t in self.fails.get(ip, []) if now - t < self.FAIL_WINDOW]
+            self.fails[ip] = mine
+            if len(mine) >= self.FAILS_PER_IP or len(self.all_fails) >= self.FAILS_ALL:
+                raise ApiError(429, "too many failed sign-ins — wait 15 minutes")
+
+    def _failed(self, ip: str):
+        with self.lock:
+            self.fails.setdefault(ip, []).append(time.time())
+            self.all_fails.append(time.time())
+
+    def login(self, ip: str, body: dict) -> str:
+        self._throttle(ip)
+        host = clean_str(body.get("host"), 255, "server", required=True)
+        port = str(body.get("port") or "22").strip()
+        user = clean_str(body.get("user"), 32, "user", required=True)
+        pw = body.get("password")
+        if not SSH_HOST_RE.fullmatch(host) or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ApiError(400, "check the server address and port")
+        if not SSH_USER_RE.fullmatch(user):
+            raise ApiError(400, "check the user name")
+        if not isinstance(pw, str) or not pw or len(pw) > 1024 or "\n" in pw:
+            raise ApiError(400, "enter the password")
+        if not self.host_allowed(host, port):
+            self._failed(ip)
+            raise ApiError(403, "this server is not allowed here")
+        wsid = hashlib.sha256(f"{user}@{host}:{port}".encode()).hexdigest()[:16]
+        d = self.root / wsid
+        d.mkdir(mode=0o700, exist_ok=True)
+        key = d / "id_ed25519"
+        ensure_ssh_key(key)
+        try:
+            self.verify(ServerConf(user, host, port, str(key)), pw)
+        except ApiError as e:
+            if e.status in (401, 403):
+                self._failed(ip)
+            raise
+        (d / "workspace.json").write_text(json.dumps({"user": user, "host": host, "port": port}))
+        tok = secrets.token_urlsafe(32)
+        now = time.time()
+        with self.lock:
+            self.sessions = {k: v for k, v in self.sessions.items() if v.get("exp", 0) > now}
+            self.sessions[self._hash(tok)] = {"ws": wsid, "exp": now + self.SESSION_DAYS * 86400, "last": now, "ip": ip}
+            self._save()
+        log_line(f"web: {user}@{host}:{port} signed in from {ip}")
+        return tok
+
+    def logout(self, tok: str):
+        if not tok:
+            return
+        with self.lock:
+            if self.sessions.pop(self._hash(tok), None) is not None:
+                self._save()
+
+    def app_for(self, tok: str):
+        if not tok or len(tok) > 200:
+            return None
+        h = self._hash(tok)
+        now = time.time()
+        with self.lock:
+            rec = self.sessions.get(h)
+            if not rec:
+                return None
+            if rec.get("exp", 0) < now or now - rec.get("last", 0) > self.IDLE_DAYS * 86400:
+                self.sessions.pop(h, None)
+                self._save()
+                return None
+            rec["last"] = now
+            if now - self._saved > 300:
+                self._save()
+            return self._app(rec["ws"])
+
+    def _app(self, wsid: str):
+        app = self.apps.get(wsid)
+        if app:
+            return app
+        d = self.root / wsid
+        try:
+            meta = json.loads((d / "workspace.json").read_text())
+        except (OSError, ValueError):
+            return None
+        app = App(Store(d / "gui.json"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
+        self.apps[wsid] = app
+        if self.start_loops:
+            threading.Thread(target=app.git_watch_loop, daemon=True).start()
+            threading.Thread(target=app.docker_watch_loop, daemon=True).start()
+        return app
+
+    def shutdown(self):
+        for app in list(self.apps.values()):
+            app._stopping = True
+            app.shutdown_sessions()
+
+
+class WebServer(ThreadingHTTPServer):
+    daemon_threads = True
+    ssl_ctx = None
+
+    def finish_request(self, request, client_address):
+        if self.ssl_ctx is not None:            # TLS handshake here, in the request's own thread
+            request.settimeout(15)
+            try:
+                request = self.ssl_ctx.wrap_socket(request, server_side=True)
+            except (OSError, ValueError):
+                return
+            request.settimeout(None)
+        super().finish_request(request, client_address)
+
+
+def make_web_server(gate: WebGate, bind="127.0.0.1", port=0, cert="", key="") -> WebServer:
+    handler = type("WebHandler", (Handler,), {"app": None, "gate": gate})
+    httpd = WebServer((bind, port), handler)
+    if cert:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(cert, key or None)
+        httpd.ssl_ctx = ctx
+    return httpd
+
+
+def self_signed_cert(d: Path, name: str) -> tuple:
+    cert, key = d / "cert.pem", d / "key.pem"
+    if not cert.is_file() or not key.is_file():
+        san = f"IP:{name}" if re.fullmatch(r"[0-9.]+|[0-9a-fA-F:]+", name) else f"DNS:{name}"
+        r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "825",
+                            "-subj", f"/CN={name}", "-addext", f"subjectAltName={san}",
+                            "-keyout", str(key), "-out", str(cert)], capture_output=True, timeout=60)
+        if r.returncode != 0:
+            raise SystemExit("openssl failed: " + r.stderr.decode("utf-8", "replace")[-300:])
+        os.chmod(key, 0o600)
+    return str(cert), str(key)
+
+
+def serve_web(args: list):
+    import argparse
+    ap = argparse.ArgumentParser(prog="simabworkspace web", description="The workspace in the browser, for other devices.")
+    ap.add_argument("--bind", default="0.0.0.0", help="address to listen on (127.0.0.1 behind a proxy)")
+    ap.add_argument("--port", type=int, default=8443)
+    ap.add_argument("--hosts", default="", help="servers people may sign in to: host[:port],… (empty = any)")
+    ap.add_argument("--cert", default="", help="TLS certificate (PEM); without it a self-signed one is made")
+    ap.add_argument("--key", default="", help="TLS key (PEM)")
+    ap.add_argument("--name", default="", help="address in the self-signed certificate (IP or domain)")
+    ap.add_argument("--proxy", action="store_true", help="behind an HTTPS proxy (nginx…): plain HTTP, trust X-Real-IP")
+    ap.add_argument("--data", default="", help="folder for workspaces (default ~/.config/simabworkspace/web)")
+    a = ap.parse_args(args)
+    install_crash_logging()
+    root = Path(a.data or (config_dir() / "web")).expanduser()
+    gate = WebGate(root, [h.strip() for h in a.hosts.split(",")], trust_proxy=a.proxy, secure=True)
+    cert, key = a.cert, a.key
+    if not a.proxy and not cert:
+        cert, key = self_signed_cert(root, a.name or "localhost")
+    httpd = make_web_server(gate, a.bind, a.port, "" if a.proxy else cert, key)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: threading.Thread(target=httpd.shutdown, daemon=True).start())
+    scheme = "http" if a.proxy else "https"
+    log_line(f"web {VERSION} on {scheme}://{a.bind}:{a.port} (hosts: {a.hosts or 'any'})")
+    print(f"{APP} web: {scheme}://{a.bind}:{a.port}  (servers: {a.hosts or 'any'})", flush=True)
+    try:
+        httpd.serve_forever(poll_interval=0.5)
+    finally:
+        gate.shutdown()
+
+
 # ----------------------------------------------------------------------------- HTTP
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml",
@@ -3378,6 +3666,74 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP}/{VERSION}"
     app: App = None   # set on the subclass
+    gate = None       # WebGate in the web version (one server, many signed-in users)
+
+    # web version ---------------------------------------------------------------
+    def _client_ip(self) -> str:
+        if self.gate.trust_proxy:
+            ip = (self.headers.get("X-Real-IP") or "").strip()
+            if ip:
+                return ip[:64]
+        return str(self.client_address[0] if self.client_address else "?")
+
+    def _cookie(self) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == WEB_COOKIE:
+                return v.strip()
+        return ""
+
+    def _origin_ok(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return False
+        return urllib.parse.urlsplit(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
+
+    def _set_cookie(self, value: str, max_age: int) -> dict:
+        secure = "; Secure" if self.gate.secure else ""
+        return {"Set-Cookie": f"{WEB_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"}
+
+    def _web_dispatch(self, method: str):
+        url = urllib.parse.urlsplit(self.path)
+        path, query = url.path, urllib.parse.parse_qs(url.query)
+        gate = self.gate
+        try:
+            if (method != "GET" or path == "/ws") and not self._origin_ok():
+                raise ApiError(403, "forbidden")
+            if path == "/api/web-info" and method == "GET":
+                return self._json(200, gate.info())
+            if path == "/api/login" and method == "POST":
+                if self.headers.get("X-SW") != "1":
+                    raise ApiError(403, "forbidden")
+                tok = gate.login(self._client_ip(), self._body())
+                body = json.dumps({"ok": True}).encode()
+                return self._send(200, body, "application/json; charset=utf-8", self._set_cookie(tok, WebGate.SESSION_DAYS * 86400))
+            if path == "/api/logout" and method == "POST":
+                gate.logout(self._cookie())
+                return self._send(200, b'{"ok": true}', "application/json; charset=utf-8", self._set_cookie("", 0))
+            if path.startswith("/api/") or path == "/ws":
+                app = gate.app_for(self._cookie())
+                if app is None:
+                    return self._json(401, {"error": "sign in", "login": True})
+                self.app = app
+                if path == "/ws":
+                    return self._websocket(query)
+                if self.headers.get("X-SW") != "1":
+                    raise ApiError(403, "forbidden")
+                return self._json(200, self._api(method, path, query))
+            if method == "GET":
+                return self._static(path)
+            raise ApiError(404, "not found")
+        except ApiError as e:
+            self._json(e.status, {"error": e.message})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:  # noqa: BLE001 - report, keep serving
+            log_line(f"web: {e}")
+            try:
+                self._json(500, {"error": "internal error"})
+            except OSError:
+                pass
 
     def log_message(self, fmt, *args):   # quiet
         pass
@@ -3408,6 +3764,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def _body(self):
+        if getattr(self, "_cached_body", None) is not None:
+            return self._cached_body
         n = int(self.headers.get("Content-Length") or 0)
         if n > 1_000_000:
             raise ApiError(413, "request too large")
@@ -3420,6 +3778,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid JSON")
         if not isinstance(body, dict):
             raise ApiError(400, "bad request")
+        self._cached_body = body
         return body
 
     # verbs
@@ -3433,6 +3792,9 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def _dispatch(self, method: str):
+        self._cached_body = None
+        if self.gate is not None:
+            return self._web_dispatch(method)
         if not self._host_ok():
             return self._send(403, b"forbidden", "text/plain")
         url = urllib.parse.urlsplit(self.path)
@@ -3464,15 +3826,33 @@ class Handler(BaseHTTPRequestHandler):
         f = (STATIC / rel).resolve()
         if STATIC.resolve() not in f.parents or not f.is_file():
             raise ApiError(404, "not found")
-        extra = {"Content-Security-Policy": "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; "
-                                            "img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'"} \
-            if f.suffix == ".html" else None
+        if self.gate is not None:
+            host = re.sub(r"[^A-Za-z0-9.:\[\]-]", "", self.headers.get("Host") or "")
+            connect = f"'self' wss://{host} ws://{host}"
+        else:
+            connect = "'self' ws://127.0.0.1:* ws://localhost:*"
+        extra = {"Content-Security-Policy": f"default-src 'self'; connect-src {connect}; "
+                                            "img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; "
+                                            "frame-ancestors 'none'",
+                 "X-Frame-Options": "DENY"} if f.suffix == ".html" else None
         self._send(200, f.read_bytes(), MIME.get(f.suffix, "application/octet-stream"), extra)
 
     def _api(self, method: str, path: str, query: dict):
         app = self.app
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
         route = (method, parts[0] if parts else "")
+        if app.web and (route in WEB_BLOCKED or (route == ("GET", "sync") and parts[-1:] != ["details"])):
+            raise ApiError(403, "not available in the web version")
+        if app.web and route == ("POST", "commands"):
+            b = self._body()
+            cmds = b.get("commands") if isinstance(b.get("commands"), list) else []
+            for c in cmds:
+                if isinstance(c, dict):
+                    c["where"] = "server"
+            self._cached_body = {"commands": cmds}
+        if app.web and route == ("POST", "manual"):
+            b = dict(self._body(), local="")
+            self._cached_body = b
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
         if route == ("GET", "state"):
@@ -3551,6 +3931,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body() if method == "POST" else {}
             rq = body.get("repo") if method == "POST" else (query.get("repo") or [""])[0]
             wh = body.get("where") if method == "POST" else (query.get("where") or [None])[0]
+            if app.web:
+                wh = "server"
             repo = GitRepo(app, p, rq if isinstance(rq, str) else "", wh if wh in WHERE else None)
             if method == "GET" and act == "status":
                 return repo.status()
@@ -3650,12 +4032,13 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(404, "not found")
 
     def _websocket(self, query: dict):
-        if not self._token_ok((query.get("t") or [""])[0]):
-            raise ApiError(401, "bad token")
-        port = self.server.server_address[1]
-        origin = self.headers.get("Origin") or ""
-        if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
-            raise ApiError(403, "bad origin")
+        if self.gate is None:
+            if not self._token_ok((query.get("t") or [""])[0]):
+                raise ApiError(401, "bad token")
+            port = self.server.server_address[1]
+            origin = self.headers.get("Origin") or ""
+            if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+                raise ApiError(403, "bad origin")
         key = self.headers.get("Sec-WebSocket-Key")
         if (self.headers.get("Upgrade") or "").lower() != "websocket" or not key:
             raise ApiError(400, "websocket upgrade required")
@@ -3954,6 +4337,8 @@ def main(argv):
                   f"{app_url(st).split('#')[0]}  — {same}")
         else:
             print("running: no")
+    elif cmd == "web":
+        serve_web(argv[2:])
     elif cmd == "stop":
         print("  ✓ GUI stopped" if stop_running(read_state()) else "  GUI is not running")
     else:

@@ -85,6 +85,27 @@ Everything the installer asked can be changed later in **⚙ Settings**.
 
 Closing the window keeps terminals and chats running; open it again to continue.
 
+## Web version (tablet, another computer)
+
+Run the workspace on a server and open it in any browser:
+
+```bash
+simabworkspace web --hosts 127.0.0.1:22 --port 8443 --name my.server.com
+```
+
+Open `https://my.server.com:8443` and sign in with an **SSH user and password** of a
+server in `--hosts` (empty = any server — better to list yours). The password is only
+used to sign in and to put a key of the workspace on that server; it is never stored.
+Five wrong passwords from one address lock it out for 15 minutes.
+
+Each user@server gets its own projects, chats and history. Everything runs on the server:
+Claude, server terminals, Git, Docker and server run commands. Things that need your own
+machine are not offered: local terminals, sync, VS Code, port forwarding, updates.
+
+Without `--cert/--key` a self-signed certificate is made (the browser warns once). Behind
+nginx or Caddy: `--proxy --bind 127.0.0.1` (plain HTTP inside, the proxy does HTTPS and
+must pass `Host`, `X-Real-IP` and the WebSocket upgrade).
+
 ## Update · uninstall
 
 Run the install command again to update — settings and projects are kept.

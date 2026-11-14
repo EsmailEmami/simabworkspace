@@ -41,10 +41,10 @@
 #
 #  Changelog:
 #    1.20.0 2026-11-14  Web version: `simabworkspace web` serves the workspace to a browser
-#                       (add project: browse the server's folders and pick one);
 #                       (tablet…) over HTTPS; sign in with an SSH user and password of an
 #                       allowed server (checked, never stored); one workspace per user;
-#                       server-only (no local terminals, sync, VS Code, port forwarding)
+#                       server-only (no local terminals, sync, VS Code, port forwarding).
+#                       Add project: browse the server's folders and pick one.
 #    1.19.1 2026-11-14  port forwarding: server ports below 1024 get a local port + 10000
 #                       (low ports need admin rights) and say so instead of "in use"
 #                       Port forwarding lists the ports open on the server (click to add);

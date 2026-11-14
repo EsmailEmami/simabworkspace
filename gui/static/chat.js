@@ -257,7 +257,10 @@
     this.jumpBtn = h('button', { class: 'jump hidden', title: 'Jump to the end', onclick: function () { self.stick = true; self.scrollEnd(); } }, '↓');
 
     // composer: everything for the chat lives here
-    this.ta = h('textarea', { rows: 1, dir: 'auto', placeholder: 'Message Claude   ·   @ file   / command   Esc stop' });
+    var touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    this.touch = touch;
+    this.ta = h('textarea', { rows: 1, dir: 'auto', enterkeyhint: touch ? 'enter' : 'send',
+      placeholder: touch ? 'Message Claude  ·  @ file  / command' : 'Message Claude   ·   @ file   / command   Esc stop' });
     this.ta.addEventListener('keydown', function (e) { self.key(e); });
     this.ta.addEventListener('input', function () { self.autosize(); self.slashPopup(); });
     this.ta.addEventListener('click', function () { self.slashPopup(); });
@@ -267,7 +270,7 @@
     this.slashEl = h('div', { class: 'slash hidden' });
     this.modeSel = h('select', { class: 'mini-sel mode', title: 'Permission mode (Shift+Tab)', onchange: function () { self.send({ t: 'mode', mode: self.modeSel.value }); } },
       MODES.map(function (m) { return h('option', { value: m[0], title: m[2] }, m[1]); }));
-    this.modelSel = h('select', { class: 'mini-sel', title: 'Model', onchange: function () { self.send({ t: 'model', model: self.modelSel.value }); } },
+    this.modelSel = h('select', { class: 'mini-sel model', title: 'Model', onchange: function () { self.send({ t: 'model', model: self.modelSel.value }); } },
       MODELS.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
     this.sendBtn = h('button', { class: 'send', title: 'Send (Enter)', onclick: function () { self.submit(); } }, '↑');
     this.stopBtn = h('button', { class: 'stopbtn hidden', title: 'Stop (Esc)', onclick: function () { self.interrupt(); } }, '■');
@@ -287,8 +290,8 @@
           this.modeSel, this.modelSel,
           h('label', { class: 'clip', title: 'Attach image' }, '+', h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'hidden', onchange: function (e) { self.addFiles(e.target.files); e.target.value = ''; } })),
           h('span', { class: 'grow' }),
-          h('button', { class: 'link', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, 'history'),
-          h('button', { class: 'link', title: 'Start a new conversation in this tab', onclick: function () { self.newChat(); } }, 'new'),
+          h('button', { class: 'link cb-hist', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, h('span', { class: 'lbl' }, 'history'), h('span', { class: 'ico' }, '⟲')),
+          h('button', { class: 'link cb-new', title: 'Start a new conversation in this tab', onclick: function () { self.newChat(); } }, h('span', { class: 'lbl' }, 'new'), h('span', { class: 'ico' }, '✎')),
           this.stopBtn, this.sendBtn)));
 
     this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
@@ -1034,7 +1037,7 @@
       else if (e.key === '3') this.answer(this.pendingPerm, false, false);
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); this.submit(); return; }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !(this.touch && !e.metaKey)) { e.preventDefault(); this.submit(); return; }
     if (e.key === 'Escape') {
       e.preventDefault();
       if (popup) { this.slashEl.classList.add('hidden'); return; }

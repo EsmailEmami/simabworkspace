@@ -185,6 +185,22 @@ const tests = {
     q('.kb').find((b) => b.textContent === 'Esc').click();
     assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: '\x1b' });
     assert.match(ws.url, /^wss:/);
+    // the chat on a phone: short hint, Enter = new line (the ↑ button sends), icons instead of words
+    q('.act').find((b) => b.textContent === 'Claude').click();
+    await settle();
+    const chatWs = global.sockets[global.sockets.length - 1];
+    chatWs.onopen && chatWs.onopen();
+    const cta = q('textarea').pop();
+    assert.ok(!/Esc/.test(cta.getAttribute('placeholder')), 'no keyboard hint on a phone');
+    cta.value = 'سلام';
+    const before = chatWs.sent.length;
+    cta.dispatch('keydown', { key: 'Enter' });
+    assert.strictEqual(chatWs.sent.filter((m) => m.t === 'send').length, 0, 'Enter does not send on a touch keyboard');
+    assert.ok(chatWs.sent.length >= before);
+    assert.deepStrictEqual(q('.ico').map((e) => e.textContent).slice(-2), ['⟲', '✎']);
+    // back to the terminal tab for the key bar checks
+    q('.tab').find((t) => /server/.test(t.textContent)).dispatch('click');
+    await settle();
     // Ctrl, then a letter on the touch keyboard → the control key
     q('.kb').find((b) => b.textContent === 'Ctrl').click();
     assert.ok(q('.kb').find((b) => b.textContent === 'Ctrl').classList.contains('on'));

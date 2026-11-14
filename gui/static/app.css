@@ -609,7 +609,7 @@ body.web #st-sync { display: none; }
 /* touch: no hover, so what appears on hover is always shown; bigger targets; 16px inputs stop iOS zooming */
 body.touch .tab .x, body.touch .proj-head .icon-btn, body.touch .gtools { opacity: 1; }
 body.touch .tab .x { width: 24px; height: 24px; }
-body.touch input, body.touch textarea, body.touch select, body.touch .cbox textarea, body.touch .composer textarea { font-size: 16px; }
+body.touch .cbox textarea, body.touch .composer textarea { font-size: 16px; }
 body.touch .gbar { height: 40px; }
 body.touch .tab { padding: 0 6px 0 12px; }
 body.touch .menu button { padding: 10px 12px; font-size: 14px; }
@@ -649,3 +649,23 @@ body.touch .empty-actions .btn { height: 40px; padding: 0 18px; font-size: 14px;
 .act.more { flex: 0 0 34px; font-size: 14px; letter-spacing: 1px; }
 .install-help p { margin: 0 0 10px; line-height: 1.7; }
 .install-help a { color: var(--accent); }
+
+/* chat on phones and tablets */
+.cbar .ico { display: none; }
+#workspace, .pane, .chat-composer, .cbox, .cbar { min-width: 0; }
+#workspace { overflow: hidden; }
+.cbar .mini-sel.model { max-width: 140px; text-overflow: ellipsis; }
+body.touch .cbar { gap: 2px; padding: 2px 6px 6px; }
+body.touch .mini-sel { height: 30px; font: 12.5px var(--ui); padding: 0 4px; color: var(--muted); }
+body.touch .clip { font-size: 18px; padding: 0 8px; }
+body.touch .send, body.touch .stopbtn { width: 36px; height: 36px; border-radius: 9px; font-size: 15px; }
+body.touch .cbar .link { min-width: 34px; height: 34px; font-size: 15px; }
+body.touch .cbar .lbl { display: none; }
+body.touch .cbar .ico { display: inline; }
+body.compact .chat-msgs { padding: 12px 12px 16px; gap: 10px; }
+body.compact .umsg { max-width: 92%; }
+body.compact .chat-composer { max-width: none; }
+body.compact .cbar .mini-sel.model { max-width: 96px; }
+body.compact .cstatus { padding: 0 6px 6px; }
+body.compact .cbox textarea { padding: 10px 12px 4px; }
+body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }

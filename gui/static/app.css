@@ -669,3 +669,11 @@ body.compact .cbar .mini-sel.model { max-width: 96px; }
 body.compact .cstatus { padding: 0 6px 6px; }
 body.compact .cbox textarea { padding: 10px 12px 4px; }
 body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
+
+/* Claude tabs: the ✳ blinks while Claude works (amber and faster when it waits for you) */
+@keyframes claude-blink { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .2; transform: scale(.75); } }
+.tab .k.claude { display: inline-block; transition: color .2s; }
+.tab.busy .k.claude { animation: claude-blink 1.1s ease-in-out infinite; color: #f0a46c; }
+.tab.bell .k.claude { animation: claude-blink .6s ease-in-out infinite; color: var(--warn); }
+.tab.busy .k.claude ~ .mark { display: none; }
+@media (prefers-reduced-motion: reduce) { .tab.busy .k.claude, .tab.bell .k.claude { animation-duration: 2.4s; } }

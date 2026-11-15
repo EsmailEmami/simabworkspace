@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.24.2 2026-11-15  Chat details stay clean: background SSH connections no longer open
+#                       port forwardings from your ~/.ssh/config ("remote port forwarding
+#                       failed for listen port …"), and the relay ends without "Fatal Python
+#                       error: _enter_buffered_busy" when Claude stops.
 #    1.24.1 2026-11-15  Chat on a server whose shell is zsh: "Claude stopped (exit 127)" —
 #                       claude in ~/.local/bin (added to PATH only in ~/.zshrc) was not
 #                       found. claude is now looked for in every usual place (~/.local/bin,
@@ -184,7 +188,7 @@
 
 set -u -o pipefail
 
-VERSION="1.24.1"
+VERSION="1.24.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

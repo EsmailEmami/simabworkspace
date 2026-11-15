@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.24.1"
+VERSION = "1.24.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -731,7 +731,10 @@ def posix_sh(cmd: str) -> str:
     return "sh -c " + shlex.quote(cmd)
 
 
-def ssh_base(conf: ServerConf, multiplex=True, batch=False) -> list:
+def ssh_base(conf: ServerConf, multiplex=True, batch=False, forwards=False) -> list:
+    """forwards=False (background work: chat, git, lists): port forwardings from the user's
+    ~/.ssh/config (RemoteForward…) are not opened — they only fail ("remote port forwarding
+    failed for listen port …") and end up in the chat. Terminals and tunnels keep them."""
     a = ["ssh", "-p", str(conf.port),
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
          "-o", "StrictHostKeyChecking=accept-new"]
@@ -742,6 +745,8 @@ def ssh_base(conf: ServerConf, multiplex=True, batch=False) -> list:
         a += ["-o", "ControlMaster=auto", "-o", f"ControlPath={cp}", "-o", "ControlPersist=10m"]
     if batch:
         a += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6"]
+    if not forwards:
+        a += ["-o", "ClearAllForwardings=yes"]
     return a
 
 
@@ -924,7 +929,7 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         if s.get("serverPersist") and kind in ("shell", "claude"):
             slot = spec.get("slot") if isinstance(spec.get("slot"), int) else 0
             persist = tmux_name(pname, kind, max(0, min(slot, 50)))
-        argv = ssh_base(c, multiplex=bool(s.get("sshMultiplex"))) + ["-t", c.target,
+        argv = ssh_base(c, multiplex=bool(s.get("sshMultiplex")), forwards=True) + ["-t", c.target,
                                                                      remote_script(rpath, inner, persist)]
         cwd = os.path.expanduser("~")
     else:
@@ -1829,7 +1834,7 @@ while True:
         if b:
             sys.stdout.buffer.write(b)
         say({"type": "_sw_relay", "state": "exit", "code": exit_code()})
-        sys.exit(0)
+        os._exit(0)                      # not sys.exit: the stdin thread is still reading (Python aborts)
     if time.time() - beat > 10:
         touch("seen")
         beat = time.time()
@@ -3194,7 +3199,7 @@ def port_problem(port: int) -> str:
 
 
 def tunnel_argv(conf: ServerConf, t: dict) -> list:
-    return ssh_base(conf, multiplex=False, batch=True) + [
+    return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
         "-N", "-T", "-o", "ExitOnForwardFailure=yes",
         "-L", f"127.0.0.1:{t['localPort']}:{t['remoteHost']}:{t['remotePort']}", conf.target]
 

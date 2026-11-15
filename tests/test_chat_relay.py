@@ -168,6 +168,9 @@ class ChatRelay(unittest.TestCase):
         self.assertTrue(wait_for(lambda: s.exit_code is not None))   # a real end, no reconnecting
         self.assertFalse(alive(pid))
         self.assertFalse(any(e.get("type") == "_reconnect" for e in s.events))
+        time.sleep(0.5)
+        errs = " ".join(str(e.get("text")) for e in s.events if e.get("type") == "_stderr")
+        self.assertNotIn("Fatal Python error", errs)          # the relay exits cleanly
         s.kill(True)
 
     def test_command_and_restart(self):

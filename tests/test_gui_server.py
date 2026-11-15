@@ -429,6 +429,16 @@ class SshControlPath(unittest.TestCase):
             st = os.stat(f"/tmp/sw-{os.getuid()}")
             self.assertEqual(oct(st.st_mode & 0o777), "0o700")
 
+    def test_background_ssh_skips_forwardings_from_ssh_config(self):
+        # "Warning: remote port forwarding failed for listen port 47123" in the chat details
+        conf = sw.ServerConf("u", "h", "22", "")
+        self.assertIn("ClearAllForwardings=yes", self.opts(sw.ssh_base(conf)))
+        self.assertNotIn("ClearAllForwardings=yes", self.opts(sw.ssh_base(conf, forwards=True)))
+        t = sw.tunnel_argv(conf, {"localPort": 15432, "remoteHost": "127.0.0.1", "remotePort": 5432}) \
+            if hasattr(sw, "tunnel_argv") else None
+        if t:
+            self.assertNotIn("ClearAllForwardings=yes", self.opts(t))
+
     def test_no_shared_connection_when_tmp_folder_is_not_ours(self):
         with mock.patch.dict(os.environ, {"HOME": "/Users/A B"}), \
                 mock.patch.object(sw.os, "lstat", return_value=os.stat_result((0o40700, 0, 0, 0, os.getuid() + 1, 0, 0, 0, 0, 0))):
@@ -1731,7 +1741,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.24.1"', text)
+        self.assertIn('VERSION="1.24.2"', text)
 
 
 if __name__ == "__main__":

@@ -177,6 +177,45 @@ class ChatRelay(unittest.TestCase):
         s2.kill()
         self.assertTrue(wait_for(lambda: not alive(pid)))
 
+    def test_closing_on_one_device_keeps_claude_for_the_other(self):
+        # the user's report: a chat worked on the laptop, the tablet opened it too; closing it on
+        # the tablet stopped the laptop's Claude as well
+        sid = "11111111-2222-3333-4444-555555555555"
+        lap = self.make("6666666666666666")
+        self.addCleanup(lap.kill, True)
+        self.assertTrue(wait_for(lambda: lap.init is not None))
+        lap.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: "step1" in self.texts(lap)))
+        conv = self.home / ".cache/simabworkspace/chats/6666666666666666/conv"
+        self.assertTrue(wait_for(lambda: conv.exists()))
+        pid = self.claude_pids()[0]
+        tab = self.make("7777777777777777", resume=sid)       # the tablet opens the same conversation
+        self.assertTrue(wait_for(lambda: tab.relay_pid > 0 and tab.relay_key == "6666666666666666"))
+        self.assertTrue(lap.relay_pid > 0 and lap.relay_pid != tab.relay_pid)
+        tab.kill()                                             # closed on the tablet
+        time.sleep(1.5)
+        self.assertTrue(alive(pid), "the laptop's Claude keeps working")
+        self.assertTrue(wait_for(lambda: "result" in [e.get("type") for e in lap.events]))
+        lap.handle({"t": "send", "content": "again"})
+        self.assertTrue(wait_for(lambda: self.texts(lap).count("step2") == 2))
+        self.assertEqual(self.claude_pids(), [pid])
+        lap.kill()                                             # the last one closes it: now it stops
+        self.assertTrue(wait_for(lambda: not alive(pid)))
+
+    def test_restart_stops_claude_even_when_another_device_has_it(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        lap = self.make("8888888888888888")
+        self.addCleanup(lap.kill, True)
+        self.assertTrue(wait_for(lambda: lap.init is not None))
+        lap.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: (self.home / ".cache/simabworkspace/chats/8888888888888888/conv").exists()))
+        pid = self.claude_pids()[0]
+        tab = self.make("9999999999999999", resume=sid)
+        self.addCleanup(tab.kill, True)
+        self.assertTrue(wait_for(lambda: tab.relay_pid > 0))
+        tab.restart()                                          # Restart = this Claude really goes
+        self.assertTrue(wait_for(lambda: not alive(pid)))
+
     def test_a_finished_conversation_starts_a_new_claude(self):
         sid = "11111111-2222-3333-4444-555555555555"
         s = self.make("3333333333333333", resume=sid)
@@ -247,7 +286,7 @@ class ChatRelay(unittest.TestCase):
         self.assertIn("command -v python3", cmd)
         self.assertIn("exec sh -c 'cd x; exec claude'", cmd)          # no python3: as before
         self.assertIn("start 0123456789abcdef 12 'cd x; exec claude'", cmd)
-        self.assertIn("kill 0123456789abcdef; else exit 0", sw.chat_relay_command("kill", "0123456789abcdef"))
+        self.assertIn("kill 0123456789abcdef 0; else exit 0", sw.chat_relay_command("kill", "0123456789abcdef"))
         sid = "11111111-2222-3333-4444-555555555555"
         self.assertIn("start 0123456789abcdef 0 'cd x' " + sid, sw.chat_relay_command("start", "0123456789abcdef", 0, "cd x", sid))
         self.assertNotIn("evil", sw.chat_relay_command("start", "0123456789abcdef", 0, "cd x", "evil; rm -rf"))

@@ -79,6 +79,7 @@ global.fetch = (url, opts) => {
     statuses: { 'cheshmeh-api-service': Object.assign({}, gitStatus, { files: [] }), 'cheshmeh-web-app': gitStatus } };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
+  else if (url.startsWith('/api/title/')) res = { title: body.title };
   else if (url.startsWith('/api/starter/')) res = { starter: (body.text || '').trim() };
   else if (url.startsWith('/api/git-summary')) res = { summary: { cheshmeh: { changes: 3, ahead: 1, behind: 2, conflicts: 0, repos: 2, branch: 'main', branches: 1, repo: null, where: 'local' }, shop: { changes: 0, ahead: 0, behind: 0, conflicts: 0, repos: 1, branch: 'dev', branches: 1, repo: '', where: 'server' } } };
   else if (url === '/api/connection') res = { user: 'esi', host: 'h', port: '225', key: '', keys: [{ path: '/home/me/.ssh/id_ed25519', type: 'ed25519', comment: 'me' }], autostart: true, daemon: true };
@@ -678,6 +679,47 @@ const tests = {
     assert.strictEqual(global.SW.S.tabs.length, tabsBefore - 1);
     assert.strictEqual(q('.modal').length, 0);
     global.SW.closeTab(chat, true); await settle();
+  },
+
+  async 'a project can be renamed (shown name only)'() {
+    const shop = state.projects[1];
+    q('.proj-head')[1].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim() === 'Rename…').click();
+    await settle();
+    const md = q('.modal').pop();
+    const inp = q('.inp', md).pop();
+    assert.strictEqual(inp.value, 'shop');
+    inp.value = 'فروشگاه';
+    q('button', md).find((b) => b.textContent === 'Save').click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/title/shop').pop();
+    assert.deepStrictEqual(post.body, { title: 'فروشگاه' });
+    shop.title = 'فروشگاه';
+    global.SW.renderProjects();
+    assert.ok(q('.proj-name').some((n) => n.textContent.indexOf('فروشگاه') === 0), 'the new name is shown');
+    assert.ok(q('.proj-head').some((x) => /name: shop/.test(x.getAttribute('title') || x.title || '')), 'the real name in the tooltip');
+    delete shop.title;
+    global.SW.renderProjects();
+  },
+
+  async 'closing a working chat: close only the tab, or stop it'() {
+    const SW = global.SW;
+    const open = async () => { await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle(); const t = SW.S.active; t.busy = true; return t; };
+    let chat = await open();
+    SW.closeTab(chat); await settle();
+    let md = q('.modal').pop();
+    assert.match(md.textContent, /still working/);
+    q('button', md).find((b) => b.textContent === 'Close tab, keep working').click(); await settle();
+    assert.ok(SW.S.tabs.indexOf(chat) < 0, 'the tab is closed');
+    assert.ok(calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/' + chat.id + '?keep=1'), 'Claude keeps working');
+    chat = await open();
+    const sent = [];
+    chat.send = (m) => { sent.push(m); return true; };
+    SW.closeTab(chat); await settle();
+    q('button', q('.modal').pop()).find((b) => b.textContent === 'Stop it').click();
+    await new Promise((r) => setTimeout(r, 450)); await settle();
+    assert.deepStrictEqual(sent, [{ t: 'interrupt' }]);
+    assert.ok(calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/' + chat.id), 'closed');
   },
 
   async 'extra windows: move a tab out, get it back, never twice'() {

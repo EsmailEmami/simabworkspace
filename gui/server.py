@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.30.1"
+VERSION = "1.31.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -548,6 +548,19 @@ class Store:
             self.save()
         return color
 
+    def set_title(self, project: str, title) -> str:
+        """The name shown in the list ("" = the project's own name). The real name stays: sync
+        sessions, tabs and settings are keyed by it."""
+        title = " ".join(clean_str(title, 200, "title").split())
+        if len(title) > 80:
+            raise ApiError(400, "the name is too long (80 characters at most)")
+        if title == project:
+            title = ""
+        with self.lock:
+            self.data["projects"].setdefault(project, {})["title"] = title
+            self.save()
+        return title
+
     def set_starter(self, project: str, text) -> str:
         """The text every new Claude chat of this project starts with (the user adds their request)."""
         if text is None:
@@ -587,6 +600,7 @@ class Store:
     def remove_manual(self, name: str):
         with self.lock:
             self.data["manual"] = [m for m in self.data["manual"] if m.get("name") != name]
+            (self.data["projects"].get(name) or {}).pop("title", None)
             self.save()
 
     def set_last_tabs(self, specs: list):
@@ -705,7 +719,8 @@ def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
         p["commands"] = list((store_projects.get(p["name"]) or {}).get("commands") or [])
         p["color"] = (store_projects.get(p["name"]) or {}).get("color") or ""
         p["starter"] = (store_projects.get(p["name"]) or {}).get("starter") or ""
-    out.sort(key=lambda p: p["name"].lower())
+        p["title"] = (store_projects.get(p["name"]) or {}).get("title") or ""
+    out.sort(key=lambda p: (p["title"] or p["name"]).lower())
     return out
 
 
@@ -1727,6 +1742,34 @@ def exit_code():
         return int(open(P("exit")).read().strip())
     except (OSError, ValueError):
         return -1
+def others(skip=0):
+    """Other app connections on this Claude (the same chat open on a laptop and a tablet):
+    closing the tab on one of them must not stop it for the other."""
+    n = 0
+    try:
+        pids = os.listdir(P("clients"))
+    except OSError:
+        return 0
+    for c in pids:
+        try:
+            pid = int(c)
+            if pid in (os.getpid(), skip):
+                continue
+            os.kill(pid, 0)
+            if os.path.isdir("/proc") and b"_sw_relay" not in open("/proc/%d/cmdline" % pid, "rb").read():
+                raise OSError
+            n += 1
+        except (OSError, ValueError):
+            try:
+                os.remove(os.path.join(P("clients"), c))
+            except OSError:
+                pass
+    return n
+def leave():
+    try:
+        os.remove(os.path.join(P("clients"), str(os.getpid())))
+    except OSError:
+        pass
 
 if mode == "daemon":                     # owns Claude; runs detached from any SSH
     fd = os.open(P("in"), os.O_RDWR)     # read-write: Claude never sees end-of-input
@@ -1765,7 +1808,10 @@ if mode == "daemon":                     # owns Claude; runs detached from any S
     os.replace(P("exit.tmp"), P("exit"))
     sys.exit(0)
 
-if mode == "kill":
+if mode == "kill":                       # argv[3]: the closing tab's relay (not counted), -1 = stop anyway
+    skip = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].lstrip("-").isdigit() else 0
+    if skip >= 0 and others(skip):
+        sys.exit(0)
     pid = pid_alive()
     if pid:
         try:
@@ -1845,7 +1891,13 @@ else:
 if off < 0 or off > size("out.log"):
     off = size("out.log")
 touch("seen")
-say({"type": "_sw_relay", "state": state, "off": off, "key": key,
+if state != "replay":
+    try:
+        os.makedirs(P("clients"), exist_ok=True)
+        open(os.path.join(P("clients"), str(os.getpid())), "w").close()
+    except OSError:
+        pass
+say({"type": "_sw_relay", "state": state, "off": off, "key": key, "pid": os.getpid(),
      "status": claude_status(pid) if state == "attached" else ""})
 if state == "attached" and reopened:
     for q in unanswered():
@@ -1870,9 +1922,9 @@ def inputs():
     w = None
     try:
         for line in sys.stdin.buffer:
-            if line.strip() == b'{"type": "_sw_relay_kill"}':
+            if line.strip() in (b'{"type": "_sw_relay_kill"}', b'{"type": "_sw_relay_stop"}'):
                 p = pid_alive()
-                if p:
+                if p and (b"_stop" in line or not others()):
                     os.kill(p, signal.SIGTERM)
                 continue
             if line.startswith(b'{"type": "_sw_relay_conv"'):
@@ -1894,6 +1946,7 @@ def inputs():
                     pass
     except OSError:
         pass
+    leave()
     os._exit(0)                          # the connection is gone: Claude keeps working
 if state != "replay":
     threading.Thread(target=inputs, daemon=True).start()
@@ -1913,6 +1966,7 @@ while True:
         if b:
             sys.stdout.buffer.write(b)
         say({"type": "_sw_relay", "state": "exit", "code": exit_code()})
+        leave()
         os._exit(0)                      # not sys.exit: the stdin thread is still reading (Python aborts)
     if time.time() - beat > 10:
         touch("seen")
@@ -1925,7 +1979,7 @@ def chat_relay_command(mode: str, key: str, offset: int = 0, script: str = "", c
     """The remote command for the relay; without python3 on the server Claude runs directly (as before).
     conv: the conversation being resumed — a Claude already working on it is used instead of a new one."""
     conv = conv if conv and UUID_RE.fullmatch(conv) else ""
-    args = " ".join(shlex.quote(str(a)) for a in ([mode, key] + ([] if mode == "kill" else [offset])
+    args = " ".join(shlex.quote(str(a)) for a in ([mode, key, offset]
                                                     + ([script] + ([conv] if conv else []) if mode == "start" else [])))
     fallback = f"exec sh -c {shlex.quote(script)}" if mode == "start" else "exit 0"
     return (f"if command -v python3 >/dev/null 2>&1; then SW_RELAY={shlex.quote(CHAT_RELAY_PY)}; export SW_RELAY; exec python3 -c \"$SW_RELAY\" {args}; "
@@ -2359,6 +2413,7 @@ class ChatSession:
         self.linking = False          # connecting to the relay; not known yet whether Claude still works
         self.relay_exit = None        # Claude's exit code, reported by the relay
         self.reconnecting = 0         # attempts since the connection dropped
+        self.relay_pid = 0            # our relay process on the server (not counted as another device)
         self.closed = False
         h = built.get("history")
         if isinstance(h, list):                        # old format: a plain list
@@ -2430,6 +2485,8 @@ class ChatSession:
             return
         if isinstance(ev.get("off"), int):
             self.relay_off = ev["off"]
+        if isinstance(ev.get("pid"), int) and ev["pid"] > 0:
+            self.relay_pid = ev["pid"]
         k = ev.get("key")
         if isinstance(k, str) and RELAY_KEY_RE.fullmatch(k) and k != self.relay_key:
             self.relay_key = k                     # the Claude that was already on this conversation
@@ -2709,16 +2766,18 @@ class ChatSession:
     def stop(self):
         self._request({"subtype": "interrupt"})
 
-    def _stop_remote(self, proc, key):
+    def _stop_remote(self, proc, key, force=False):
         """Stop Claude on the server (the relay keeps it running otherwise)."""
         if not key:
             return
-        if proc and proc.poll() is None and self._write({"type": "_sw_relay_kill"}, proc):
+        # not force: another device attached to the same Claude keeps it (the relay checks)
+        skip = -1 if force else self.relay_pid
+        if proc and proc.poll() is None and self._write({"type": "_sw_relay_stop" if force else "_sw_relay_kill"}, proc):
             time.sleep(0.3)
 
         def kill_remote():
             try:
-                argv = self.built["make_argv"](self.mode, self.model, "", self.effort, relay=("kill", key, 0))
+                argv = self.built["make_argv"](self.mode, self.model, "", self.effort, relay=("kill", key, skip))
                 subprocess.run(argv, cwd=self.built["cwd"], env=dict(os.environ, PATH=tool_path()),
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40)
             except (OSError, subprocess.SubprocessError, TypeError):
@@ -2752,7 +2811,8 @@ class ChatSession:
                 self.spec["relay"] = self.relay_key
                 self.relay_off = 0
             self.reconnecting = 0
-        self._stop_remote(proc, old)
+            self.relay_pid = 0
+        self._stop_remote(proc, old, force=not fresh)     # Restart = this Claude really goes
         self._terminate(proc)
         if fresh:
             with self.lock:
@@ -4454,11 +4514,16 @@ class App:
             raise ApiError(404, "this tab no longer exists")
         return s
 
-    def close_session(self, sid: str):
+    def close_session(self, sid: str, keep=False):
+        """keep: a chat tab closed while Claude works — Claude finishes on the server (it can be
+        opened again from Sessions); otherwise it is stopped unless another device is on it too."""
         s = self.get(sid)
         with self.lock:
             self.sessions.pop(sid, None)
-        s.kill()
+        if keep and isinstance(s, ChatSession):
+            s.kill(remote=False)
+        else:
+            s.kill()
         self._remember()
 
     def order(self, ids):
@@ -5980,6 +6045,11 @@ class Handler(BaseHTTPRequestHandler):
             t = app.store.set_starter(parts[1], self._body().get("text"))
             app.invalidate()
             return {"starter": t}
+        if route == ("POST", "title") and len(parts) == 2:
+            app._project(parts[1])
+            t = app.store.set_title(parts[1], self._body().get("title"))
+            app.invalidate()
+            return {"title": t}
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
             app.invalidate()
@@ -6015,7 +6085,7 @@ class Handler(BaseHTTPRequestHandler):
                 return app.set_window(parts[1], self._body().get("win"))
             raise ApiError(404, "not found")
         if route == ("DELETE", "sessions") and len(parts) == 2:
-            app.close_session(parts[1])
+            app.close_session(parts[1], keep=query.get("keep") == ["1"])
             return {"ok": True}
         if route == ("GET", "claude-running"):
             return {"projects": app.claude_running(force=query.get("force") == ["1"]), "t": time.time()}

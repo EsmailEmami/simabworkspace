@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.31.0 2026-11-15  Rename a project in the list (⋯ → Rename…; its real name stays).
+#                       Closing a working chat asks: close only the tab and let it finish,
+#                       or stop it; a chat open on another device too is never stopped
+#                       by closing it on this one.
 #    1.30.1 2026-11-15  Chat box on phones: mode, model and effort fold into one chip that opens
 #                       a menu, so the send button (and new / history) always fit.
 #    1.30.0 2026-11-15  Claude's questions step by step, like Claude Code: one question at a
@@ -244,7 +248,7 @@
 
 set -u -o pipefail
 
-VERSION="1.30.1"
+VERSION="1.31.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -86,6 +86,20 @@ class StoreTests(TmpHome):
         with self.assertRaises(sw.ApiError):
             self.store.set_starter("p", 5)
 
+    def test_project_title(self):
+        # the user can rename a project in the list; its real name (sync session, tabs) stays
+        self.assertEqual(self.store.set_title("p", "  My   shop فروشگاه "), "My shop فروشگاه")
+        ps = sw.merge_projects([], [{"name": "p", "local": "/tmp", "remote": ""}, {"name": "a", "local": "/tmp", "remote": ""}], self.store.data["projects"])
+        self.assertEqual([(x["name"], x["title"]) for x in ps], [("a", ""), ("p", "My shop فروشگاه")])
+        self.assertEqual(self.store.set_title("p", "p"), "")
+        self.assertEqual(self.store.set_title("p", None), "")
+        with self.assertRaises(sw.ApiError):
+            self.store.set_title("p", "x" * 81)
+        self.store.set_title("p", "Shop")
+        self.store.add_manual({"name": "p", "local": "/tmp", "remote": ""})
+        self.store.remove_manual("p")
+        self.assertNotIn("title", self.store.data["projects"]["p"])
+
     def test_project_color(self):
         self.assertEqual(self.store.set_color("p", "#4F8CFF"), "#4f8cff")
         self.assertEqual(sw.merge_projects([], [{"name": "p", "local": "/tmp", "remote": ""}], self.store.data["projects"])[0]["color"], "#4f8cff")
@@ -1825,7 +1839,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.30.1"', text)
+        self.assertIn('VERSION="1.31.0"', text)
 
 
 if __name__ == "__main__":

@@ -239,6 +239,18 @@
     setTimeout(function () { ta.focus(); }, 40);
   }
 
+  // the name shown for a project: the user's own title, else its real name (which never changes)
+  function pTitle(p) { return (p && (p.title || p.name)) || ''; }
+  function renameProject(p) {
+    promptDlg('Rename “' + pTitle(p) + '”', pTitle(p)).then(function (v) {
+      if (v === null) return;
+      api('POST', 'title/' + encodeURIComponent(p.name), { title: v }).then(function (d) {
+        p.title = d.title;
+        refreshProjects();
+      }).catch(fail);
+    });
+  }
+
   function colorDialog(p) {
     var cur = p.color || '';
     function save(c) {
@@ -1270,7 +1282,7 @@
       var gi = g.tabs.indexOf(tab);
       g.tabs.splice(gi, 1);
       tab.dispose();
-      if (kill && !tab.gone) api('DELETE', 'sessions/' + tab.id).catch(function () {});
+      if (kill && !tab.gone) api('DELETE', 'sessions/' + tab.id + (kill === 'keep' ? '?keep=1' : '')).catch(function () {});
       if (g.active === tab) {
         g.active = null;
         var next = g.tabs[gi] || g.tabs[gi - 1];
@@ -1289,6 +1301,15 @@
 
   function closeTab(tab, force) {
     var go = function () { removeTab(tab, true); };
+    if (!force && tab.isChat && tab.busy && !tab.gone && !tab.watching) {
+      // Claude is working: closing the tab need not stop it (it may be open on another device too)
+      var md = openModal({ title: 'Claude is still working', size: 'sm',
+        body: h('div', null, '“' + tab.info.title + '” is still working. Close only this tab and let it finish, or stop it?'),
+        foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
+          h('button', { class: 'btn danger', onclick: function () { md.close(); tab.interrupt(); setTimeout(go, 400); } }, 'Stop it'),
+          h('button', { class: 'btn primary', onclick: function () { md.close(); removeTab(tab, 'keep'); } }, 'Close tab, keep working')] });
+      return;
+    }
     // uploads/downloads keep going in the background (Mutagen does the copying), so closing is safe
     var safe = ['shell', 'sync-info', 'sync-monitor', 'add-local', 'add-server', 'git-sync-on'];
     var risky = tab.isFiles ? false : tab.isChat ? tab.busy : (tab.alive && !tab.gone && safe.indexOf(tab.info.spec.kind) < 0);
@@ -1520,7 +1541,7 @@
     var pastBox = h('div', { class: 'sess-list' }, h('div', { class: 'muted' }, 'Loading…'));
     var filter = h('input', { class: 'inp', placeholder: 'Filter conversations', dir: 'auto' });
     var NOPROJ = 'No project (home folder)';
-    function pname(name) { return name || NOPROJ; }
+    function pname(name) { return name ? pTitle(S.projects.find(function (x) { return x.name === name; })) || name : NOPROJ; }
     function titleOf(conv) {
       var c = (past || []).find(function (x) { return x.id === conv; });
       return c ? sessionTitle(c) : '';
@@ -1720,6 +1741,7 @@
       { label: 'Git…', action: function () { gitDialog(p); } },
       { label: 'Docker containers…', disabled: !r, k: dockerCount(p.name), action: function () { dockerDialog(p); } },
       { label: 'Port forwarding…', disabled: !r, k: tunnelCount(p.name), action: function () { tunnelsDialog(p); } },
+      { label: 'Rename…', action: function () { renameProject(p); } },
       { label: 'Colour…', action: function () { colorDialog(p); } },
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
@@ -2247,7 +2269,7 @@
         ' — from the server, from this machine, or a server folder.'));
       return;
     }
-    var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0; });
+    var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0; });
     root.replaceChildren.apply(root, list.map(projEl).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
   }
 
@@ -2258,13 +2280,13 @@
     var dot = sync ? sync.state : (p.localExists || p.remote ? 'ok' : '');
     var el = h('div', { class: 'proj' + (open ? ' open' : ''), style: '--pc:' + projectColor(p.name) });
     var more = h('button', { class: 'icon-btn', title: 'More', onclick: function (e) { e.stopPropagation(); projectMenu(p, more); } }, '⋯');
-    var tip = [p.remote ? 'server: ' + p.remote : '', p.local ? 'local: ' + p.local : '',
+    var tip = [p.title ? 'name: ' + p.name : '', p.remote ? 'server: ' + p.remote : '', p.local ? 'local: ' + p.local : '',
       sync ? 'sync: ' + sync.label + (sync.conflicts ? ', ' + plural(sync.conflicts, 'conflict') : '') : ''].filter(Boolean).join('\n');
     el.append(h('div', { class: 'proj-head', title: tip, onclick: function () {
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
       localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
       el.classList.toggle('open');
-    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name' }, p.name, branchLabel(p)), runningBadge(p), open ? null : gitBadges(p.name, true),
+    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name', dir: 'auto' }, pTitle(p), branchLabel(p)), runningBadge(p), open ? null : gitBadges(p.name, true),
       sync && sync.conflicts ? h('span', { class: 'gb conflict', title: plural(sync.conflicts, 'sync conflict') + ' — click to resolve', onclick: function (e) { e.stopPropagation(); syncDetails(p); } }, '⇅' + sync.conflicts) : null,
       S.docker[p.name] && S.docker[p.name].bad ? h('span', { class: 'gb conflict', title: plural(S.docker[p.name].bad, 'container') + ' with problems — click', onclick: function (e) { e.stopPropagation(); dockerDialog(p); } }, '▣' + S.docker[p.name].bad) : null,
       count ? h('span', { class: 'count' }, String(count)) : null, more));
@@ -3607,7 +3629,7 @@
   // ------------------------------------------------------------------ shared with chat.js
   window.SW = {
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
-    closeTab: closeTab, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
+    closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,

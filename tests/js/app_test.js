@@ -113,6 +113,13 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tabs') res = fakeTabs;
+  else if (url.startsWith('/api/browse')) {
+    const p = decodeURIComponent(url.split('path=')[1] || '~');
+    const tree = { '/home/esi': ['work', 'cheshmeh'], '/home/esi/work': ['old-app'], '/home/esi/work/old-app': [] };
+    const path = p === '~' ? '/home/esi' : p;
+    res = { path, parent: path === '/' ? '' : path.replace(/\/[^/]+$/, '') || '/', home: '/home/esi', git: false,
+      dirs: (tree[path] || []).map((n) => ({ name: n, git: '', hidden: false })) };
+  }
   else if (url.startsWith('/api/git/shop/branches')) res = { current: 'dev', local: [{ name: 'dev', date: 0, subject: 'wip', upstream: 'origin/dev' }, { name: 'main', date: 0, subject: 'release' }],
     remote: [{ name: 'origin/dev', local: true }, { name: 'origin/feature/pay', date: 0, subject: 'payments', local: false }] };
   else if (url === '/api/git/shop/switch') {
@@ -407,6 +414,44 @@ const tests = {
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
     assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true });
     assert.ok(q('.toast').some((t) => /shop: downloading in the background/.test(t.textContent)));
+  },
+
+  async 'add project from this machine: Browse… the server folders, go in and out, pick'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.add-link').find((b) => b.textContent === '+ add project').click();
+    await settle();
+    const modal = q('.modal').pop();
+    q('.segb', modal).find((b) => b.querySelector('b').textContent === 'From this machine').click();
+    const inputs = q('input', modal);
+    const local = inputs.find((i) => i.getAttribute('placeholder') === '~/projects/my-project');
+    const remote = inputs.find((i) => i.getAttribute('placeholder') === '~/my-project');
+    local.value = '/Users/me/code/my-shop';
+    const browse = q('button', modal).filter((b) => b.textContent === 'Browse…').pop();
+    browse.click(); await settle();
+    const dlg = q('.modal').pop();
+    assert.notStrictEqual(dlg, modal, 'its own window');
+    const names = () => q('.frow', dlg).map((r) => r.querySelector('.fname').textContent);
+    assert.deepStrictEqual(names(), ['..', 'work', 'cheshmeh']);
+    q('.frow', dlg)[1].click(); await settle();                       // into work
+    assert.deepStrictEqual(names(), ['..', 'old-app']);
+    q('.frow', dlg)[1].click(); await settle();                       // into old-app
+    q('.frow', dlg)[0].click(); await settle();                       // .. back out
+    assert.deepStrictEqual(names(), ['..', 'old-app']);
+    const inside = q('button', dlg).find((b) => /^Inside it: /.test(b.textContent));
+    assert.strictEqual(inside.textContent, 'Inside it: my-shop');
+    inside.click(); await settle();
+    assert.strictEqual(remote.value, '/home/esi/work/my-shop');
+    assert.strictEqual(q('.modal').pop(), modal, 'back in Add project');
+    // Use this folder
+    browse.click(); await settle();
+    const dlg2 = q('.modal').pop();
+    assert.deepStrictEqual(q('.frow', dlg2).map((r) => r.querySelector('.fname').textContent), ['..', 'old-app'], 'opens where the typed folder is');
+    q('button', dlg2).find((b) => b.textContent === 'Use this folder').click(); await settle();
+    assert.strictEqual(remote.value, '/home/esi/work');
+    q('.btn.primary', modal).pop().click(); await settle();
+    const post = calls.filter((c) => c.url === '/api/add-project').pop();
+    assert.deepStrictEqual([post.body.mode, post.body.remote, post.body.local], ['upload', '/home/esi/work', '/Users/me/code/my-shop']);
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'upload progress shows under the project and a toast when it is done'() {

@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.24.3 2026-11-15  Add project → From this machine: "Browse…" next to the server folder
+#                       opens the server's folders — go in and out, then "Use this folder",
+#                       "Inside it: <your folder's name>" or "New folder…". From the server:
+#                       "Browse…" picks any folder, not only the ones in your home.
 #    1.24.2 2026-11-15  Chat details stay clean: background SSH connections no longer open
 #                       port forwardings from your ~/.ssh/config ("remote port forwarding
 #                       failed for listen port …"), and the relay ends without "Fatal Python
@@ -188,7 +192,7 @@
 
 set -u -o pipefail
 
-VERSION="1.24.2"
+VERSION="1.24.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

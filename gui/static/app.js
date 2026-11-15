@@ -2061,7 +2061,7 @@
   }
 
   // Browse folders on the server: click a folder to go into it; the folder you are in is the one picked.
-  function folderPicker(onChange) {
+  function folderPicker(onChange, start) {
     var cur = '', showHidden = false, data = null;
     var pathIn = h('input', { class: 'inp mono', placeholder: '~/my-project', spellcheck: 'false', autocomplete: 'off' });
     var list = h('div', { class: 'flist' }, h('div', { class: 'muted', style: 'padding:10px' }, 'Loading folders on the server…'));
@@ -2101,11 +2101,58 @@
         onChange(d);
       }).catch(function (e) { list.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
     }
-    go('~');
+    go(start || '~');
     var el = h('div', { class: 'fpick' }, crumbs, list,
       h('div', { class: 'fpick-foot' }, pathIn, h('label', { class: 'check', style: 'margin:0;flex:none' }, hid, h('span', null, 'hidden'))));
     el.value = function () { return pathIn.value.trim(); };
     return el;
+  }
+
+  // A server folder in a window of its own: go into folders and out again, then pick one.
+  // opts: { title, start, note, newName (offer "Inside it: <newName>"), pick(path) }
+  function serverFolderDialog(opts) {
+    var cur = null;
+    var useBtn = h('button', { class: 'btn' }, 'Use this folder');
+    var insideBtn = opts.newName ? h('button', { class: 'btn primary' }) : null;
+    var newBtn = h('button', { class: 'btn', title: 'A new folder inside the one you are in' }, 'New folder…');
+    var picker = folderPicker(function (d) {
+      cur = d;
+      useBtn.disabled = newBtn.disabled = false;
+      if (insideBtn) {
+        var taken = d.dirs.some(function (x) { return x.name === opts.newName; });
+        insideBtn.textContent = 'Inside it: ' + opts.newName;
+        insideBtn.title = (d.path.replace(/\/$/, '') + '/' + opts.newName) + (taken ? ' (exists — it must be empty)' : ' (new)');
+      }
+    }, opts.start);
+    useBtn.disabled = newBtn.disabled = true;
+    function done(path) { md.close(); opts.pick(path); }
+    useBtn.addEventListener('click', function () { if (cur) done(cur.path); });
+    if (insideBtn) insideBtn.addEventListener('click', function () { if (cur) done(cur.path.replace(/\/$/, '') + '/' + opts.newName); });
+    newBtn.addEventListener('click', function () {
+      if (!cur) return;
+      promptDlg('New folder in ' + cur.path, '').then(function (n) {
+        if (!n) return;
+        if (/[\/]/.test(n) || n === '.' || n === '..') { toast('A folder name only — no /', 'err'); return; }
+        done(cur.path.replace(/\/$/, '') + '/' + n);
+      });
+    });
+    var md = openModal({ title: opts.title || 'Folder on the server', body: [
+      h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, opts.note || 'Click a folder to go into it, .. to go back up.'),
+      picker],
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), h('span', { class: 'grow' }), newBtn, useBtn, insideBtn].filter(Boolean) });
+    return md;
+  }
+
+  // a server folder field: typed, or chosen with Browse…
+  function serverFolderField(label, input, opts) {
+    var browse = h('button', { class: 'btn', type: 'button', title: 'Browse the folders on the server', style: 'flex:none', onclick: function () {
+      var o = typeof opts === 'function' ? opts() : (opts || {});
+      var v = input.value.trim();
+      serverFolderDialog(Object.assign({ start: v ? v.replace(/\/[^/]*$/, '') || v : '~', pick: function (path) {
+        input.value = path;
+      } }, o));
+    } }, 'Browse…');
+    return h('div', { class: 'field' }, h('label', null, label), h('div', { style: 'display:flex;gap:6px' }, input, browse));
   }
 
   // Add project — all in the window: download from the server, upload from this machine, or server-only
@@ -2120,7 +2167,9 @@
     var filter = h('input', { class: 'inp', placeholder: 'Filter folders', autocomplete: 'off' });
     filter.addEventListener('input', renderFolders);
 
+    var pickedNote = h('div', { class: 'muted mono', style: 'font-size:11.5px;margin-top:4px;min-height:15px' });
     function renderFolders() {
+      pickedNote.textContent = pickedRemote ? 'Picked: ' + pickedRemote : '';
       if (!folders) return;
       var q = filter.value.trim().toLowerCase();
       var shown = folders.filter(function (f) { return !q || f.name.toLowerCase().indexOf(q) >= 0; });
@@ -2150,7 +2199,15 @@
     var forms = {
       download: function () {
         loadFolders();
-        return [h('div', { class: 'field' }, h('label', null, 'Folder on the server'), filter, list),
+        var deeper = h('button', { class: 'btn', type: 'button', style: 'flex:none', title: 'Any folder on the server, not only the ones in your home', onclick: function () {
+          serverFolderDialog({ title: 'Folder to download', start: pickedRemote || '~', pick: function (path) {
+            pickedRemote = path;
+            var base = path.replace(/\/$/, '').split('/').pop();
+            if (!local.value || local.dataset.auto) { local.value = '~/' + base; local.dataset.auto = '1'; if (local._upd) local._upd(); }
+            renderFolders();
+          } });
+        } }, 'Browse…');
+        return [h('div', { class: 'field' }, h('label', null, 'Folder on the server'), h('div', { style: 'display:flex;gap:6px' }, filter, deeper), list, pickedNote),
           h('div', { class: 'row' },
             localFolderField('Put it on this machine at', local),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)), gitRow()];
@@ -2158,7 +2215,12 @@
       upload: function () {
         return [localFolderField('Folder on this machine', local),
           h('div', { class: 'row' },
-            h('div', { class: 'field' }, h('label', null, 'Folder on the server'), remote),
+            serverFolderField('Folder on the server', remote, function () {
+              var base = local.value.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+              return { title: 'Where to put it on the server',
+                note: 'Go to the folder it should go in. The server folder must be new or empty.',
+                newName: base && base !== '~' ? base : '' };
+            }),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)),
           h('div', { class: 'muted', style: 'font-size:11.5px;margin:-6px 0 10px' }, 'Empty server folder = ~/<folder name>. It must be new or empty.'), gitRow()];
       },
@@ -3204,7 +3266,7 @@
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
-    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker,
+    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
   };
 

@@ -77,6 +77,15 @@ class StoreTests(TmpHome):
             with self.assertRaises(sw.ApiError):
                 self.store.set_commands("p", bad)
 
+    def test_project_starter_message(self):
+        self.assertEqual(self.store.set_starter("p", "  Read memory first.\nپاسخ فارسی  "), "Read memory first.\nپاسخ فارسی")
+        self.assertEqual(sw.Store(self.store.path).data["projects"]["p"]["starter"], "Read memory first.\nپاسخ فارسی")
+        self.assertEqual(self.store.set_starter("p", None), "")
+        with self.assertRaises(sw.ApiError):
+            self.store.set_starter("p", "x" * 20001)
+        with self.assertRaises(sw.ApiError):
+            self.store.set_starter("p", 5)
+
     def test_project_color(self):
         self.assertEqual(self.store.set_color("p", "#4F8CFF"), "#4f8cff")
         self.assertEqual(sw.merge_projects([], [{"name": "p", "local": "/tmp", "remote": ""}], self.store.data["projects"])[0]["color"], "#4f8cff")
@@ -1816,7 +1825,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.27.4"', text)
+        self.assertIn('VERSION="1.28.0"', text)
 
 
 if __name__ == "__main__":

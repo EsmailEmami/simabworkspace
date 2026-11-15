@@ -519,6 +519,33 @@ const tests = {
     assert.ok(!b.tab.busy);
   },
 
+  'a project starter message fills the box of every new chat, not a continued one'() {
+    const old = global.SW.project;
+    global.SW.project = () => ({ remote: '/home/esi/p', starter: 'Read memory/README.md first. پاسخ فارسی.' });
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    assert.strictEqual(tab.ta.value, 'Read memory/README.md first. پاسخ فارسی.\n\n');
+    assert.strictEqual(tab.ta.selectionStart, tab.ta.value.length, 'you type your request after it');
+    // what you wrote is never replaced
+    tab.ta.value = 'my own text';
+    feed({ t: 's', state: { alive: true }, events: [] });
+    assert.strictEqual(tab.ta.value, 'my own text');
+    // a continued conversation: nothing
+    const b = newTab();
+    b.tab.info.spec.resume = '11111111-2222-3333-4444-555555555555';
+    b.feed({ t: 's', state: { alive: true }, events: [{ type: '_history', start: 0, total: 1, entries: [{ type: 'user', message: { content: 'old' } }] }] });
+    assert.strictEqual(b.tab.ta.value, '');
+    // "new" conversation in that tab: the box starts with it again
+    b.feed({ t: 'clear' });
+    assert.match(b.tab.ta.value, /^Read memory\/README\.md first/);
+    // no starter: nothing
+    global.SW.project = () => ({ remote: '/home/esi/p', starter: '' });
+    const c = newTab();
+    c.feed({ t: 's', state: { alive: true }, events: [] });
+    assert.strictEqual(c.tab.ta.value, '');
+    global.SW.project = old;
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

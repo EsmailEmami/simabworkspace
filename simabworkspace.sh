@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.28.0 2026-11-15  Starter message per project (⋯ → Starter message…): every new Claude chat
+#                       of the project starts with it in the message box — you write your
+#                       request after it. Not used when you continue a conversation.
 #    1.27.4 2026-11-15  Chat after an update / reopen: while it reconnects to Claude on the
 #                       server it says so ("reconnecting…") instead of looking dead, and when
 #                       Claude was in the middle of work the tab shows it working right away
@@ -226,7 +229,7 @@
 
 set -u -o pipefail
 
-VERSION="1.27.4"
+VERSION="1.28.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

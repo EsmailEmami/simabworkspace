@@ -216,6 +216,29 @@
   }
   function repaintTabs() { S.tabs.forEach(paintTab); }
 
+  // The text every new Claude chat of a project starts with — the user writes their request after it.
+  function starterDialog(p) {
+    var ta = h('textarea', { class: 'inp starter-ta', rows: 10, dir: 'auto', spellcheck: 'false',
+      placeholder: 'e.g. Read memory/README.md and the notes it points to first. Answer in Persian.' });
+    ta.value = p.starter || '';
+    function save(text) {
+      api('POST', 'starter/' + encodeURIComponent(p.name), { text: text }).then(function (d) {
+        p.starter = d.starter;
+        md.close();
+        toast(d.starter ? 'New chats in ' + p.name + ' start with it' : 'Starter message removed', 'ok');
+        refreshProjects();
+      }).catch(fail);
+    }
+    var md = openModal({ title: 'Starter message — ' + p.name, body: [
+      h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:8px' },
+        'Every new Claude chat in this project starts with this text in the message box — you add your request after it and send. Not used when you continue a conversation.'),
+      ta],
+      foot: [p.starter ? h('button', { class: 'btn danger', onclick: function () { save(''); } }, 'Remove') : null, h('span', { class: 'grow' }),
+        h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
+        h('button', { class: 'btn primary', onclick: function () { save(ta.value); } }, 'Save')].filter(Boolean) });
+    setTimeout(function () { ta.focus(); }, 40);
+  }
+
   function colorDialog(p) {
     var cur = p.color || '';
     function save(c) {
@@ -1658,6 +1681,7 @@
       { label: 'New chat', disabled: !r, action: function () { openSession({ kind: 'chat', project: p.name }); } },
       { label: 'Continue last chat', disabled: !r, action: function () { resumeLatest(p.name); } },
       { label: 'Sessions — running and past…', disabled: !r, k: runningOf(p.name).length ? runningOf(p.name).length + ' running' : '', action: function () { claudeSessionsDialog(p); } },
+      { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
       { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
@@ -3215,6 +3239,7 @@
         items.push({ label: n + ': Claude', grp: n, action: function () { openSession({ kind: 'chat', project: n }); } });
         items.push({ label: n + ': Claude, continue last chat', grp: n, action: function () { resumeLatest(n); } });
         items.push({ label: n + ': Claude sessions — running and past', grp: n, action: function () { claudeSessionsDialog(p); } });
+        items.push({ label: n + ': starter message for new Claude chats', grp: n, action: function () { starterDialog(p); } });
         items.push({ label: n + ': Claude, past chats…', grp: n, action: function () { pickClaudeSession(n, function (sid, title) { openSession({ kind: 'chat', project: n, resume: sid, title: 'Claude · ' + title }); }); } });
         items.push({ label: n + ': server terminal', grp: n, action: function () { openSession({ kind: 'shell', where: 'server', project: n }); } });
         items.push({ label: n + ': VS Code on server', grp: n, action: function () { openEditor(p, 'server'); } });
@@ -3560,7 +3585,7 @@
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
-    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog,
+    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
   };

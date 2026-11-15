@@ -811,3 +811,5 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 .fold summary { cursor: pointer; font-size: 11px; color: var(--faint); margin: 4px 0; }
 .fold-md { font-size: 13px; line-height: 1.6; max-height: 60vh; overflow: auto; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .tool-card.synthetic .tname { color: var(--muted); }
+
+.starter-ta { height: auto; min-height: 180px; padding: 8px 10px; font: 13px/1.6 var(--ui); resize: vertical; unicode-bidi: plaintext; }

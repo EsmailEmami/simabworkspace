@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.27.4"
+VERSION = "1.28.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -548,6 +548,20 @@ class Store:
             self.save()
         return color
 
+    def set_starter(self, project: str, text) -> str:
+        """The text every new Claude chat of this project starts with (the user adds their request)."""
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            raise ApiError(400, "invalid starter message")
+        text = text.strip()
+        if len(text) > 20000:
+            raise ApiError(400, "the starter message is too long")
+        with self.lock:
+            self.data["projects"].setdefault(project, {})["starter"] = text
+            self.save()
+        return text
+
     # projects added by hand (not synced, or synced outside this tool)
     def manual(self) -> list:
         return list(self.data["manual"])
@@ -690,6 +704,7 @@ def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
         p["localExists"] = bool(p["local"]) and os.path.isdir(p["local"])
         p["commands"] = list((store_projects.get(p["name"]) or {}).get("commands") or [])
         p["color"] = (store_projects.get(p["name"]) or {}).get("color") or ""
+        p["starter"] = (store_projects.get(p["name"]) or {}).get("starter") or ""
     out.sort(key=lambda p: p["name"].lower())
     return out
 
@@ -5915,6 +5930,11 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("GET", "suggest") and len(parts) == 2:
             p = next((x for x in app.projects() if x["name"] == parts[1]), None)
             return {"suggestions": suggestions(p["local"]) if p and p.get("localExists") else []}
+        if route == ("POST", "starter") and len(parts) == 2:
+            app._project(parts[1])
+            t = app.store.set_starter(parts[1], self._body().get("text"))
+            app.invalidate()
+            return {"starter": t}
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
             app.invalidate()

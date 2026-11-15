@@ -383,6 +383,7 @@
         else self.setPhase('idle', 'ready');
         self.stick = true;
         self.scrollEnd();
+        self.prefillStarter();
       } else if (m.t === 'e') {
         self.onEvent(m.e);
       } else if (m.t === 'u') {
@@ -398,6 +399,9 @@
         if (!m.busy && self.phaseKind === 'work') self.setPhase('idle', 'ready');
       } else if (m.t === 'clear') {
         self.reset();
+        self.sessionId = '';                       // a new conversation: the old one is gone from this tab
+        if (self.info.spec) delete self.info.spec.resume;
+        self.prefillStarter();
       } else if (m.t === 'gone') {
         self.gone = true;
       }
@@ -1472,6 +1476,16 @@
     api('POST', 'sessions/' + this.id + '/restart').then(function (info) { self.info = info; self.alive = true; }).catch(fail);
   };
   P.stop = function () { this.interrupt(); };
+
+  // a new, empty conversation of a project with a starter message: the box starts with it
+  P.prefillStarter = function () {
+    var p = SW.project(this.info.spec.project);
+    if (!p || !p.starter || this.info.spec.watch || this.watching || this.ta.value.trim()) return;
+    if (this.sessionId || this.info.spec.resume || this.msgs.querySelector('.umsg') || this.msgs.querySelector('.amsg')) return;
+    this.ta.value = p.starter.replace(/\s+$/, '') + '\n\n';
+    this.ta.setSelectionRange(this.ta.value.length, this.ta.value.length);
+    this.autosize();
+  };
 
   P.newChat = function () {
     var self = this;

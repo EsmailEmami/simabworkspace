@@ -79,6 +79,7 @@ global.fetch = (url, opts) => {
     statuses: { 'cheshmeh-api-service': Object.assign({}, gitStatus, { files: [] }), 'cheshmeh-web-app': gitStatus } };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
+  else if (url.startsWith('/api/starter/')) res = { starter: (body.text || '').trim() };
   else if (url.startsWith('/api/git-summary')) res = { summary: { cheshmeh: { changes: 3, ahead: 1, behind: 2, conflicts: 0, repos: 2, branch: 'main', branches: 1, repo: null, where: 'local' }, shop: { changes: 0, ahead: 0, behind: 0, conflicts: 0, repos: 1, branch: 'dev', branches: 1, repo: '', where: 'server' } } };
   else if (url === '/api/connection') res = { user: 'esi', host: 'h', port: '225', key: '', keys: [{ path: '/home/me/.ssh/id_ed25519', type: 'ed25519', comment: 'me' }], autostart: true, daemon: true };
   else if (url === '/api/prereqs' && method === 'GET') res = { items: [{ name: 'mutagen', ok: true, version: '0.18', why: 'sync', sudo: false }, { name: 'jq', ok: false, version: '', why: 'scripts', sudo: false }], docker: false, wsl: false, sudoWithoutPassword: false };
@@ -183,6 +184,21 @@ const tests = {
     q('.act.more')[0].click();
     q('button').find((b) => b.textContent.trim().indexOf('Copy local path') === 0).click(); await settle();
     assert.deepStrictEqual(copied, ['/home/esi/cheshmeh', '/l/cheshmeh']);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'project menu: starter message for new Claude chats'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.trim().indexOf('Starter message…') === 0).click(); await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /Starter message — cheshmeh/);
+    const ta = modal.querySelector('textarea');
+    ta.value = '  Read the memory files first.  ';
+    q('.btn.primary', modal).pop().click(); await settle();
+    const post = calls.filter((c) => c.url === '/api/starter/cheshmeh').pop();
+    assert.deepStrictEqual(post.body, { text: '  Read the memory files first.  ' });
+    assert.strictEqual(global.SW.project('cheshmeh').starter, 'Read the memory files first.');
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

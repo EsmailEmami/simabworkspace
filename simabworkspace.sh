@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.23.3 2026-11-15  Servers whose login shell is zsh (or fish): "no matches found:
+#                       …/*/.git" when listing server folders — our commands now run with
+#                       sh on the server (folders, repositories, files, git).
 #    1.23.2 2026-11-15  macOS: "keyword controlpath extra arguments at end of line" — the
 #                       shared SSH connection no longer lives under a home folder with a
 #                       space (or a very long one); a private /tmp folder is used instead.
@@ -172,7 +175,7 @@
 
 set -u -o pipefail
 
-VERSION="1.23.2"
+VERSION="1.23.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -975,7 +978,9 @@ add_project() {
     [ $yes -eq 1 ] && { err "Give the server folder."; return 1; }
     info "Folders in your home on the server ($rhome):"
     local dirs i=0 d sel
-    dirs=$(rssh 'for d in "$HOME"/*/; do [ -d "$d" ] && printf "%s\n" "${d%/}"; done' 2>/dev/null || true)
+    # through sh: a zsh login shell on the server stops at a glob that matches nothing
+    local list_cmd='for d in "$HOME"/*/; do [ -d "$d" ] && printf "%s\n" "${d%/}"; done'
+    dirs=$(rssh "sh -c '$list_cmd'" 2>/dev/null || true)
     if [ -n "$dirs" ]; then
       while IFS= read -r d; do i=$((i + 1)); printf '   %2d) %s\n' "$i" "$d"; done <<< "$dirs"
     else

@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.23.2"
+VERSION = "1.23.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -722,6 +722,13 @@ def control_path() -> str:
     except (OSError, AttributeError):
         return ""
     return os.path.join(d, "sw-%C")
+
+
+def posix_sh(cmd: str) -> str:
+    """Run a command line with /bin/sh on the server, whatever the user's login shell is.
+    zsh stops at a glob that matches nothing ("no matches found: …/*/.git"), fish has its
+    own syntax — our commands are written for sh."""
+    return "sh -c " + shlex.quote(cmd)
 
 
 def ssh_base(conf: ServerConf, multiplex=True, batch=False) -> list:
@@ -2564,7 +2571,7 @@ def git_repos(app, project: dict) -> dict:
         conf = conf.with_endpoint(ep.get("user"), ep.get("host"), ep.get("port"))
         cmd = f"cd {remote_path_expr(project['remote'])} && " + REMOTE_FIND_REPOS
         try:
-            r = subprocess.run(ssh_base(conf, multiplex=bool(app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, cmd],
+            r = subprocess.run(ssh_base(conf, multiplex=bool(app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)],
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
             remote = [x.strip() for x in r.stdout.decode("utf-8", "replace").splitlines()]
             remote = [x for x in remote if x == "" or git_path_ok(x)]
@@ -2603,7 +2610,7 @@ class GitRepo:
             envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in GIT_ENV.items())
             rpath = self.p["remote"].rstrip("/") + ("/" + self.repo if self.repo else "")
             cmd = f"cd {remote_path_expr(rpath)} && {envs} git " + " ".join(shlex.quote(a) for a in args)
-            argv = ssh_base(conf, multiplex=bool(self.app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, cmd]
+            argv = ssh_base(conf, multiplex=bool(self.app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)]
             cwd = os.path.expanduser("~")
         try:
             r = subprocess.run(argv, cwd=cwd, env=env, input=stdin, capture_output=True, timeout=timeout)
@@ -3973,7 +3980,7 @@ class App:
                'if [ "$g" = 0 ]; then for s in "$d"/*/.git; do [ -e "$s" ] && { g=2; break; }; done; fi; '
                'printf "%s\t%s\t%s\n" "$d" "$g" "$(stat -c %Y "$d" 2>/dev/null || echo 0)"; done')
         try:
-            r = subprocess.run(ssh_base(conf, multiplex=bool(self.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, cmd],
+            r = subprocess.run(ssh_base(conf, multiplex=bool(self.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)],
                                stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             raise ApiError(502, f"cannot reach the server: {e}")
@@ -4353,7 +4360,7 @@ class App:
             cmd = f"cd {remote_path_expr(p['remote'])} && " + REMOTE_FILES_SH
             try:
                 r = subprocess.run(ssh_base(conf, multiplex=bool(self.store.settings.get("sshMultiplex")))
-                                   + ["-T", "-o", "BatchMode=yes", conf.target, cmd],
+                                   + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
             except (OSError, subprocess.SubprocessError) as e:
                 raise ApiError(502, f"could not list files on the server: {e}")

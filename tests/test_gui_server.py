@@ -437,6 +437,49 @@ class SshControlPath(unittest.TestCase):
         self.assertIn("ServerAliveInterval=15", self.opts(argv))
 
 
+REAL_RUN = subprocess.run
+
+
+class ZshOnTheServer(TmpHome):
+    """A server whose login shell is zsh: "no matches found: …/*/.git" when listing folders."""
+
+    def setUp(self):
+        super().setUp()
+        self.zsh = shutil.which("zsh")
+        if not self.zsh:
+            self.skipTest("zsh not installed")
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / "empty-project").mkdir(parents=True)            # no sub folders: */.git matches nothing
+        (self.home / "repo" / ".git").mkdir(parents=True)
+        (self.home / "mono" / "api" / ".git").mkdir(parents=True)
+        self.app = sw.App(self.store, sw.ServerConf("esi", "h", "22", ""))
+
+    def run_with_zsh(self, argv, **kw):
+        """Instead of ssh: the command line ssh would send, run by zsh (like sshd does)."""
+        kw.pop("stdin", None)
+        kw.pop("capture_output", None)
+        for k in ("stdout", "stderr"):
+            kw.pop(k, None)
+        env = dict(os.environ, HOME=str(self.home))
+        return REAL_RUN([self.zsh, "-c", argv[-1]], capture_output=True, env=env, timeout=30,
+                              cwd=kw.get("cwd"), input=kw.get("input"))
+
+    def test_server_folders_and_repos_and_files_with_zsh(self):
+        with mock.patch.object(sw.subprocess, "run", side_effect=self.run_with_zsh), \
+                mock.patch.object(sw, "mutagen_sessions", return_value=[]):
+            folders = {f["name"]: f["git"] for f in self.app.server_folders()}
+            self.assertEqual(folders, {"empty-project": "", "repo": "repo", "mono": "repos inside"})
+            p = {"name": "mono", "remote": str(self.home / "mono"), "local": "", "localExists": False, "endpoint": {}}
+            self.assertEqual(sw.git_repos(self.app, p), {"where": "server", "repos": ["api"]})
+
+    def test_posix_sh_keeps_the_command_intact(self):
+        cmd = 'x="a b"; for f in "$HOME"/nothing-*/; do echo "$f"; done; printf "%s|" "$x" \'q\''
+        r = subprocess.run([self.zsh, "-c", sw.posix_sh(cmd)], capture_output=True, text=True,
+                           env=dict(os.environ, HOME=str(self.home)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.endswith("a b|q|"), r.stdout)
+
+
 class SshAlias(TmpHome):
     def test_block_is_replaced_not_duplicated(self):
         f = Path(self.tmp.name) / "ssh_config"
@@ -1604,7 +1647,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.23.2"', text)
+        self.assertIn('VERSION="1.23.3"', text)
 
 
 if __name__ == "__main__":

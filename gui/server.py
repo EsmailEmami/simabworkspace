@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.23.3"
+VERSION = "1.24.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2707,6 +2707,59 @@ class GitRepo:
     def fetch(self) -> str:
         return self.check(["fetch", "--prune"], timeout=120)
 
+    # branches -----------------------------------------------------------------
+    def branches(self) -> dict:
+        code, cur, _ = self.run(["branch", "--show-current"], timeout=15)
+        fmt = "%(refname)%00%(refname:short)%00%(committerdate:unix)%00%(upstream:short)%00%(contents:subject)"
+        out = self.check(["for-each-ref", "--sort=-committerdate", "--format=" + fmt, "refs/heads", "refs/remotes"], timeout=30)
+        local, remote = [], []
+        for line in out.splitlines():
+            parts = line.split("\0")
+            if len(parts) < 5:
+                continue
+            ref, short, date, up, subject = parts[:5]
+            item = {"name": short, "date": int(date) if date.isdigit() else 0, "subject": subject[:200]}
+            if ref.startswith("refs/heads/"):
+                item["upstream"] = up
+                local.append(item)
+            elif ref.startswith("refs/remotes/") and not ref.endswith("/HEAD"):
+                remote.append(item)
+        tracked = {b["upstream"] for b in local if b.get("upstream")} | {b["name"] for b in local}
+        for r in remote:                         # origin/x with a local x: already switchable as x
+            r["local"] = r["name"] in tracked or r["name"].split("/", 1)[-1] in {b["name"] for b in local}
+        return {"current": cur.strip() if code == 0 else "", "local": local, "remote": remote}
+
+    def valid_branch(self, name) -> str:
+        if not isinstance(name, str) or not name.strip() or name.startswith("-") or len(name) > 200:
+            raise ApiError(400, "give a branch name")
+        name = name.strip()
+        code, _, _ = self.run(["check-ref-format", "--branch", name], timeout=15)
+        if code != 0:
+            raise ApiError(400, f"“{name}” is not a valid branch name")
+        return name
+
+    def switch(self, name, create=False, track=False, stash=False) -> str:
+        """Switch to a branch (create: a new one from here; track: a remote branch like
+        origin/x becomes local x). stash: put uncommitted changes aside first."""
+        name = self.valid_branch(name)
+        self.flush()
+        if stash:
+            self.check(["stash", "push", "--include-untracked", "-m", f"simab: before switching to {name}"], timeout=60)
+        if create:
+            args = ["switch", "-c", name]
+        elif track:
+            args = ["switch", "--track", name]
+        else:
+            args = ["switch", name]
+        code, out, err = self.run(args, timeout=120)
+        self.flush()
+        if code != 0:
+            text = (err.strip() or out.strip())
+            if "would be overwritten" in text or "commit your changes or stash them" in text:
+                raise ApiError(409, "Your uncommitted changes would be overwritten by this branch.")
+            raise ApiError(400, text[-1500:] or "git switch failed")
+        return (out + err).strip()
+
 
 # ----------------------------------------------------------------------------- file explorer
 # The Files tab lists folders and shows files of a project. The same small script
@@ -4296,7 +4349,8 @@ class App:
     def git_summary_one(self, p: dict, fetch=False) -> dict:
         info = git_repos(self, p)
         out = {"changes": 0, "ahead": 0, "behind": 0, "conflicts": 0, "repos": len(info["repos"]),
-               "noUpstream": 0, "t": time.time(), "where": info["where"]}
+               "noUpstream": 0, "t": time.time(), "where": info["where"], "branch": "", "branches": 0}
+        names = set()
         for r in info["repos"]:
             repo = GitRepo(self, p, r, info["where"])
             try:
@@ -4312,6 +4366,10 @@ class App:
             out["behind"] += st.get("behind", 0)
             out["conflicts"] += st.get("conflicts", 0)
             out["noUpstream"] += 0 if st.get("upstream") else 1
+            names.add(st.get("branch") or "")
+        out["branches"] = len(names)
+        out["repo"] = info["repos"][0] if len(info["repos"]) == 1 else None
+        out["branch"] = next(iter(names)) if len(names) == 1 else ""
         return out
 
     def git_summary(self, project: str = "", force=False) -> dict:
@@ -5354,6 +5412,21 @@ class Handler(BaseHTTPRequestHandler):
             repo = GitRepo(app, p, rq if isinstance(rq, str) else "", wh if wh in WHERE else None)
             if method == "GET" and act == "status":
                 return repo.status()
+            if method == "GET" and act == "branches":
+                return repo.branches()
+            if method == "POST" and act == "switch":
+                out = repo.switch(body.get("branch"), create=body.get("create") is True, track=body.get("track") is True,
+                                  stash=body.get("stash") is True)
+                app.invalidate()
+                st = repo.status()
+                app.activity.add("git-switch", p["name"], st.get("branch") or "", repo=repo.repo)
+                cache = app.__dict__.get("_git_sum")
+                if isinstance(cache, dict):
+                    try:
+                        cache[p["name"]] = app.git_summary_one(p)
+                    except ApiError:
+                        pass
+                return {"output": out, "status": st}
             if method == "GET" and act == "diff":
                 return {"diff": repo.diff((query.get("path") or [""])[0], (query.get("untracked") or ["0"])[0] == "1")}
             if method == "POST" and act in ("commit", "pull", "push", "fetch"):

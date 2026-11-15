@@ -77,7 +77,7 @@ global.fetch = (url, opts) => {
     statuses: { 'cheshmeh-api-service': Object.assign({}, gitStatus, { files: [] }), 'cheshmeh-web-app': gitStatus } };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
-  else if (url.startsWith('/api/git-summary')) res = { summary: { cheshmeh: { changes: 3, ahead: 1, behind: 2, conflicts: 0, repos: 2 }, shop: { changes: 0, ahead: 0, behind: 0, conflicts: 0, repos: 1 } } };
+  else if (url.startsWith('/api/git-summary')) res = { summary: { cheshmeh: { changes: 3, ahead: 1, behind: 2, conflicts: 0, repos: 2, branch: 'main', branches: 1, repo: null, where: 'local' }, shop: { changes: 0, ahead: 0, behind: 0, conflicts: 0, repos: 1, branch: 'dev', branches: 1, repo: '', where: 'server' } } };
   else if (url === '/api/connection') res = { user: 'esi', host: 'h', port: '225', key: '', keys: [{ path: '/home/me/.ssh/id_ed25519', type: 'ed25519', comment: 'me' }], autostart: true, daemon: true };
   else if (url === '/api/prereqs' && method === 'GET') res = { items: [{ name: 'mutagen', ok: true, version: '0.18', why: 'sync', sudo: false }, { name: 'jq', ok: false, version: '', why: 'scripts', sudo: false }], docker: false, wsl: false, sudoWithoutPassword: false };
   else if (url.startsWith('/api/prereqs/')) res = { ok: true };
@@ -113,6 +113,12 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tabs') res = fakeTabs;
+  else if (url.startsWith('/api/git/shop/branches')) res = { current: 'dev', local: [{ name: 'dev', date: 0, subject: 'wip', upstream: 'origin/dev' }, { name: 'main', date: 0, subject: 'release' }],
+    remote: [{ name: 'origin/dev', local: true }, { name: 'origin/feature/pay', date: 0, subject: 'payments', local: false }] };
+  else if (url === '/api/git/shop/switch') {
+    if (!body.stash && body.branch === 'origin/feature/pay') return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: 'Your uncommitted changes would be overwritten by this branch.' }) });
+    res = { output: '', status: Object.assign({}, gitStatus, { branch: body.create ? body.branch : body.branch.replace(/^origin\//, '') }) };
+  }
   else if (/^\/api\/sessions\/[^/]+\/win$/.test(url)) { const id = url.split('/')[3]; winOf[id] = body.win; res = { id, title: 'moved ' + id, alive: true, exitCode: null, url: '', win: body.win, moved: 1e12, spec: { kind: 'shell', project: '', where: 'local' } }; }
   else if (url === '/api/sessions' && method === 'POST') {
     res = { id: 's' + (++seq), title: body.kind + ' ' + (body.project || 'home'), alive: true, exitCode: null, url: '',
@@ -601,6 +607,39 @@ const tests = {
     assert.strictEqual(winOf[t3.id], wid);
     assert.ok(!S.tabs.includes(t3));
     fakeTabs = { sessions: [], windows: [], now: 0 };
+  },
+
+  async 'branches: shown next to the project, switch, track a remote one (stash asked), create'() {
+    const SW = global.SW;
+    await refreshFromOutside();
+    const labels = q('.pbranch').map((e) => e.textContent.trim());
+    assert.deepStrictEqual(labels, ['⎇ main', '⎇ dev']);
+    q('.pbranch')[1].click(); await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /Branch — shop/);
+    const rows = () => q('.brow', modal).map((b) => b.querySelector('.bname').textContent);
+    assert.deepStrictEqual(rows(), ['✓ dev', 'main', 'origin/feature/pay']);      // origin/dev has a local branch already
+    // a branch only on the remote, with clashing changes: asked, then stashed
+    q('.brow', modal)[2].click(); await settle();
+    const ask = q('.modal').pop();
+    assert.match(ask.textContent, /git stash/);
+    q('.btn.primary', ask).pop().click(); await settle();
+    const sw = calls.filter((c) => c.url === '/api/git/shop/switch');
+    assert.deepStrictEqual(sw.map((c) => [c.body.branch, !!c.body.track, !!c.body.stash, c.body.repo, c.body.where]),
+      [['origin/feature/pay', true, false, '', 'server'], ['origin/feature/pay', true, true, '', 'server']]);
+    assert.ok(q('.toast').some((t) => /shop: on feature\/pay/.test(t.textContent)));
+    // create a new branch by typing its name
+    SW.branchPicker(SW.project('shop'), '', 'server', () => {}); await settle();
+    const m2 = q('.modal').pop();
+    const f = m2.querySelector('input');
+    f.value = 'fix/login';
+    f.dispatch('input');
+    const last = q('.brow', m2).pop();
+    assert.match(last.textContent, /Create branch “fix\/login”/);
+    last.click(); await settle();
+    const made = calls.filter((c) => c.url === '/api/git/shop/switch').pop();
+    assert.deepStrictEqual([made.body.branch, made.body.create], ['fix/login', true]);
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

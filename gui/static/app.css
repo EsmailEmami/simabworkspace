@@ -730,3 +730,18 @@ body.compact .files-filter { height: 32px; }
 /* chat: the message box hides while you work elsewhere (the live status line stays) */
 .pane.chat.away .chat-composer .cbox, .pane.chat.away .chat-composer .attach, .pane.chat.away .chat-composer .slash { display: none; }
 .pane.chat.away .chat-composer { padding-bottom: 4px; }
+
+/* branches */
+.pbranch { color: var(--faint); font-size: 11px; margin-left: 2px; cursor: pointer; }
+.pbranch:hover { color: var(--accent); }
+.gbranch { border: 1px solid var(--line2); background: var(--bg3); border-radius: 6px; padding: 1px 8px; font-size: 12.5px; font-weight: 700; color: var(--text); }
+.gbranch:hover { border-color: var(--accent); }
+.blist { margin-top: 8px; max-height: 360px; overflow: auto; display: flex; flex-direction: column; }
+.bhead { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; padding: 8px 4px 3px; }
+.brow { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 8px; border: none; background: none; text-align: left; border-radius: 6px; width: 100%; }
+.brow:hover { background: var(--bg3); }
+.brow.cur .bname { color: var(--ok); }
+.brow.create .bname { color: var(--accent); }
+.bname { font-size: 12.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bsub { font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (pointer: coarse) { .brow { padding: 10px 8px; } }

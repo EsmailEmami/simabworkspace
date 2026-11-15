@@ -961,6 +961,53 @@ class GitFlow(TmpHome):
             self.app.invalidate()
             self.assertEqual(self.app.git_summary("a", force=True)["a"]["changes"], 2)
 
+    def test_branches_list_switch_create_track_stash(self):
+        repo = sw.GitRepo(self.app, self.p)
+        repo.push()
+        b = self.clone(self.remote, "b3")
+        self.git(b, "checkout", "-qb", "feature/login")
+        Path(b, "login.txt").write_text("login\n")
+        self.git(b, "add", "login.txt")
+        self.git(b, "commit", "-qm", "login page")
+        self.git(b, "push", "-q", "-u", "origin", "feature/login")
+        repo.fetch()
+        br = repo.branches()
+        self.assertEqual(br["current"], "main")
+        self.assertEqual([x["name"] for x in br["local"]], ["main"])
+        self.assertEqual(br["local"][0]["upstream"], "origin/main")
+        rem = {x["name"]: x for x in br["remote"]}
+        self.assertEqual(set(rem), {"origin/main", "origin/feature/login"})        # no origin/HEAD
+        self.assertTrue(rem["origin/main"]["local"])
+        self.assertFalse(rem["origin/feature/login"]["local"])
+        self.assertEqual(rem["origin/feature/login"]["subject"], "login page")
+        # a branch that only exists on GitHub becomes a local one that tracks it
+        repo.switch("origin/feature/login", track=True)
+        st = repo.status()
+        self.assertEqual((st["branch"], st["upstream"]), ("feature/login", "origin/feature/login"))
+        self.assertTrue(Path(self.a, "login.txt").exists())
+        # back, and a new branch from here
+        repo.switch("main")
+        repo.switch("fix/typo", create=True)
+        self.assertEqual(repo.branches()["current"], "fix/typo")
+        self.assertEqual(sw.GitRepo(self.app, self.p).status()["branch"], "fix/typo")
+        # uncommitted changes that clash with the other branch: asked, then stashed
+        repo.switch("main")
+        Path(self.a, "login.txt").write_text("mine, not committed\n")
+        with self.assertRaises(sw.ApiError) as e:
+            repo.switch("feature/login")
+        self.assertEqual(e.exception.status, 409)
+        self.assertEqual(repo.branches()["current"], "main")
+        repo.switch("feature/login", stash=True)
+        self.assertEqual(repo.branches()["current"], "feature/login")
+        self.assertIn("simab: before switching to feature/login", self.git(self.a, "stash", "list"))
+        self.assertEqual(Path(self.a, "login.txt").read_text(), "login\n")
+        # bad names never reach git switch
+        for bad in ("", "-x", "a..b", "with space", "--orphan", None):
+            with self.assertRaises(sw.ApiError, msg=repr(bad)):
+                repo.switch(bad, create=True)
+        # the summary knows the branch
+        self.assertEqual(self.app.git_summary_one(self.p)["branch"], "feature/login")
+
     def test_not_a_repo(self):
         d = os.path.join(self.tmp.name, "plain")
         os.mkdir(d)
@@ -1647,7 +1694,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.23.3"', text)
+        self.assertIn('VERSION="1.24.0"', text)
 
 
 if __name__ == "__main__":

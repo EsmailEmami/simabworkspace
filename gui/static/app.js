@@ -1556,7 +1556,7 @@
   var HIST_KIND = {
     prompt: ['✳', 'Claude'], chat: ['✳', 'chat'], 'claude-tui': ['✳', 'Claude (terminal)'],
     run: ['▶', 'run'], 'run-exit': ['■', 'finished'], terminal: ['›', 'terminal'],
-    'git-commit': ['⎇', 'commit'], 'git-push': ['⎇', 'push'], 'git-pull': ['⎇', 'pull'], 'git-fetch': ['⎇', 'fetch'],
+    'git-commit': ['⎇', 'commit'], 'git-push': ['⎇', 'push'], 'git-pull': ['⎇', 'pull'], 'git-fetch': ['⎇', 'fetch'], 'git-switch': ['⎇', 'branch'],
     'docker-logs': ['▣', 'logs'], 'docker-shell': ['▣', 'container shell'], 'docker-rebuild': ['▣', 'rebuild'],
     'docker-start': ['▣', 'start'], 'docker-stop': ['▣', 'stop'], 'docker-restart': ['▣', 'restart'], 'docker-crash': ['▣', 'crashed'],
     tunnels: ['⇄', 'ports'],
@@ -1652,7 +1652,7 @@
 
   function refreshGit(name) {
     return api('GET', 'git-summary' + (name ? '?project=' + encodeURIComponent(name) + '&force=1' : '')).then(function (d) {
-      var key = JSON.stringify(Object.keys(d.summary).map(function (k) { var g = d.summary[k]; return [k, g.changes, g.ahead, g.behind, g.conflicts, g.repos]; }));
+      var key = JSON.stringify(Object.keys(d.summary).map(function (k) { var g = d.summary[k]; return [k, g.changes, g.ahead, g.behind, g.conflicts, g.repos, g.branch, g.branches]; }));
       S.git = d.summary;
       if (key !== S.gitKey) { S.gitKey = key; renderProjects(); }
     }).catch(function () {});
@@ -1676,6 +1676,95 @@
       pre.append(h('div', { class: 'gl ' + cls }, l || ' '));
     });
     return pre;
+  }
+
+  // ------------------------------------------------------------------ branches
+  function branchLabel(p) {
+    var g = S.git[p.name];
+    if (!g || !g.repos) return null;
+    var text = g.branch ? g.branch : g.branches > 1 ? g.branches + ' branches' : '';
+    if (!text) return null;
+    return h('span', { class: 'pbranch', title: g.branch ? 'Git branch: ' + g.branch + ' — click to switch' : 'The repositories are on different branches — click',
+      onclick: function (e) {
+        e.stopPropagation();
+        if (g.repo !== null && g.repo !== undefined) branchPicker(p, g.repo, g.where, function () {});
+        else gitDialog(p);
+      } }, ' ⎇ ' + text);
+  }
+
+  // Switch branch: local branches, branches only on the remote (GitHub…), or a new one.
+  function branchPicker(p, repo, where, done) {
+    var data = null, busy = false;
+    var filter = h('input', { class: 'inp', placeholder: 'Find or create a branch', dir: 'auto', spellcheck: 'false', autofocus: true });
+    var list = h('div', { class: 'blist' }, h('div', { class: 'muted' }, 'Loading branches…'));
+    var path = 'git/' + encodeURIComponent(p.name) + '/';
+    var md = openModal({ title: 'Branch — ' + p.name + (repo ? ' / ' + repo : ''), size: 'sm', body: [filter, list],
+      onclose: function () { if (!busy) done(null); } });
+    function ago(t) {
+      if (!t) return '';
+      var s = Date.now() / 1000 - t;
+      return s < 3600 ? Math.max(1, Math.round(s / 60)) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd';
+    }
+    function go(body, label) {
+      if (busy) return;
+      busy = true;
+      list.replaceChildren(h('div', { class: 'muted' }, 'Switching to ' + label + '…'));
+      api('POST', path + 'switch', Object.assign({ repo: repo, where: where }, body)).then(function (d) {
+        busy = false;
+        toast(p.name + ': on ' + (d.status.branch || label), 'ok');
+        window.dispatchEvent(new CustomEvent('sw-git-changed', { detail: p.name }));
+        refreshGit(p.name);
+        md.close();
+        done(d.status);
+      }).catch(function (e) {
+        busy = false;
+        if (e.status === 409 && !body.stash) {
+          confirmDlg(e.message + ' Put them aside (git stash) and switch to “' + label + '”? You can get them back later with git stash pop.', 'Stash and switch').then(function (ok) {
+            if (ok) go(Object.assign({}, body, { stash: true }), label); else render();
+          });
+          return;
+        }
+        fail(e);
+        render();
+      });
+    }
+    function row(name, sub, cls, onclick) {
+      return h('button', { class: 'brow' + (cls ? ' ' + cls : ''), title: name, onclick: onclick },
+        h('span', { class: 'bname mono', dir: 'auto' }, name), h('span', { class: 'bsub muted', dir: 'auto' }, sub));
+    }
+    function render() {
+      if (!data) return;
+      var q = filter.value.trim(), ql = q.toLowerCase();
+      var match = function (b) { return !ql || b.name.toLowerCase().indexOf(ql) >= 0; };
+      var rows = [];
+      var loc = data.local.filter(match), rem = data.remote.filter(function (b) { return !b.local && match(b); });
+      if (loc.length) rows.push(h('div', { class: 'bhead' }, 'Branches'));
+      loc.forEach(function (b) {
+        var cur = b.name === data.current;
+        rows.push(row((cur ? '✓ ' : '') + b.name, [ago(b.date), b.subject].filter(Boolean).join(' · '), cur ? 'cur' : '',
+          function () { if (cur) md.close(); else go({ branch: b.name }, b.name); }));
+      });
+      if (rem.length) rows.push(h('div', { class: 'bhead' }, 'Only on the remote'));
+      rem.forEach(function (b) {
+        rows.push(row(b.name, [ago(b.date), b.subject].filter(Boolean).join(' · '), '', function () { go({ branch: b.name, track: true }, b.name.split('/').slice(1).join('/')); }));
+      });
+      var exists = data.local.some(function (b) { return b.name === q; });
+      if (q && !exists) rows.push(row('+ Create branch “' + q + '”', 'from ' + (data.current || 'here') + ', and switch to it', 'create',
+        function () { go({ branch: q, create: true }, q); }));
+      if (!rows.length) rows.push(h('div', { class: 'muted' }, 'No branch matches.'));
+      list.replaceChildren.apply(list, rows);
+    }
+    filter.addEventListener('input', render);
+    filter.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var first = list.querySelector('.brow');
+      if (first) first.click();
+    });
+    api('GET', path + 'branches?repo=' + encodeURIComponent(repo || '') + '&where=' + encodeURIComponent(where || '')).then(function (d) {
+      data = d;
+      render();
+    }).catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
+    setTimeout(function () { filter.focus(); }, 40);
   }
 
   function gitDialog(p) {
@@ -1729,7 +1818,9 @@
     function renderHead() {
       var ab = [st.ahead ? '↑' + st.ahead : '', st.behind ? '↓' + st.behind : ''].filter(Boolean).join(' ');
       head.replaceChildren(
-        h('b', { class: 'mono' }, st.branch || '(no branch)'),
+        h('button', { class: 'gbranch mono', title: 'Switch branch', onclick: function () {
+          branchPicker(p, repo, where, function (ns) { if (ns) apply(ns); });
+        } }, '⎇ ' + (st.branch || '(no branch)') + ' ▾'),
         st.upstream ? h('span', { class: 'muted mono' }, ' → ' + st.upstream) : h('span', { class: 'muted' }, ' · no upstream'),
         ab ? h('span', { class: 'mono gab' }, ab) : null,
         h('span', { class: 'muted' }, ' · runs ' + (st.where === 'local' ? 'on this machine' : 'on the server')),
@@ -1889,7 +1980,7 @@
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
       localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
       el.classList.toggle('open');
-    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name' }, p.name), open ? null : gitBadges(p.name, true),
+    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name' }, p.name, branchLabel(p)), open ? null : gitBadges(p.name, true),
       sync && sync.conflicts ? h('span', { class: 'gb conflict', title: plural(sync.conflicts, 'sync conflict') + ' — click to resolve', onclick: function (e) { e.stopPropagation(); syncDetails(p); } }, '⇅' + sync.conflicts) : null,
       S.docker[p.name] && S.docker[p.name].bad ? h('span', { class: 'gb conflict', title: plural(S.docker[p.name].bad, 'container') + ' with problems — click', onclick: function (e) { e.stopPropagation(); dockerDialog(p); } }, '▣' + S.docker[p.name].bad) : null,
       count ? h('span', { class: 'count' }, String(count)) : null, more));
@@ -2788,6 +2879,8 @@
       });
       if (hasRemote(p) || p.localExists) items.push({ label: n + ': files', grp: n, action: function () { openFiles(p); } });
       items.push({ label: n + ': git — changes, commit, pull, push', grp: n, action: function () { gitDialog(p); } });
+      var gs = S.git[n];
+      if (gs && gs.repos === 1) items.push({ label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
     });
     items.push({ label: 'Server terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'server' }); } });
@@ -3111,7 +3204,7 @@
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
-    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog,
+    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
   };
 

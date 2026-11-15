@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.24.0 2026-11-15  Branches: the project's git branch shows next to its name; click it
+#                       (or the branch in the Git panel, or Search → "switch branch") to
+#                       switch, check out a branch that is only on GitHub, or create one.
+#                       Uncommitted changes in the way: offered to stash them first.
 #    1.23.3 2026-11-15  Servers whose login shell is zsh (or fish): "no matches found:
 #                       …/*/.git" when listing server folders — our commands now run with
 #                       sh on the server (folders, repositories, files, git).
@@ -175,7 +179,7 @@
 
 set -u -o pipefail
 
-VERSION="1.23.3"
+VERSION="1.24.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

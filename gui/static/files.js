@@ -391,5 +391,10 @@
     return SW.openSession({ kind: 'chat', project: project }).then(function (t) { put(t); return t; });
   }
 
+  // another branch: the files changed — every Files tab of that project reads them again
+  window.addEventListener('sw-git-changed', function (e) {
+    ((SW.S && SW.S.tabs) || []).forEach(function (t) { if (t.isFiles && t.project === e.detail) t.refresh(true); });
+  });
+
   window.SWFiles = { FilesTab: FilesTab, askClaude: askClaude };
 })();

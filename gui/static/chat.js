@@ -336,6 +336,7 @@
   P.focus = function () { this.awaySince = 0; this.setAway(false); this.ta.focus(); };
   P.ensureOpen = function () {
     var self = this;
+    this.el.classList.remove('done');
     this.awaySince = 0;
     this.setAway(false);
     this.restoreScroll();
@@ -531,8 +532,24 @@
     this.modeSel.className = 'mini-sel mode m-' + mode;
   };
 
+  // the user can see this chat now: it is the active tab of its section and the window is in front
+  P.inView = function () {
+    var g = this.group;
+    var front = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+    return (SW.S.active === this || !!(g && g.active === this)) && front && !document.hidden;
+  };
+  // done: finished while you looked elsewhere (a steady dot) · bell: Claude waits for you (blinks)
+  P.mark = function (kind) {
+    if (this.replaying || this.inView()) return false;
+    if (kind === 'bell') this.el.classList.remove('done');
+    if (kind === 'done' && this.el.classList.contains('bell')) return true;
+    this.el.classList.add(kind);
+    return true;
+  };
+
   P.setBusy = function (b) {
     this.busy = !!b;
+    if (this.busy) this.el.classList.remove('done');
     this.stopBtn.classList.toggle('hidden', !this.busy);
     this.el.classList.toggle('busy', this.busy);
   };
@@ -935,9 +952,9 @@
     var err = e.is_error || (e.subtype && e.subtype !== 'success');
     var line = this.add(h('div', { class: 'result-line' + (err ? ' err' : '') }, (err ? '✗ ' : '✓ ') + parts.join(' · ')));
     if (err && e.result) line.append(h('div', { dir: 'auto' }, String(e.result).slice(0, 500)));
-    if (!this.replaying && S.active !== this) {
+    if (!Object.keys(this.perms).length) this.el.classList.remove('bell');      // nothing waits for you any more
+    if (this.mark('done')) {
       var self = this;
-      this.el.classList.add('bell');
       toast('Claude finished in ' + this.info.title, err ? 'err' : 'ok', { onclick: function () { SW.activate(self); } });
       SW.notify('Claude finished', this.info.title);
     }
@@ -972,8 +989,7 @@
     this.pendingPerm = rid;
     this.stick = true;
     this.scrollEnd();
-    if (!this.replaying && S.active !== this) {
-      this.el.classList.add('bell');
+    if (this.mark('bell')) {
       toast('Claude needs permission in ' + this.info.title, 'warn', { onclick: function () { SW.activate(self); } });
       SW.notify('Claude needs permission', (TOOL_FA[name] || name) + ' — ' + this.info.title);
     }
@@ -989,9 +1005,8 @@
   P.alertUser = function (text) {
     this.stick = true;
     this.scrollEnd();
-    if (this.replaying || S.active === this) return;
+    if (!this.mark('bell')) return;
     var self = this;
-    this.el.classList.add('bell');
     toast(text + ' — «' + this.info.title + '»', 'warn', { onclick: function () { SW.activate(self); } });
     SW.notify(text, this.info.title);
   };
@@ -1088,6 +1103,7 @@
     Array.prototype.forEach.call(card.querySelectorAll('.q-opt'), function (x) { x.disabled = true; });
     delete this.perms[rid];
     if (this.pendingPerm === rid) this.pendingPerm = null;
+    if (!Object.keys(this.perms).length) this.el.classList.remove('bell');          // answered (here or elsewhere)
   };
 
   // ------------------------------------------------------------ composer

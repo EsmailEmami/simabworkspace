@@ -731,6 +731,8 @@ const tests = {
   async 'Claude sessions: running ones show on the project; watch, stop, never a second Claude'() {
     const SW = global.SW;
     await SW.refreshRunning(true); await settle();
+    const colored = global.SW.S.tabs.filter((t) => t.info.spec.project === 'cheshmeh');
+    assert.ok(colored.length && colored.every((t) => t.pane.classList.contains('colored') && t.el.classList.contains('colored')), 'project colour on the tab and around its area');
     const badge = q('.gb.run')[0];
     assert.ok(badge, 'a running Claude shows on the project');
     assert.strictEqual(badge.textContent, '✳1');

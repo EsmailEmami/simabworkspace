@@ -359,6 +359,43 @@ const tests = {
     delete document.hasFocus;
   },
 
+  'finished elsewhere: a steady dot, not blinking; asking: blinks until answered; in view: nothing'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    const S = global.SW.S;
+    document.hasFocus = () => true;
+    const result = { type: 'result', subtype: 'success', duration_ms: 1000 };
+    // you look at another tab: finishing leaves a steady mark, never the blinking one
+    S.active = { other: true };
+    tab.group = { active: { other: true } };
+    feed({ t: 'e', e: { type: 'stream_event', event: { type: 'message_start', message: { id: 'm1' } } } });
+    assert.ok(tab.el.classList.contains('busy'));
+    feed({ t: 'e', e: result });
+    assert.ok(!tab.el.classList.contains('busy'));
+    assert.ok(tab.el.classList.contains('done'));
+    assert.ok(!tab.el.classList.contains('bell'), 'ready does not blink');
+    // it works again: the mark goes
+    feed({ t: 'e', e: { type: 'stream_event', event: { type: 'message_start', message: { id: 'm2' } } } });
+    assert.ok(!tab.el.classList.contains('done'));
+    // visible in its own section (not the focused one): nothing to mark
+    tab.group = { active: tab };
+    feed({ t: 'e', e: result });
+    assert.ok(!tab.el.classList.contains('done') && !tab.el.classList.contains('bell'));
+    // a permission question while you look elsewhere: blinks — answered: stops
+    tab.group = { active: { other: true } };
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'r1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'ls' } } } });
+    assert.ok(tab.el.classList.contains('bell'));
+    feed({ t: 'e', e: { type: '_perm_done', request_id: 'r1', allow: true } });
+    assert.ok(!tab.el.classList.contains('bell'), 'answered: no more blinking');
+    // switching to the tab clears the steady mark
+    feed({ t: 'e', e: result });
+    assert.ok(tab.el.classList.contains('done'));
+    tab.ensureOpen();
+    assert.ok(!tab.el.classList.contains('done'));
+    delete document.hasFocus;
+    S.active = tab;
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

@@ -209,7 +209,10 @@
     var c = projectColor(tab.info.spec.project);
     if (c) tab.el.style.setProperty('--pc', c); else tab.el.style.removeProperty('--pc');
     tab.el.classList.toggle('colored', !!c);
-    if (tab.pane) { if (c) tab.pane.style.setProperty('--pc', c); else tab.pane.style.removeProperty('--pc'); }
+    if (tab.pane) {
+      if (c) tab.pane.style.setProperty('--pc', c); else tab.pane.style.removeProperty('--pc');
+      tab.pane.classList.toggle('colored', !!c);            // a frame in the project's colour around the work
+    }
   }
   function repaintTabs() { S.tabs.forEach(paintTab); }
 
@@ -1194,7 +1197,7 @@
     S.active = tab;
     $('#empty').classList.add('hidden');
     g.renderEmpty();
-    tab.el.classList.remove('activity', 'bell');
+    tab.el.classList.remove('activity', 'bell', 'done');
     tab.ensureOpen();
     sessionStorage.setItem('sw-active', tab.id);
     tab.el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -3518,6 +3521,10 @@
     var wk = localStorage.getItem(wkey('sw-work'));
     if (WID ? wk !== '0' : wk === '1') setWorkMode(true);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) { refreshProjects(); if (S.active) S.active.focus(); } });
+    // back to the window: what you can see now is seen
+    window.addEventListener('focus', function () {
+      L.groups.forEach(function (g) { if (g.active && g.active.isChat && !Object.keys(g.active.perms || {}).length) g.active.el.classList.remove('done'); });
+    });
     var asked = false;
     document.addEventListener('click', function () {
       if (asked) return;

@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.26.1 2026-11-15  Tabs: when Claude is done the tab no longer keeps blinking — a steady
+#                       green dot until you look; blinking only while Claude waits for you,
+#                       and it stops once answered; a chat you can see is never marked.
+#                       The project's colour outlines its tabs and frames their work area.
 #    1.26.0 2026-11-15  Claude sessions: see every Claude running on the server per project —
 #                       here, in VS Code or in a terminal (✳N on the project, working/idle).
 #                       Project ⋯ → Sessions: Show / Open / Watch (live, read-only) /
@@ -203,7 +207,7 @@
 
 set -u -o pipefail
 
-VERSION="1.26.0"
+VERSION="1.26.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

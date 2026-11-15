@@ -38,6 +38,27 @@ for line in sys.stdin:
 '''
 
 
+# a fake Claude that asks a question (like AskUserQuestion) and waits for the answer
+ASKING_CLAUDE = r'''
+import sys, json, os
+open(os.environ["FAKE_PIDS"], "a").write("%d\n" % os.getpid())
+def out(o):
+    sys.stdout.write(json.dumps(o, separators=(",", ":")) + "\n"); sys.stdout.flush()
+SID = "11111111-2222-3333-4444-555555555555"
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("type") == "control_request" and m["request"]["subtype"] == "initialize":
+        out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {"commands": []}}})
+    elif m.get("type") == "user":
+        out({"type": "system", "subtype": "init", "session_id": SID, "permissionMode": "default"})
+        out({"type": "control_request", "request_id": "q-1", "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+             "input": {"questions": [{"question": "Which bot?", "options": [{"label": "A"}, {"label": "B"}]}]}}})
+    elif m.get("type") == "control_response" and (m.get("response") or {}).get("request_id") == "q-1":
+        out({"type": "assistant", "message": {"id": "b", "content": [{"type": "text", "text": "answered"}]}, "session_id": SID})
+        out({"type": "result", "subtype": "success", "session_id": SID})
+'''
+
+
 def wait_for(fn, timeout=15):
     end = time.time() + timeout
     while time.time() < end:
@@ -69,8 +90,8 @@ class ChatRelay(unittest.TestCase):
         self.addCleanup(env.stop)
         self.calls = []
 
-    def make(self, key, restored=False, resume=""):
-        script = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(SLOW_CLAUDE)}"
+    def make(self, key, restored=False, resume="", fake=None):
+        script = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(fake or SLOW_CLAUDE)}"
 
         def make_argv(mode, model, resume, effort="", relay=None):
             self.calls.append(relay)
@@ -183,6 +204,30 @@ class ChatRelay(unittest.TestCase):
         self.assertFalse(s2.state()["linking"])
         self.assertTrue(wait_for(lambda: "step2" in self.texts(s2)))
         self.assertTrue(wait_for(lambda: not s2.busy))   # and ready when it is done
+
+    def test_reopened_while_claude_waits_for_an_answer_asks_again(self):
+        # the user's stuck chat: the app was reopened while Claude waited for an AskUserQuestion
+        # answer; the new window never saw the question, Claude waited for ever, messages queued
+        s = self.make("5555555555555555", fake=ASKING_CLAUDE)
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        s.handle({"t": "send", "content": "deploy it"})
+        self.assertTrue(wait_for(lambda: "q-1" in s.pending))
+        s.shutdown()                                     # the app closes; nobody answered
+        s2 = self.make("5555555555555555", restored=True, fake=ASKING_CLAUDE)
+        self.addCleanup(s2.kill, True)
+        self.assertTrue(wait_for(lambda: "q-1" in s2.pending), "the open question comes again")
+        s2.handle({"t": "perm", "id": "q-1", "allow": True, "input": {"answers": {"Which bot?": "A"}}})
+        self.assertTrue(wait_for(lambda: "answered" in self.texts(s2)))
+        self.assertFalse(s2.busy)
+        answers = (self.home / ".cache/simabworkspace/chats/5555555555555555/answers.log").read_text()
+        self.assertIn('"request_id": "q-1"', answers)
+        # reopened again after it was answered: nothing is asked twice
+        s2.shutdown()
+        s3 = self.make("5555555555555555", restored=True, fake=ASKING_CLAUDE)
+        self.addCleanup(s3.kill, True)
+        self.assertTrue(wait_for(lambda: s3.init is not None))
+        time.sleep(0.5)
+        self.assertEqual(s3.pending, {})
 
     def test_attach_when_nothing_runs_reports_the_end(self):
         s = self.make("aaaaaaaaaaaaaaaa")

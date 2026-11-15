@@ -40,6 +40,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.29.1 2026-11-15  Stuck chat after a reopen: when Claude was waiting for an answer to a
+#                       question / permission, the reopened window now gets that question again
+#                       (before, Claude waited for ever and new messages only queued up). And
+#                       when a chat shows no sign of life for a minute, Interrupt / Restart
+#                       Claude are offered next to its status.
 #    1.29.0 2026-11-15  Menu → "Claude sessions — all projects": every Claude running on the
 #                       server, grouped by project (and "No project"), with Show / Open /
 #                       Watch / Continue here / Stop, and the latest conversations of all
@@ -234,7 +239,7 @@
 
 set -u -o pipefail
 
-VERSION="1.29.0"
+VERSION="1.29.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

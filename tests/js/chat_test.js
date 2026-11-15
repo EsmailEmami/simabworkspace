@@ -546,6 +546,31 @@ const tests = {
     global.SW.project = old;
   },
 
+  async 'stuck chat: after a minute without a sign of life, Interrupt and Restart Claude are offered'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen && ws.onopen();
+    feed({ t: 's', state: { alive: true, busy: false }, events: [] });
+    tab.ta.value = 'چی شد'; tab.submit();
+    tab.renderStatus();
+    assert.ok(tab.stuckEl.classList.contains('hidden'), 'not at once');
+    tab.lastEventAt = Date.now() - 70000;
+    tab.renderStatus();
+    assert.ok(!tab.stuckEl.classList.contains('hidden'));
+    const [intr, restart] = tab.stuckEl.querySelectorAll('button');
+    intr.click();
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1], { t: 'interrupt' });
+    const asked = [];
+    global.apiImpl = (m, p) => { asked.push(p); return Promise.resolve({ id: 'c1', title: 'Claude · p', spec: { kind: 'chat', project: 'p' } }); };
+    restart.click(); await new Promise((r) => setTimeout(r, 5));
+    assert.ok(asked.includes('sessions/c1/restart'));
+    assert.strictEqual(tab.echoes.length, 0, 'the queued messages are dropped');
+    // a fresh event: Claude lives — the buttons go
+    feed({ t: 'e', e: { type: 'stream_event', event: { type: 'message_start', message: { id: 'z' } } } });
+    tab.renderStatus();
+    assert.ok(tab.stuckEl.classList.contains('hidden'));
+    global.apiImpl = () => Promise.resolve({});
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

@@ -816,3 +816,8 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 
 .run-proj { font: 12px var(--mono); color: var(--text); margin: 8px 0 2px; padding-left: 8px; border-left: 2px solid color-mix(in srgb, var(--pc) 60%, transparent); }
 #btn-claude i { color: #d4976c; }
+
+/* stuck chat: Interrupt / Restart next to the status */
+.cstatus .stuck { margin-left: 8px; display: inline-flex; gap: 8px; }
+.cstatus .stuck .link { border: 1px solid #5c4a2a; border-radius: 5px; padding: 0 7px; color: var(--warn); background: #17140e; font-size: 11px; }
+.cstatus .stuck .link:hover { border-color: var(--warn); }

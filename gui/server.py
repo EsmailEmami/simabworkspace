@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.29.0"
+VERSION = "1.29.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1668,6 +1668,39 @@ def claude_status(dpid):
         except (OSError, ValueError):
             return ""
     return ""
+def unanswered():
+    """Questions / permission requests of the current turn nobody answered yet (a reopened app
+    did not see them: Claude would wait for ever). Answers are noted in answers.log."""
+    reqs = {}
+    try:
+        with open(P("out.log"), "rb") as f:
+            for raw in f:
+                if b'"type":"result"' in raw:
+                    reqs.clear()                 # a finished turn has nothing open any more
+                elif b'"control_request"' in raw and b'can_use_tool' in raw:
+                    try:
+                        e = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if e.get("type") == "control_request" and e.get("request_id"):
+                        reqs[e["request_id"]] = e
+                elif b'control_cancel_request' in raw:
+                    try:
+                        reqs.pop(json.loads(raw).get("request_id"), None)
+                    except ValueError:
+                        pass
+    except OSError:
+        return []
+    try:
+        with open(P("answers.log"), "rb") as f:
+            for raw in f:
+                try:
+                    reqs.pop((json.loads(raw).get("response") or {}).get("request_id"), None)
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return list(reqs.values())
 def write(n, text):
     try:
         with open(P(n + ".tmp"), "w") as f:
@@ -1747,6 +1780,7 @@ if mode == "kill":
 
 os.makedirs(d, mode=0o700, exist_ok=True)
 off = int(sys.argv[3])
+reopened = off < 0                       # a tab of a restarted app: it has seen nothing of this Claude
 conv = sys.argv[5] if mode == "start" and len(sys.argv) > 5 else ""
 pid = pid_alive()
 if not pid and conv:
@@ -1813,6 +1847,9 @@ if off < 0 or off > size("out.log"):
 touch("seen")
 say({"type": "_sw_relay", "state": state, "off": off, "key": key,
      "status": claude_status(pid) if state == "attached" else ""})
+if state == "attached" and reopened:
+    for q in unanswered():
+        say({"type": "_sw_relay", "state": "pending", "event": q})
 
 def errors(pos):
     try:
@@ -1849,6 +1886,12 @@ def inputs():
             if w is None:
                 w = os.open(P("in"), os.O_WRONLY)
             os.write(w, line)
+            if line.startswith(b'{"type": "control_response"'):
+                try:
+                    with open(P("answers.log"), "ab") as a:
+                        a.write(line if line.endswith(b"\n") else line + b"\n")
+                except OSError:
+                    pass
     except OSError:
         pass
     os._exit(0)                          # the connection is gone: Claude keeps working
@@ -2381,6 +2424,10 @@ class ChatSession:
 
     def _relay_marker(self, ev: dict):
         st = ev.get("state")
+        if st == "pending":                       # an unanswered question from before the app was reopened
+            if isinstance(ev.get("event"), dict):
+                self._handle_event(ev["event"])
+            return
         if isinstance(ev.get("off"), int):
             self.relay_off = ev["off"]
         k = ev.get("key")

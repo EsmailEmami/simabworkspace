@@ -5,7 +5,8 @@
   var SW = window.SW;
   var h = SW.h, api = SW.api, toast = SW.toast, fail = SW.fail, S = SW.S, faNum = SW.faNum;
 
-  var AWAY_MS = 3000;          // hide the message box after this long away from the chat
+  var AWAY_MS = 3000;
+  var STUCK_MS = 60000;          // offer Interrupt / Restart after this long without a sign of life          // hide the message box after this long away from the chat
   var MODES = [
     ['default', 'ask', 'Asks before editing files or running commands'],
     ['acceptEdits', 'auto-edit', 'Edits files without asking; still asks for commands'],
@@ -304,7 +305,15 @@
     this.stDot = h('i', { class: 'dot' });
     this.stText = h('span', { class: 'st-text' }, 'connecting…');
     this.stExtra = h('span', { class: 'st-extra' });
-    this.statusEl = h('div', { class: 'cstatus', title: 'Live status' }, this.stDot, this.stText, this.stExtra);
+    // stuck? (Claude silent for a long time while working, or messages waiting in the queue)
+    this.stuckEl = h('span', { class: 'stuck hidden' },
+      h('button', { class: 'link', title: 'Stop what Claude is doing now — the conversation stays', onclick: function () { self.interrupt(); toast('Interrupt sent', 'ok'); } }, 'Interrupt'),
+      h('button', { class: 'link', title: 'Start Claude again on the same conversation (queued messages are dropped — send them again)', onclick: function () {
+        SW.confirmDlg('Restart Claude on the same conversation? Use this when it is stuck. Queued messages are dropped — send them again after.', 'Restart').then(function (ok) {
+          if (ok) { self.echoes = []; self.restart(); }
+        });
+      } }, 'Restart Claude'));
+    this.statusEl = h('div', { class: 'cstatus', title: 'Live status' }, this.stDot, this.stText, this.stExtra, this.stuckEl);
     this.conn = 'connecting';
     this.timer = setInterval(function () {
       self.updateAway();
@@ -655,6 +664,10 @@
     this.statusEl.className = 'cstatus ' + kind;
     this.stText.textContent = conn || this.phaseText || 'ready';
     this.stExtra.textContent = extra.length ? ' · ' + extra.join(' · ') : '';
+    // no sign of life for a minute while it should be working, or queued messages not taken
+    var quiet = this.lastEventAt ? Date.now() - this.lastEventAt : (this.turnStart ? Date.now() - this.turnStart : 0);
+    var stuck = !conn && !this.watching && (kind === 'work' || waiting > 0) && quiet > STUCK_MS;
+    this.stuckEl.classList.toggle('hidden', !stuck);
   };
 
   P.track = function (e) {

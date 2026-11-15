@@ -20,7 +20,6 @@ import base64
 import codecs
 import collections
 import errno
-import fcntl
 import hashlib
 import hmac
 import json
@@ -36,7 +35,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
 import urllib.parse
@@ -46,8 +44,15 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+IS_WIN = os.name == "nt"          # native Windows (Python for Windows + Git for Windows), not WSL
+if not IS_WIN:
+    import fcntl
+    import termios
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
+
 APP = "simabworkspace"
-VERSION = "1.20.0"
+VERSION = "1.21.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -71,7 +76,14 @@ def tool_path() -> str:
     """PATH with ~/.local/bin (where the script installs mutagen) in front."""
     p = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     b = str(bin_dir())
-    return p if b in p.split(os.pathsep) else b + os.pathsep + p
+    p = p if b in p.split(os.pathsep) else b + os.pathsep + p
+    if IS_WIN:                  # Git for Windows' ssh, ssh-keygen, curl, tar — after Windows' own
+        for c in git_bash_candidates():
+            usr = os.path.join(os.path.dirname(os.path.dirname(c)), "usr", "bin")
+            if os.path.isdir(usr) and usr not in p.split(os.pathsep):
+                p += os.pathsep + usr
+                break
+    return p
 
 
 def which(name: str):
@@ -83,6 +95,68 @@ def is_wsl() -> bool:
         return "microsoft" in Path("/proc/version").read_text().lower()
     except OSError:
         return False
+
+
+def installed_script():
+    """The installed bash script (on Windows not the simabworkspace.cmd launcher next to it)."""
+    if IS_WIN:
+        f = bin_dir() / "simabworkspace"
+        return str(f) if f.is_file() else None
+    return which("simabworkspace")
+
+
+def git_bash_candidates(env=None) -> list:
+    """Where Git for Windows keeps bash.exe (never C:\\Windows\\System32\\bash.exe — that is WSL)."""
+    env = os.environ if env is None else env
+    out = []
+    git = shutil.which("git", path=env.get("PATH"))
+    if git:                                     # …\Git\cmd\git.exe or …\Git\bin\git.exe
+        root = os.path.dirname(os.path.dirname(git))
+        out += [os.path.join(root, "bin", "bash.exe"), os.path.join(root, "usr", "bin", "bash.exe")]
+    for base in (env.get("ProgramFiles"), env.get("ProgramW6432"), env.get("ProgramFiles(x86)"),
+                 os.path.join(env.get("LOCALAPPDATA") or "", "Programs") if env.get("LOCALAPPDATA") else None):
+        if base:
+            out.append(os.path.join(base, "Git", "bin", "bash.exe"))
+    return out
+
+
+def bash_exe() -> str:
+    """bash for the simabworkspace script: Git Bash on Windows, the normal bash elsewhere."""
+    if IS_WIN:
+        for c in git_bash_candidates():
+            if os.path.isfile(c):
+                return c
+        raise ApiError(400, "Git for Windows is needed (it brings bash): winget install --id Git.Git -e")
+    return which("bash") or "/bin/bash"
+
+
+def msys_to_win(path: str) -> str:
+    """Git Bash writes paths like /c/Users/me/.ssh/id_ed25519; Windows Python needs C:/Users/…"""
+    if IS_WIN and path:
+        m = re.fullmatch(r"/([A-Za-z])(/.*)?", path)
+        if m:
+            return m.group(1).upper() + ":" + (m.group(2) or "/")
+    return path
+
+
+def win_python(gui=False) -> str:
+    """Windows: python.exe (console, for the hidden background server) or pythonw.exe (no window)."""
+    exe = Path(sys.executable)
+    want = "pythonw.exe" if gui else "python.exe"
+    alt = exe.with_name(want)
+    return str(alt) if alt.is_file() else str(exe)
+
+
+CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
+def detached_kwargs() -> dict:
+    """Popen options for a background process that outlives us (and on Windows has a hidden console,
+    so the ssh/git it runs never flash a window)."""
+    if IS_WIN:
+        return {"creationflags": CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 # ----------------------------------------------------------------------------- server settings (bash config)
@@ -132,7 +206,7 @@ def load_server_conf() -> ServerConf:
     except OSError:
         c = {}
     return ServerConf(c.get("SSH_USER", ""), c.get("SSH_HOST") or os.environ.get("SIMAB_HOST", ""),
-                      c.get("SSH_PORT") or os.environ.get("SIMAB_PORT", "22"), c.get("SSH_KEY", ""))
+                      c.get("SSH_PORT") or os.environ.get("SIMAB_PORT", "22"), msys_to_win(c.get("SSH_KEY", "")))
 
 
 # ----------------------------------------------------------------------------- SQLite
@@ -626,7 +700,7 @@ def ssh_base(conf: ServerConf, multiplex=True, batch=False) -> list:
          "-o", "StrictHostKeyChecking=accept-new"]
     if conf.key and os.path.isfile(os.path.expanduser(conf.key)):
         a += ["-i", os.path.expanduser(conf.key)]
-    if multiplex:
+    if multiplex and not IS_WIN:          # Windows OpenSSH has no ControlMaster
         cp = os.path.join(os.path.expanduser("~"), ".ssh", "sw-%C")
         a += ["-o", "ControlMaster=auto", "-o", f"ControlPath={cp}", "-o", "ControlPersist=10m"]
     if batch:
@@ -659,8 +733,30 @@ def remote_script(path: str, inner: str = None, persist: str = None) -> str:
 
 
 def local_shell(settings: dict) -> str:
-    sh = (settings.get("localShell") or os.environ.get("SHELL") or "").strip()
-    return sh if sh and which(shlex.split(sh)[0]) else (which("bash") or "/bin/sh")
+    sh = (settings.get("localShell") or ("" if IS_WIN else os.environ.get("SHELL")) or "").strip()
+    try:
+        ok = bool(sh) and which(shlex.split(sh, posix=not IS_WIN)[0])
+    except ValueError:
+        ok = False
+    if ok:
+        return sh
+    if IS_WIN:
+        return which("pwsh") or which("powershell") or "powershell.exe"
+    return which("bash") or "/bin/sh"
+
+
+def local_shell_argv(sh: str, inner: str = None) -> list:
+    """The local shell (interactive) or `inner` run by it — bash style, or PowerShell / cmd on Windows."""
+    argv = shlex.split(sh, posix=not IS_WIN)
+    argv = [a.strip('"') for a in argv] if IS_WIN else argv
+    name = re.split(r"[\\/]", argv[0])[-1].lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name in ("powershell", "pwsh"):
+        return argv + (["-NoLogo"] if inner is None else ["-NoLogo", "-Command", inner])
+    if name == "cmd":
+        return argv + ([] if inner is None else ["/c", inner])
+    return argv + (["-l"] if inner is None else ["-lic", inner])
 
 
 CLAUDE_MODES = {"new": "", "continue": " --continue", "resume": " --resume"}
@@ -786,10 +882,10 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     else:
         if kind in ("add-local", "add-server"):
             script = HERE.parent / "simabworkspace.sh"
-            script = str(script) if script.is_file() else which("simabworkspace")
+            script = str(script) if script.is_file() else installed_script()
             if not script:
                 raise ApiError(400, "simabworkspace script not found")
-            argv = [which("bash") or "/bin/bash", script]
+            argv = [bash_exe(), script]
             if kind == "add-server":
                 argv += ["add-server"]
             else:
@@ -807,10 +903,10 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
                     argv += ["--name", name]
         elif kind == "git-sync-on":
             script = HERE.parent / "simabworkspace.sh"
-            script = str(script) if script.is_file() else which("simabworkspace")
+            script = str(script) if script.is_file() else installed_script()
             if not script:
                 raise ApiError(400, "simabworkspace script not found")
-            argv = [which("bash") or "/bin/bash", script, "git", pname, "on"]
+            argv = [bash_exe(), script, "git", pname, "on"]
         elif kind in ("sync-info", "sync-monitor"):
             exe = which("mutagen")
             if not exe:
@@ -818,8 +914,7 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
             argv = [exe, "sync", "list" if kind == "sync-info" else "monitor"]
             argv += (["--long"] if kind == "sync-info" else []) + [pname]
         else:
-            sh = shlex.split(local_shell(s))
-            argv = sh + (["-l"] if inner is None else ["-lic", inner])
+            argv = local_shell_argv(local_shell(s), inner)
         cwd = (project or {}).get("local") or os.path.expanduser("~")
         if cmd and cmd.get("cwd") and project:
             cwd = os.path.join(cwd, cmd["cwd"])
@@ -1001,6 +1096,185 @@ class WebSocket:
         self.closed = True
 
 
+# ----------------------------------------------------------------------------- Windows terminals (ConPTY)
+# Native Windows has no pty: Windows 10 1809+ has a "pseudo console" instead. ConPty starts
+# a program inside one; .read()/.write()/.resize() work like the pty master on Linux.
+def win_env_block(env: dict) -> str:
+    """CreateProcessW environment: KEY=value\\0 … \\0, sorted case-insensitively."""
+    items = sorted(((str(k), str(v)) for k, v in env.items() if k and "=" not in str(k)[1:]), key=lambda kv: kv[0].upper())
+    return "".join(f"{k}={v}\0" for k, v in items) + "\0"
+
+
+def win_command_line(argv: list) -> str:
+    exe = shutil.which(argv[0], path=tool_path()) or argv[0]
+    return subprocess.list2cmdline([exe] + list(argv[1:]))
+
+
+class WinProc:
+    """The little of subprocess.Popen that Session uses, for a process started by ConPty."""
+    def __init__(self, k32, handle, pid):
+        self.k32, self.handle, self.pid, self.returncode = k32, handle, pid, None
+
+    def poll(self):
+        import ctypes
+        if self.returncode is None and self.k32.WaitForSingleObject(self.handle, 0) == 0:
+            code = ctypes.c_ulong(0)
+            self.k32.GetExitCodeProcess(self.handle, ctypes.byref(code))
+            self.returncode = int(code.value)
+        return self.returncode
+
+    def wait(self, timeout=None):
+        ms = 0xFFFFFFFF if timeout is None else int(timeout * 1000)
+        if self.returncode is None and self.k32.WaitForSingleObject(self.handle, ms) != 0:
+            raise subprocess.TimeoutExpired("conpty", timeout)
+        return self.poll()
+
+    def kill(self):
+        if self.poll() is None:
+            self.k32.TerminateProcess(self.handle, 1)
+
+    terminate = kill
+
+    def send_signal(self, sig):
+        self.kill()
+
+
+class ConPty:
+    def __init__(self, argv, cwd, env, cols, rows):
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes as wt
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not hasattr(k32, "CreatePseudoConsole"):
+            raise OSError("terminals need Windows 10 (version 1809) or newer")
+        self.k32 = k32
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", wt.SHORT), ("Y", wt.SHORT)]
+
+        class STARTUPINFOW(ctypes.Structure):
+            _fields_ = [("cb", wt.DWORD), ("lpReserved", wt.LPWSTR), ("lpDesktop", wt.LPWSTR), ("lpTitle", wt.LPWSTR),
+                        ("dwX", wt.DWORD), ("dwY", wt.DWORD), ("dwXSize", wt.DWORD), ("dwYSize", wt.DWORD),
+                        ("dwXCountChars", wt.DWORD), ("dwYCountChars", wt.DWORD), ("dwFillAttribute", wt.DWORD),
+                        ("dwFlags", wt.DWORD), ("wShowWindow", wt.WORD), ("cbReserved2", wt.WORD),
+                        ("lpReserved2", ctypes.c_void_p), ("hStdInput", wt.HANDLE), ("hStdOutput", wt.HANDLE),
+                        ("hStdError", wt.HANDLE)]
+
+        class STARTUPINFOEXW(ctypes.Structure):
+            _fields_ = [("StartupInfo", STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [("hProcess", wt.HANDLE), ("hThread", wt.HANDLE), ("dwProcessId", wt.DWORD), ("dwThreadId", wt.DWORD)]
+
+        self.COORD = COORD
+        k32.CreatePipe.argtypes = [ctypes.POINTER(wt.HANDLE), ctypes.POINTER(wt.HANDLE), ctypes.c_void_p, wt.DWORD]
+        k32.CreatePseudoConsole.argtypes = [COORD, wt.HANDLE, wt.HANDLE, wt.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+        k32.CreatePseudoConsole.restype = ctypes.c_long
+        k32.ResizePseudoConsole.argtypes = [ctypes.c_void_p, COORD]
+        k32.ResizePseudoConsole.restype = ctypes.c_long
+        k32.ClosePseudoConsole.argtypes = [ctypes.c_void_p]
+        k32.ClosePseudoConsole.restype = None
+        k32.InitializeProcThreadAttributeList.argtypes = [ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.POINTER(ctypes.c_size_t)]
+        k32.UpdateProcThreadAttribute.argtypes = [ctypes.c_void_p, wt.DWORD, ctypes.c_size_t, ctypes.c_void_p,
+                                                  ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p]
+        k32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+        k32.CreateProcessW.argtypes = [wt.LPCWSTR, wt.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wt.BOOL, wt.DWORD,
+                                       ctypes.c_void_p, wt.LPCWSTR, ctypes.POINTER(STARTUPINFOEXW), ctypes.POINTER(PROCESS_INFORMATION)]
+        k32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+        k32.WaitForSingleObject.restype = wt.DWORD
+        k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_ulong)]
+        k32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+
+        def fail(what):
+            raise OSError(f"{what} failed (Windows error {ctypes.get_last_error()})")
+
+        in_r, in_w, out_r, out_w = wt.HANDLE(), wt.HANDLE(), wt.HANDLE(), wt.HANDLE()
+        if not k32.CreatePipe(ctypes.byref(in_r), ctypes.byref(in_w), None, 0) or \
+                not k32.CreatePipe(ctypes.byref(out_r), ctypes.byref(out_w), None, 0):
+            fail("CreatePipe")
+        self.hpc = ctypes.c_void_p()
+        hr = k32.CreatePseudoConsole(COORD(cols, rows), in_r, out_w, 0, ctypes.byref(self.hpc))
+        # the pseudo console has its own copies of its pipe ends
+        k32.CloseHandle(in_r)
+        k32.CloseHandle(out_w)
+        if hr != 0:
+            k32.CloseHandle(in_w)
+            k32.CloseHandle(out_r)
+            raise OSError(f"CreatePseudoConsole failed (0x{hr & 0xFFFFFFFF:08x})")
+        size = ctypes.c_size_t(0)
+        k32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        attrs = ctypes.create_string_buffer(size.value)
+        si = STARTUPINFOEXW()
+        si.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+        si.StartupInfo.dwFlags = 0x00000100        # STARTF_USESTDHANDLES with none: use the pseudo console,
+        si.lpAttributeList = ctypes.cast(attrs, ctypes.c_void_p)    # not our own (redirected) handles
+        pi = PROCESS_INFORMATION()
+        try:
+            if not k32.InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, ctypes.byref(size)):
+                fail("InitializeProcThreadAttributeList")
+            if not k32.UpdateProcThreadAttribute(si.lpAttributeList, 0, 0x00020016, self.hpc,  # PSEUDOCONSOLE
+                                                 ctypes.sizeof(ctypes.c_void_p), None, None):
+                fail("UpdateProcThreadAttribute")
+            cmdline = ctypes.create_unicode_buffer(win_command_line(argv))
+            block = ctypes.create_unicode_buffer(win_env_block(env))
+            if not k32.CreateProcessW(None, cmdline, None, None, False,
+                                      0x00080000 | 0x00000400,    # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+                                      ctypes.cast(block, ctypes.c_void_p), cwd, ctypes.byref(si), ctypes.byref(pi)):
+                fail("starting " + argv[0])
+        except OSError:
+            k32.ClosePseudoConsole(self.hpc)
+            k32.CloseHandle(in_w)
+            k32.CloseHandle(out_r)
+            raise
+        finally:
+            k32.DeleteProcThreadAttributeList(si.lpAttributeList)
+        k32.CloseHandle(pi.hThread)
+        self.proc = WinProc(k32, pi.hProcess, pi.dwProcessId)
+        self.rfd = msvcrt.open_osfhandle(out_r.value, os.O_RDONLY | os.O_BINARY)
+        self.wfd = msvcrt.open_osfhandle(in_w.value, os.O_WRONLY | os.O_BINARY)
+        self._closed = False
+        self._lock = threading.Lock()
+        # When the program ends the pseudo console must be closed, or reading never sees the end.
+        threading.Thread(target=self._close_when_done, daemon=True).start()
+
+    def _close_when_done(self):
+        try:
+            self.proc.wait()
+        except subprocess.TimeoutExpired:
+            pass
+        self.close_console()
+
+    def close_console(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.k32.ClosePseudoConsole(self.hpc)
+
+    def read(self, n=65536) -> bytes:
+        try:
+            return os.read(self.rfd, n)
+        except OSError:
+            return b""
+
+    def write(self, data: bytes) -> int:
+        return os.write(self.wfd, data)
+
+    def resize(self, cols, rows):
+        with self._lock:
+            if not self._closed:
+                self.k32.ResizePseudoConsole(self.hpc, self.COORD(cols, rows))
+
+    def close(self):
+        self.close_console()
+        for fd in (self.rfd, self.wfd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 # ----------------------------------------------------------------------------- terminal sessions
 def set_winsize(fd: int, rows: int, cols: int):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -1043,17 +1317,24 @@ class Session:
         for k in ("VSCODE_IPC_HOOK_CLI", "VSCODE_GIT_IPC_HANDLE", "GIT_ASKPASS"):
             env.pop(k, None)
         env.update(self.built.get("env") or {})
-        master, slave = os.openpty()
-        set_winsize(master, self.rows, self.cols)
-        try:
-            proc = subprocess.Popen(self.built["argv"], cwd=self.built["cwd"], env=env,
-                                    stdin=slave, stdout=slave, stderr=slave,
-                                    start_new_session=True, preexec_fn=_child_setup, close_fds=True)
-        except OSError as e:
-            os.close(master)
+        if IS_WIN:
+            try:
+                master = ConPty(self.built["argv"], self.built["cwd"], env, self.cols, self.rows)
+            except OSError as e:
+                raise ApiError(500, f"could not start: {e}")
+            proc = master.proc
+        else:
+            master, slave = os.openpty()
+            set_winsize(master, self.rows, self.cols)
+            try:
+                proc = subprocess.Popen(self.built["argv"], cwd=self.built["cwd"], env=env,
+                                        stdin=slave, stdout=slave, stderr=slave,
+                                        start_new_session=True, preexec_fn=_child_setup, close_fds=True)
+            except OSError as e:
+                os.close(master)
+                os.close(slave)
+                raise ApiError(500, f"could not start: {e}")
             os.close(slave)
-            raise ApiError(500, f"could not start: {e}")
-        os.close(slave)
         with self.lock:
             self.proc, self.fd, self.exit_code = proc, master, None
             self.started = time.time()
@@ -1064,7 +1345,7 @@ class Session:
         dec = codecs.getincrementaldecoder("utf-8")("replace")
         while True:
             try:
-                data = os.read(fd, 65536)
+                data = fd.read(65536) if IS_WIN else os.read(fd, 65536)
             except OSError as e:
                 if e.errno == errno.EINTR:
                     continue
@@ -1077,10 +1358,10 @@ class Session:
         try:
             code = proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._signal(proc, signal.SIGKILL)
+            self._signal(proc, SIGKILL)
             code = proc.wait()
         try:
-            os.close(fd)
+            fd.close() if IS_WIN else os.close(fd)
         except OSError:
             pass
         with self.lock:
@@ -1129,7 +1410,7 @@ class Session:
         data = text.encode("utf-8")
         while data:
             try:
-                n = os.write(fd, data)
+                n = fd.write(data) if IS_WIN else os.write(fd, data)
                 data = data[n:]
             except BlockingIOError:
                 time.sleep(0.01)
@@ -1142,12 +1423,23 @@ class Session:
         fd = self.fd
         if fd is not None:
             try:
-                set_winsize(fd, rows, cols)
+                fd.resize(cols, rows) if IS_WIN else set_winsize(fd, rows, cols)
             except OSError:
                 pass
 
     @staticmethod
     def _signal(proc, sig):
+        if IS_WIN:                    # no signals: end it (the whole tree for a normal process)
+            try:
+                if isinstance(proc, WinProc):
+                    proc.kill()
+                else:
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+                    if proc.poll() is None:
+                        proc.kill()
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return
         try:
             os.killpg(proc.pid, sig)
         except (OSError, ProcessLookupError):
@@ -1164,7 +1456,7 @@ class Session:
         self.write("\x03")
 
         def later():
-            for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 3)):
+            for sig, wait in ((signal.SIGTERM, 3), (SIGKILL, 3)):
                 time.sleep(wait)
                 if proc.poll() is not None:
                     return
@@ -1174,12 +1466,12 @@ class Session:
     def kill(self, wait=False):
         proc = self.proc
         if proc and proc.poll() is None:
-            self._signal(proc, signal.SIGHUP)
+            self._signal(proc, SIGHUP)
 
             def later():
                 time.sleep(1.5)
                 if proc.poll() is None:
-                    self._signal(proc, signal.SIGKILL)
+                    self._signal(proc, SIGKILL)
             t = threading.Thread(target=later, daemon=True)
             t.start()
             if wait:
@@ -1195,11 +1487,11 @@ class Session:
             proc = self.proc
             self.proc, self.fd = None, None     # the old pump thread must not report its exit
         if proc and proc.poll() is None:
-            self._signal(proc, signal.SIGHUP)
+            self._signal(proc, SIGHUP)
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                self._signal(proc, signal.SIGKILL)
+                self._signal(proc, SIGKILL)
         with self.lock:
             self._emit("\r\n\x1b[2m──── restart ────\x1b[0m\r\n")
             self._broadcast({"t": "r"})
@@ -1700,7 +1992,7 @@ class ChatSession:
             pass
 
         def later():
-            for sig, delay in ((signal.SIGTERM, 1.5), (signal.SIGKILL, 2)):
+            for sig, delay in ((signal.SIGTERM, 1.5), (SIGKILL, 2)):
                 time.sleep(delay)
                 if proc.poll() is not None:
                     return
@@ -2398,6 +2690,8 @@ def strip_block(text: str) -> str:
 
 
 def write_server_conf(conf: ServerConf):
+    if IS_WIN and conf.key:       # C:/Users/me/.ssh/id_ed25519 works for Python, Git Bash and ssh alike
+        conf = ServerConf(conf.user, conf.host, conf.port, conf.key.replace("\\", "/"))
     f = config_dir() / "config"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text("# simabworkspace settings\n" + "".join(
@@ -2434,7 +2728,7 @@ def create_ssh_key() -> str:
     if path.exists():
         raise ApiError(400, f"{path} already exists — pick it from the list")
     path.parent.mkdir(mode=0o700, exist_ok=True)
-    r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", f"{os.environ.get('USER', 'me')}@{socket.gethostname()}", "-f", str(path)],
+    r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-C", f"{os.environ.get('USER') or os.environ.get('USERNAME') or 'me'}@{socket.gethostname()}", "-f", str(path)],
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise ApiError(500, "ssh-keygen failed: " + r.stderr.strip()[-200:])
@@ -2461,6 +2755,8 @@ def install_ssh_key(conf: ServerConf, password: str, timeout=45) -> str:
 def ssh_with_password(argv: list, password: str, timeout=45) -> tuple:
     """Run argv in a terminal and type the password at each NEW password prompt (at most twice).
     Returns (prompts answered, output)."""
+    if IS_WIN:
+        return ssh_with_password_win(argv, password, timeout)
     import pty
     pid, fd = pty.fork()
     if pid == 0:
@@ -2490,7 +2786,7 @@ def ssh_with_password(argv: list, password: str, timeout=45) -> tuple:
             out += b"\n"
             mark = len(out)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, SIGKILL)
     except OSError:
         pass
     try:
@@ -2504,6 +2800,88 @@ def ssh_with_password(argv: list, password: str, timeout=45) -> tuple:
     return sent, out.decode("utf-8", "replace")
 
 
+ANSI_RE = re.compile(rb"\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[()][0-9A-Za-z]|[=>78])")
+
+
+def asks_password(out: bytes) -> bool:
+    """A password prompt at the end of the output (terminal escape codes ignored — Windows'
+    pseudo console sends plenty of them)."""
+    return bool(re.search(rb"assword[^\n]*:[ \t]*$", ANSI_RE.sub(b"", out).replace(b"\r", b"")))
+
+
+def ssh_with_password_win(argv: list, password: str, timeout=45) -> tuple:
+    """Windows: the same, in a pseudo console (ssh reads the password from the console)."""
+    env = dict(os.environ, PATH=tool_path())
+    try:
+        con = ConPty(argv, os.path.expanduser("~"), env, 200, 50)
+    except OSError as e:
+        raise ApiError(500, f"could not start ssh: {e}")
+    chunks = collections.deque()
+
+    def reader():
+        while True:
+            c = con.read(4096)
+            if not c:
+                break
+            chunks.append(c)
+        chunks.append(None)
+    threading.Thread(target=reader, daemon=True).start()
+    out, sent, end, mark, done = b"", 0, time.time() + timeout, 0, False
+    while time.time() < end and not done:
+        if not chunks:
+            time.sleep(0.05)
+            continue
+        c = chunks.popleft()
+        if c is None:
+            break
+        out += c
+        if asks_password(out[mark:]) and sent < 2:
+            time.sleep(0.15)
+            try:
+                con.write(password.encode() + b"\r")
+            except OSError:
+                break
+            sent += 1
+            out += b"\n"
+            mark = len(out)
+    con.proc.kill()
+    con.close()
+    return sent, ANSI_RE.sub(b"", out).decode("utf-8", "replace")
+
+
+def png_to_ico(png: bytes) -> bytes:
+    """An .ico holding one PNG image (Windows Vista+ reads those) — for the Start menu shortcut."""
+    w, h = struct.unpack(">II", png[16:24])
+    return (struct.pack("<HHH", 0, 1, 1)
+            + struct.pack("<BBBBHHII", w if w < 256 else 0, h if h < 256 else 0, 0, 0, 1, 32, len(png), 22) + png)
+
+
+def ps_quote(s: str) -> str:
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def windows_shortcut_script(lnk: str, target: str, args: str, workdir: str, icon: str) -> str:
+    return (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(lnk)});"
+            f"$s.TargetPath={ps_quote(target)};$s.Arguments={ps_quote(args)};"
+            f"$s.WorkingDirectory={ps_quote(workdir)};$s.IconLocation={ps_quote(icon)};"
+            "$s.Description='Simab Workspace';$s.Save()")
+
+
+def make_windows_shortcut() -> str:
+    """Start menu entry: pythonw.exe server.py open (no console window)."""
+    icon = config_dir() / "simabworkspace.ico"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(png_to_ico((STATIC / "icon-192.png").read_bytes()))
+    progs = Path(os.environ.get("APPDATA") or home_path("AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs")
+    progs.mkdir(parents=True, exist_ok=True)
+    ps = windows_shortcut_script(str(progs / "Simab Workspace.lnk"), win_python(gui=True),
+                                 subprocess.list2cmdline([str(HERE / "server.py"), "open"]), os.path.expanduser("~"), str(icon))
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, timeout=60)
+    if r.returncode != 0:
+        raise ApiError(500, "could not create the Start menu shortcut: " + r.stderr.decode("utf-8", "replace").strip()[-200:])
+    return "Windows Start menu"
+
+
 def desktop_quote(arg: str) -> str:
     """Quoting rules of .desktop Exec lines (double quotes only)."""
     if re.fullmatch(r"[A-Za-z0-9_./~-]+", arg):
@@ -2511,11 +2889,29 @@ def desktop_quote(arg: str) -> str:
     return '"' + re.sub(r'(["`$\\])', r"\\\1", arg) + '"'
 
 
+def windows_startup_file() -> Path:
+    return Path(os.environ.get("APPDATA") or home_path("AppData", "Roaming"), "Microsoft", "Windows", "Start Menu",
+                "Programs", "Startup", "simabworkspace-sync.cmd")
+
+
 def autostart_enabled() -> bool:
+    if IS_WIN:
+        return windows_startup_file().is_file()
     return any(RC_MARK_BEGIN in (home_path(rc).read_text(errors="replace") if home_path(rc).is_file() else "") for rc in (".bashrc", ".zshrc"))
 
 
 def set_autostart(on: bool):
+    if IS_WIN:                  # a tiny script in the Startup folder starts the sync service at sign-in
+        f = windows_startup_file()
+        exe = which("mutagen")
+        if on:
+            if not exe:
+                raise ApiError(400, "mutagen is not installed yet")
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(f'@echo off\r\n"{exe}" daemon start >nul 2>&1\r\n')
+        elif f.is_file():
+            f.unlink()
+        return
     for rc in (".bashrc", ".zshrc"):
         f = home_path(rc)
         if not f.is_file():
@@ -2713,7 +3109,7 @@ class App:
     # running the bash script without questions ----------------------------------
     def script(self) -> str:
         sc = HERE.parent / "simabworkspace.sh"
-        sc = str(sc) if sc.is_file() else which("simabworkspace")
+        sc = str(sc) if sc.is_file() else installed_script()
         if not sc:
             raise ApiError(400, "simabworkspace script not found")
         return sc
@@ -2723,7 +3119,7 @@ class App:
         e = dict(os.environ, PATH=tool_path(), SW_NONINTERACTIVE="1")
         e.update(env or {})
         try:
-            r = subprocess.run([which("bash") or "/bin/bash", self.script()] + args, input=stdin,
+            r = subprocess.run([bash_exe(), self.script()] + args, input=stdin,
                                stdin=None if stdin is not None else subprocess.DEVNULL,
                                capture_output=True, timeout=timeout, env=e, cwd=os.path.expanduser("~"))
         except subprocess.TimeoutExpired:
@@ -2749,7 +3145,7 @@ class App:
                 except (OSError, subprocess.SubprocessError, IndexError):
                     ver = ""
             items.append({"name": name, "ok": bool(path), "version": ver, "why": why,
-                          "sudo": name not in ("mutagen", "jq")})
+                          "sudo": name not in ("mutagen", "jq") and not IS_WIN})
         docker = which("docker")
         dok = False
         if docker:
@@ -2758,7 +3154,7 @@ class App:
             except (OSError, subprocess.SubprocessError):
                 dok = False
         sudo_free = False
-        if which("sudo"):
+        if which("sudo") and not IS_WIN:
             try:
                 sudo_free = subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=10).returncode == 0
             except (OSError, subprocess.SubprocessError):
@@ -2941,10 +3337,10 @@ class App:
 
     def git_sync(self, name: str, on: bool) -> dict:
         script = HERE.parent / "simabworkspace.sh"
-        script = str(script) if script.is_file() else which("simabworkspace")
+        script = str(script) if script.is_file() else installed_script()
         if not script:
             raise ApiError(400, "simabworkspace script not found")
-        argv = [which("bash") or "/bin/bash", script, "git", name, "on" if on else "off"]
+        argv = [bash_exe(), script, "git", name, "on" if on else "off"]
 
         def run():
             r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=3600, env=dict(os.environ, PATH=tool_path()))
@@ -3039,6 +3435,11 @@ class App:
 
     # app shortcut (open the window without a terminal) ----------------------------
     def create_shortcut(self) -> dict:
+        made = [make_windows_shortcut()] if IS_WIN else self._unix_shortcut()
+        self.activity.add("shortcut", "", "added to " + ", ".join(made))
+        return {"ok": True, "where": made}
+
+    def _unix_shortcut(self) -> list:
         script = self.script()
         installed = home_path(".local", "bin", "simabworkspace")
         cmd = str(installed) if installed.is_file() else script
@@ -3075,8 +3476,7 @@ class App:
                 "[Desktop Entry]\nType=Application\nName=Simab Workspace\nComment=Projects, terminals and Claude\n"
                 f"Exec={desktop_quote(cmd)} gui\nIcon={icon}\nTerminal=false\nCategories=Development;\n")
             made.append("app menu")
-        self.activity.add("shortcut", "", "added to " + ", ".join(made))
-        return {"ok": True, "where": made}
+        return made
 
     # updates ------------------------------------------------------------------------
     def check_update(self, force=False) -> dict:
@@ -3106,7 +3506,7 @@ class App:
                 shutil.copyfileobj(r, f)
         except Exception as e:  # noqa: BLE001
             raise ApiError(502, f"download failed: {e}")
-        r = subprocess.run([which("bash") or "/bin/bash", path, "--no-open"], stdin=subprocess.DEVNULL, capture_output=True,
+        r = subprocess.run([bash_exe(), path, "--no-open"], stdin=subprocess.DEVNULL, capture_output=True,
                            timeout=300, env=dict(os.environ, PATH=tool_path()), cwd=os.path.expanduser("~"))
         shutil.rmtree(tmp, ignore_errors=True)
         if r.returncode != 0:
@@ -3114,11 +3514,14 @@ class App:
         self.activity.add("update", "", f"updated {VERSION} → {info['latest']}")
         # start the new version on the same address with the same key, then stop this one
         cmd = home_path(".local", "bin", "simabworkspace")
-        argv = [str(cmd), "gui", "serve"] if cmd.is_file() else [sys.executable, str(HERE / "server.py"), "serve"]
+        if IS_WIN:                  # the installer refreshed the copy this server runs from
+            argv = [win_python(), str(HERE / "server.py"), "serve"]
+        else:
+            argv = [str(cmd), "gui", "serve"] if cmd.is_file() else [sys.executable, str(HERE / "server.py"), "serve"]
         log = config_dir() / "gui.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "ab") as lf:
-            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, start_new_session=True,
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, **detached_kwargs(),
                              cwd=os.path.expanduser("~"), env=dict(os.environ, PATH=tool_path(), SIMAB_TOKEN=self.token, SIMAB_RESTART="1"))
         threading.Thread(target=shutdown_app, args=(self,), daemon=True).start()
         return {"ok": True, "version": info["latest"]}
@@ -3505,6 +3908,12 @@ class App:
 
 
 def daemon_running() -> bool:
+    if IS_WIN:
+        try:
+            r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mutagen.exe", "/NH"], capture_output=True, text=True, timeout=10)
+            return "mutagen.exe" in r.stdout.lower()
+        except (OSError, subprocess.SubprocessError):
+            return False
     try:
         r = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", "mutagen daemon run"],
                            capture_output=True, timeout=5)
@@ -4422,7 +4831,8 @@ def serve(foreground_msg=True):
     log_line(f"started {VERSION} on 127.0.0.1:{app.port} (pid {os.getpid()})")
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: threading.Thread(target=shutdown_app, args=(app,), daemon=True).start())
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if foreground_msg:
         print(f"{APP} GUI: {app_url(st)}", flush=True)
     try:
@@ -4461,8 +4871,8 @@ def ensure_running(timeout=8.0):
     log = config_dir() / "gui.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as lf:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve"], stdin=subprocess.DEVNULL,
-                         stdout=lf, stderr=lf, start_new_session=True, cwd=os.path.expanduser("~"))
+        subprocess.Popen([win_python() if IS_WIN else sys.executable, str(Path(__file__).resolve()), "serve"],
+                         stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, cwd=os.path.expanduser("~"), **detached_kwargs())
     end = time.time() + timeout
     while time.time() < end:
         time.sleep(0.2)
@@ -4472,11 +4882,24 @@ def ensure_running(timeout=8.0):
     raise SystemExit(f"GUI did not start — see {log}")
 
 
+WEBBROWSER = "<default browser>"     # open_window: Python's webbrowser module (the system default)
+
+
 def browser_candidates(url: str, profile: str) -> list:
     """Commands to open `url` as an app window, best first."""
     app_args = [f"--app={url}", f"--user-data-dir={profile}", "--class=simabworkspace",
                 "--no-first-run", "--no-default-browser-check"]
     out = []
+    if IS_WIN:
+        env = os.environ
+        for rel in (("Microsoft", "Edge", "Application", "msedge.exe"), ("Google", "Chrome", "Application", "chrome.exe"),
+                    ("BraveSoftware", "Brave-Browser", "Application", "brave.exe")):
+            for base in (env.get("ProgramFiles(x86)"), env.get("ProgramFiles"), env.get("LOCALAPPDATA")):
+                if base and os.path.isfile(os.path.join(base, *rel)):
+                    out.append([os.path.join(base, *rel)] + app_args)
+                    break
+        out.append([WEBBROWSER, url])
+        return out
     if is_wsl():
         # Windows Edge/Chrome; WSL forwards 127.0.0.1 to Windows.
         out.append(["cmd.exe", "/c", "start", "", "msedge", f"--app={url}"])
@@ -4511,11 +4934,17 @@ def open_window(st):
             pass
     cands += browser_candidates(url, profile)
     for argv in cands:
+        if argv[0] == WEBBROWSER:
+            import webbrowser
+            if webbrowser.open(argv[1]):
+                print(f"  ✓ {APP} GUI opened  ({url.split('#')[0]})")
+                return
+            continue
         if not shutil.which(argv[0]):
             continue
         try:
             subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True, cwd="/mnt/c" if argv[0] == "cmd.exe" and os.path.isdir("/mnt/c") else None)
+                             cwd="/mnt/c" if argv[0] == "cmd.exe" and os.path.isdir("/mnt/c") else None, **detached_kwargs())
             print(f"  ✓ {APP} GUI opened  ({url.split('#')[0]})")
             return
         except OSError:
@@ -4544,6 +4973,8 @@ def main(argv):
         serve_web(argv[2:])
     elif cmd == "stop":
         print("  ✓ GUI stopped" if stop_running(read_state()) else "  GUI is not running")
+    elif cmd == "shortcut" and IS_WIN:        # used by install.ps1
+        print("  ✓ Added to the " + make_windows_shortcut())
     else:
         print(__doc__ or "usage: server.py [open|serve|url|status|stop]")
         return 1

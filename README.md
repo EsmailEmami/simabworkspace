@@ -23,7 +23,7 @@ with each project folder kept in sync both ways.
 - **Claude usage**: the 5-hour and weekly limits in the sidebar, cost per day and project.
 - **History** of what you did, project colours, a minimal dark UI.
 
-Runs on **Linux**, **macOS** and **Windows (WSL)**. The server only needs SSH.
+Runs on **Linux**, **macOS** and **Windows** (natively — no WSL needed; WSL works too). The server only needs SSH.
 
 ## Install
 
@@ -33,7 +33,7 @@ Runs on **Linux**, **macOS** and **Windows (WSL)**. The server only needs SSH.
 curl -fsSL https://raw.githubusercontent.com/EsmailEmami/simabworkspace/main/install.sh | bash
 ```
 
-**Windows** (PowerShell — installs WSL with Ubuntu first if needed):
+**Windows** (PowerShell — runs on Windows itself; installs Python and Git for Windows with winget if missing):
 
 ```powershell
 irm https://raw.githubusercontent.com/EsmailEmami/simabworkspace/main/install.ps1 | iex
@@ -54,13 +54,15 @@ simabworkspace          # menu in the terminal
 simabworkspace gui      # the workspace window
 ```
 
-On Windows the window is also in the Start menu (“Simab Workspace”).
+On Windows the window is also in the Start menu (“Simab Workspace”); `simabworkspace` works in
+PowerShell, cmd and Git Bash. Local terminals use PowerShell (change it in Settings).
+Needs Windows 10 (1809) or newer.
 
 > **Teams:** pre-fill your server so people only type their user name:
 > `curl -fsSL …/install.sh | SIMAB_HOST=10.0.0.5 SIMAB_PORT=2222 bash`
 > (PowerShell: set `$env:SIMAB_HOST` / `$env:SIMAB_PORT` before the command).
 
-Requirements: `python3` and `curl` on your machine (the Windows installer adds them).
+Requirements: `python3` and `curl` on your machine (on Windows: Python and Git for Windows — the installer adds them).
 Downloads are also on the [Releases](https://github.com/EsmailEmami/simabworkspace/releases) page.
 
 ## Use

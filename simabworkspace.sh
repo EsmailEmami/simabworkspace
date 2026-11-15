@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  simabworkspace — keep your projects on the shared server in sync with your
-#  own machine (Linux / WSL / macOS), so builds and dev servers run locally.
+#  own machine (Linux / WSL / macOS / Windows), so builds and dev servers run locally.
 #
 #  Uses Mutagen (two-way, real-time file sync over SSH). Nothing has to be
 #  installed on the server: Mutagen copies its own small agent there.
@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.21.0 2026-11-15  Windows without WSL: install.ps1 installs Python + Git for Windows
+#                       (winget) and runs the app on Windows itself — terminals in the
+#                       Windows pseudo console (PowerShell locally), Mutagen/jq for Windows,
+#                       Start menu entry, `simabworkspace` in PowerShell/cmd/Git Bash
 #    1.20.0 2026-11-14  Web version: `simabworkspace web` serves the workspace to a browser
 #                       (tablet…) over HTTPS; sign in with an SSH user and password of an
 #                       allowed server (checked, never stored); one workspace per user;
@@ -142,7 +146,7 @@
 
 set -u -o pipefail
 
-VERSION="1.20.0"
+VERSION="1.21.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -234,9 +238,22 @@ confirm() {
 OS="$(uname -s)"
 IS_WSL=0
 if [ "$OS" = "Linux" ] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then IS_WSL=1; fi
+# Native Windows: this script runs in Git Bash (Git for Windows); Mutagen, jq and Python are
+# Windows programs, so they get Windows paths (C:/Users/…) and no MSYS path rewriting.
+IS_WIN=0
+case "$OS" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; esac
+if [ $IS_WIN -eq 1 ]; then
+  USER="${USER:-${USERNAME:-me}}"
+  mutagen() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command mutagen "$@"; }
+  jq() { command jq -b "$@"; }          # -b: no CRLF line ends from the Windows jq.exe
+fi
+# winpath <path> -> C:/Users/me/… on Windows (what Windows programs understand), unchanged elsewhere
+winpath() {
+  if [ $IS_WIN -eq 1 ] && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
 
 SUDO=""
-if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="${SW_SUDO:-sudo}"; fi
+if [ $IS_WIN -eq 0 ] && [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="${SW_SUDO:-sudo}"; fi
 
 # run_step "label" command…  — long steps never look frozen: a spinner, the seconds
 # spent and the latest output line while it runs; the full output only on failure.
@@ -288,6 +305,13 @@ pkg_install() {
       *) pkgs+=("$p") ;;
     esac
   done
+  if [ $IS_WIN -eq 1 ]; then
+    # ssh, curl, tar, gzip and git all come with Git for Windows
+    command -v winget >/dev/null 2>&1 || die "Install Git for Windows (https://git-scm.com/download/win), then try again."
+    run_step "Installing Git for Windows (winget)" winget install --id Git.Git -e --source winget \
+      --accept-package-agreements --accept-source-agreements --silent
+    return
+  fi
   info "Installing: ${pkgs[*]}"
   if [ "$OS" = "Darwin" ]; then
     command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS: https://brew.sh"
@@ -327,7 +351,35 @@ ensure_path() {
   fi
 }
 
+# Windows: the zip from GitHub (mutagen.exe + mutagen-agents.tar.gz) into ~/.local/bin
+install_mutagen_windows() {
+  local arch url tmp
+  case "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-AMD64}}" in
+    ARM64) arch=arm64 ;; x86) arch=386 ;; *) arch=amd64 ;;
+  esac
+  info "Downloading Mutagen (windows/$arch)…"
+  url=$(curl -fsSL --max-time 20 https://api.github.com/repos/mutagen-io/mutagen/releases/latest 2>/dev/null \
+        | grep -o "https://[^\"]*mutagen_windows_${arch}_v[^\"]*\.zip" | head -1 || true)
+  if [ -z "$url" ]; then
+    url="https://github.com/mutagen-io/mutagen/releases/download/${MUTAGEN_FALLBACK_VERSION}/mutagen_windows_${arch}_${MUTAGEN_FALLBACK_VERSION}.zip"
+    warn "Could not query the latest release, using $MUTAGEN_FALLBACK_VERSION"
+  fi
+  tmp=$(mktemp -d)
+  curl -fL --retry 3 --progress-bar "$url" -o "$tmp/mutagen.zip" || { rm -rf "$tmp"; die "Download failed: $url"; }
+  mkdir -p "$BIN_DIR"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -o -q "$tmp/mutagen.zip" -d "$BIN_DIR"
+  else
+    powershell.exe -NoProfile -NonInteractive -Command \
+      "Expand-Archive -Force -LiteralPath '$(cygpath -w "$tmp/mutagen.zip")' -DestinationPath '$(cygpath -w "$BIN_DIR")'"
+  fi || { rm -rf "$tmp"; die "Could not extract Mutagen"; }
+  rm -rf "$tmp"
+  ensure_path
+  ok "Mutagen installed: $("$BIN_DIR/mutagen.exe" version 2>/dev/null)"
+}
+
 install_mutagen() {
+  if [ $IS_WIN -eq 1 ]; then install_mutagen_windows; return; fi
   if [ "$OS" = "Darwin" ]; then
     command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS: https://brew.sh"
     brew install mutagen-io/mutagen/mutagen
@@ -363,15 +415,18 @@ install_mutagen() {
 install_jq() {
   local arch os url
   case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
+  local ext=""
   case "$OS" in Linux) os=linux ;; Darwin) os=macos ;; *) os="" ;; esac
+  if [ $IS_WIN -eq 1 ]; then os=windows; ext=".exe"; [ -n "$arch" ] || arch=amd64; fi
   if [ -n "$arch" ] && [ -n "$os" ]; then
-    url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-$os-$arch"
+    url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-$os-$arch$ext"
     mkdir -p "$BIN_DIR"
-    if run_step "Downloading jq" curl -fSL --retry 2 --max-time 120 "$url" -o "$BIN_DIR/jq.tmp" \
-       && chmod +x "$BIN_DIR/jq.tmp" && "$BIN_DIR/jq.tmp" --version >/dev/null 2>&1; then
-      mv -f "$BIN_DIR/jq.tmp" "$BIN_DIR/jq"; ensure_path; ok "jq installed: $("$BIN_DIR/jq" --version)"; return 0
+    if run_step "Downloading jq" curl -fSL --retry 2 --max-time 120 "$url" -o "$BIN_DIR/jq.tmp$ext" \
+       && chmod +x "$BIN_DIR/jq.tmp$ext" && "$BIN_DIR/jq.tmp$ext" --version >/dev/null 2>&1; then
+      mv -f "$BIN_DIR/jq.tmp$ext" "$BIN_DIR/jq$ext"; ensure_path; ok "jq installed: $("$BIN_DIR/jq$ext" --version)"; return 0
     fi
-    rm -f "$BIN_DIR/jq.tmp"
+    rm -f "$BIN_DIR/jq.tmp$ext"
+    [ $IS_WIN -eq 1 ] && die "Could not download jq: $url"
     warn "Could not download jq; trying the package manager."
   fi
   pkg_install jq
@@ -391,8 +446,14 @@ check_prereqs() {
   title "Prerequisites"
   local missing=() c
   for c in curl tar gzip ssh jq; do
-    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+    type -P "$c" >/dev/null 2>&1 || missing+=("$c")
   done
+  if [ $IS_WIN -eq 1 ] && [[ " ${missing[*]:-} " == *" jq "* ]]; then     # jq.exe from GitHub, not winget
+    install_jq || die "Could not install jq"
+    local rest=() m
+    for m in "${missing[@]}"; do [ "$m" = "jq" ] || rest+=("$m"); done
+    missing=("${rest[@]+"${rest[@]}"}")
+  fi
   if [ ${#missing[@]} -gt 0 ]; then
     warn "Missing: ${missing[*]}"
     pkg_install "${missing[@]}" || die "Could not install: ${missing[*]}"
@@ -400,18 +461,20 @@ check_prereqs() {
   ok "curl, tar, ssh, jq"
 
   [ -x "$BIN_DIR/mutagen" ] && ensure_path
-  if ! command -v mutagen >/dev/null 2>&1; then
+  if ! type -P mutagen >/dev/null 2>&1; then
     install_mutagen
   else
     ok "Mutagen $(mutagen version 2>/dev/null)"
   fi
-  command -v mutagen >/dev/null 2>&1 || die "Mutagen is not on PATH. Open a new terminal and run $APP again."
+  type -P mutagen >/dev/null 2>&1 || die "Mutagen is not on PATH. Open a new terminal and run $APP again."
 
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     ok "Docker + compose (to run projects locally)"
   else
     warn "Docker is not available — syncing works without it, but you need it to run projects locally."
-    if [ $IS_WSL -eq 1 ]; then
+    if [ $IS_WIN -eq 1 ]; then
+      warn "  Windows: install Docker Desktop: https://www.docker.com/products/docker-desktop/"
+    elif [ $IS_WSL -eq 1 ]; then
       warn "  WSL: install Docker Desktop on Windows → Settings → Resources → WSL Integration → enable this distro."
     elif [ "$OS" = "Darwin" ]; then
       warn "  macOS: install Docker Desktop: https://www.docker.com/products/docker-desktop/"
@@ -510,7 +573,7 @@ write_ssh_config() {
   {
     printf '\n%s\n' "$RC_MARK_BEGIN"
     printf 'Host %s\n' "$SSH_HOST"
-    printf '    IdentityFile %s\n' "$SSH_KEY"
+    printf '    IdentityFile %s\n' "$(winpath "$SSH_KEY")"
     printf '%s\n' "$RC_MARK_END"
   } >> "$SSH_CONFIG"
   ok "Added your key for $SSH_HOST to ~/.ssh/config (marked block, so sync uses it too)"
@@ -520,7 +583,7 @@ write_ssh_config() {
 list_keys() {
   local pub
   for pub in "$HOME"/.ssh/*.pub; do
-    [ -f "$pub" ] && [ -f "${pub%.pub}" ] && printf '%s\n' "${pub%.pub}"
+    [ -f "$pub" ] && [ -f "${pub%.pub}" ] && printf '%s\n' "$(winpath "${pub%.pub}")"
   done
 }
 
@@ -623,6 +686,10 @@ daemon_start() { mutagen daemon start >/dev/null 2>&1 || true; }
 
 daemon_running() {
   # `daemon start` is idempotent; we only want to know without starting it
+  if [ $IS_WIN -eq 1 ]; then
+    MSYS_NO_PATHCONV=1 tasklist.exe /FI "IMAGENAME eq mutagen.exe" /NH 2>/dev/null | grep -qi 'mutagen\.exe'
+    return
+  fi
   pgrep -u "$(id -u)" -f 'mutagen daemon run' >/dev/null 2>&1
 }
 
@@ -632,6 +699,11 @@ sessions_json() {
   local out
   out=$(mutagen sync list --template '{{ json . }}' 2>/dev/null) || out="[]"
   [ -z "$out" ] && out="[]"
+  if [ $IS_WIN -eq 1 ]; then      # Mutagen says C:\Users\me\x; normalize_local gives C:/Users/me/x
+    printf '%s' "$out" | jq -c 'if type=="array" then map(if .alpha.path then .alpha.path |= gsub("\\\\"; "/") else . end
+      | if .beta.path then .beta.path |= gsub("\\\\"; "/") else . end) else [] end' 2>/dev/null || printf '[]'
+    return
+  fi
   printf '%s' "$out" | jq -c 'if type=="array" then . else [] end' 2>/dev/null || printf '[]'
 }
 
@@ -1079,6 +1151,12 @@ git_warning() {
 normalize_local() {
   local p="$1"
   case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#\~/}" ;; esac
+  if [ $IS_WIN -eq 1 ]; then
+    case "$p" in /*|[A-Za-z]:*) ;; *) p="$PWD/$p" ;; esac
+    p=$(winpath "$p")
+    case "$p" in [A-Za-z]:/) printf '%s' "$p"; return ;; esac
+    printf '%s' "${p%/}"; return
+  fi
   case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
   printf '%s' "${p%/}"
 }
@@ -1382,6 +1460,7 @@ self_install() {
         ensure_path
         ok "Installed as '$APP' → $target (just type $APP from now on)"
       fi
+      [ $IS_WIN -eq 1 ] && write_windows_launcher
       # the window's files go with the copy (they are found next to the script otherwise)
       if [ -f "$dir/gui/server.py" ]; then
         mkdir -p "$CONFIG_DIR" && printf '%s\n' "$dir" > "$CONFIG_DIR/source"   # remembered for updates
@@ -1389,6 +1468,14 @@ self_install() {
       fi
       ;;
   esac
+}
+
+# Windows: simabworkspace.cmd next to the script, so the command also works in PowerShell / cmd
+write_windows_launcher() {
+  local bash_w
+  bash_w="$(cygpath -w /)"
+  bash_w="${bash_w%\\}\\bin\\bash.exe"
+  printf '@"%s" "%%~dp0%s" %%*\r\n' "$bash_w" "$APP" > "$BIN_DIR/$APP.cmd"
 }
 
 # ----------------------------------------------------------------------------- updates
@@ -1459,20 +1546,30 @@ gui_dir() {
   return 1
 }
 
+# find_python -> a Python 3 that really runs (on Windows `python3` can be the Store's placeholder)
+find_python() {
+  local c
+  for c in python3 python py; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1 && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
 run_gui() {
   local d py
   update_from_source
-  py=$(command -v python3 2>/dev/null) || { err "The window needs python3 (install it, e.g. sudo apt install python3)."; return 1; }
+  py=$(find_python) || { err "The window needs Python 3 (Linux: sudo apt install python3; Windows: winget install Python.Python.3.12)."; return 1; }
   d=$(gui_dir) || { err "GUI files not found. Keep the 'gui' folder next to $APP.sh and run it once from there."; return 1; }
-  "$py" "$d/server.py" "${1:-open}"
+  "$py" "$(winpath "$d/server.py")" "${1:-open}"
 }
 
 # The workspace in the browser, for a tablet or another computer (see `simabworkspace web --help`).
 run_web() {
   local d py
-  py=$(command -v python3 2>/dev/null) || { err "The web version needs python3."; return 1; }
+  py=$(find_python) || { err "The web version needs python3."; return 1; }
   d=$(gui_dir) || { err "GUI files not found. Keep the 'gui' folder next to $APP.sh."; return 1; }
-  "$py" "$d/server.py" web "$@"
+  "$py" "$(winpath "$d/server.py")" web "$@"
 }
 
 uninstall_all() {
@@ -1493,6 +1590,11 @@ uninstall_all() {
   rm -rf "$(dirname "$GUI_SHARE")"
   rm -rf "$CONFIG_DIR"
   rm -f "$BIN_DIR/$APP"
+  if [ $IS_WIN -eq 1 ]; then
+    rm -f "$BIN_DIR/$APP.cmd"
+    rm -f "$APPDATA/Microsoft/Windows/Start Menu/Programs/Simab Workspace.lnk" \
+          "$APPDATA/Microsoft/Windows/Start Menu/Programs/Startup/simabworkspace-sync.cmd" 2>/dev/null || true
+  fi
   ok "Uninstalled."
   exit 0
 }
@@ -1591,7 +1693,7 @@ main() {
   # first run, or a tool went missing: full setup (prereqs → user → SSH key)
   [ -x "$BIN_DIR/mutagen" ] && ensure_path
   if [ ! -f "$CONFIG_FILE" ] || [ -z "$SSH_USER" ] \
-     || ! command -v mutagen >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+     || ! type -P mutagen >/dev/null 2>&1 || ! type -P jq >/dev/null 2>&1; then
     if [ -n "${SW_NONINTERACTIVE:-}" ]; then      # called by the window: no wizard here
       err "Setup is not complete (server settings, mutagen or jq missing) — open Settings in the window."
       exit 1

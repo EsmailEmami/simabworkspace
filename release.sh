@@ -34,15 +34,21 @@ installer="$dist/simabworkspace-install.sh"
 # Simab Workspace $version — installer / updater
 #   bash simabworkspace-install.sh             install (or update) and open the window
 #   bash simabworkspace-install.sh --no-open   install only
-# Works on Linux, WSL and macOS. No sudo needed for the app itself.
+# Works on Linux, WSL, macOS and Windows (Git Bash). No sudo needed for the app itself.
 set -euo pipefail
 VERSION="$version"
 EOF
   cat <<'EOF'
 say() { printf '  %s\n' "$*"; }
-for c in bash tar base64 python3; do
+for c in bash tar base64; do
   command -v "$c" >/dev/null 2>&1 || { say "✗ '$c' is required. Install it first (e.g. sudo apt install $c)."; exit 1; }
 done
+# python3 — or on Windows python / py (`python3` there can be the Store's placeholder)
+py_ok=0
+for c in python3 python py; do
+  command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1 && { py_ok=1; break; }
+done
+[ $py_ok -eq 1 ] || { say "✗ Python 3 is required (Linux: sudo apt install python3; Windows: winget install Python.Python.3.12)."; exit 1; }
 DEST="${XDG_DATA_HOME:-$HOME/.local/share}/simabworkspace/app"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

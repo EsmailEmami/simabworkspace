@@ -464,6 +464,43 @@ class ZshOnTheServer(TmpHome):
         return REAL_RUN([self.zsh, "-c", argv[-1]], capture_output=True, env=env, timeout=30,
                               cwd=kw.get("cwd"), input=kw.get("input"))
 
+    def chat_run(self, home_setup):
+        home = Path(self.tmp.name) / "h"
+        (home / "proj").mkdir(parents=True, exist_ok=True)
+        (home / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n')     # not read by zsh -lc
+        home_setup(home)
+        script = sw.chat_remote_script("~/proj", "claude", ["--output-format", "stream-json"])
+        env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "SHELL": self.zsh}
+        return REAL_RUN([self.zsh, "-c", script], capture_output=True, text=True, env=env, timeout=20)
+
+    def test_chat_finds_claude_in_local_bin_with_zsh(self):
+        # the user's bug: "Claude stopped (exit 127)" — zsh -lc does not read ~/.zshrc
+        def setup(home):
+            b = home / ".local" / "bin"
+            b.mkdir(parents=True)
+            (b / "claude").write_text('#!/bin/sh\necho "claude in $(pwd) $*"\n')
+            (b / "claude").chmod(0o755)
+        r = self.chat_run(setup)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.strip().endswith("/h/proj --output-format stream-json"), r.stdout)
+        self.assertNotIn("no matches found", r.stderr)
+
+    def test_chat_says_clearly_when_claude_is_missing(self):
+        r = self.chat_run(lambda home: None)
+        self.assertEqual(r.returncode, 127)
+        self.assertIn("claude was not found on the server", r.stderr)
+        self.assertNotIn("no matches found", r.stderr)
+
+    def test_claude_terminal_inner_works_in_zsh(self):
+        home = Path(self.tmp.name) / "h2"
+        nb = home / ".vscode-server/extensions/anthropic.claude-code-2.1.9-linux-x64/resources/native-binary"
+        nb.mkdir(parents=True)
+        (nb / "claude").write_text('#!/bin/sh\necho "vscode claude $*"\n')
+        (nb / "claude").chmod(0o755)
+        r = REAL_RUN([self.zsh, "-c", sw.claude_inner("claude", "continue")], capture_output=True, text=True,
+                     env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, timeout=20)
+        self.assertEqual(r.stdout.strip(), "vscode claude --continue", r.stderr)
+
     def test_server_folders_and_repos_and_files_with_zsh(self):
         with mock.patch.object(sw.subprocess, "run", side_effect=self.run_with_zsh), \
                 mock.patch.object(sw, "mutagen_sessions", return_value=[]):
@@ -1694,7 +1731,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.24.0"', text)
+        self.assertIn('VERSION="1.24.1"', text)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.24.0"
+VERSION = "1.24.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -801,12 +801,23 @@ CLAUDE_MODES = {"new": "", "continue": " --continue", "resume": " --resume"}
 # If the `claude` CLI is not installed on the server, use the binary that ships
 # inside the VS Code extension (newest version). On failure, keep the message on
 # screen until Enter, so the tab does not just say "[exited]".
+# Where claude may be when it is not on the PATH of a non-interactive login shell (zsh does
+# not read ~/.zshrc there, and that is where installers usually add ~/.local/bin). sh syntax:
+# the scripts below always run it with sh, whatever the user's shell is.
 CLAUDE_FIND = (
     'if ! command -v claude >/dev/null 2>&1; then '
-    'd=$(ls -d "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary '
+    'for d in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.npm-global/bin" "$HOME/.bun/bin" "$HOME/.volta/bin" '
+    '/usr/local/bin /opt/homebrew/bin /home/linuxbrew/.linuxbrew/bin '
+    '"$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1)" '
+    '"$(ls -d "$HOME"/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary '
     '"$HOME"/.vscode-server-insiders/extensions/anthropic.claude-code-*/resources/native-binary '
-    '"$HOME"/.cursor-server/extensions/anthropic.claude-code-*/resources/native-binary 2>/dev/null '
-    '| sort -V | tail -n 1); [ -n "$d" ] && PATH="$d:$PATH"; fi; '
+    '"$HOME"/.cursor-server/extensions/anthropic.claude-code-*/resources/native-binary 2>/dev/null | sort -V | tail -n 1)"; '
+    'do if [ -n "$d" ] && [ -x "$d/claude" ]; then PATH="$d:$PATH"; export PATH; break; fi; done; fi; '
+)
+CLAUDE_MISSING = (
+    'command -v claude >/dev/null 2>&1 || { echo "claude was not found on the server (looked in PATH, ~/.local/bin, '
+    '~/.claude/local, npm, bun, volta, Homebrew, nvm, VS Code). Install it there: curl -fsSL https://claude.ai/install.sh | bash '
+    '— or set the full path of claude in Settings." >&2; exit 127; }; '
 )
 CLAUDE_FAIL = (
     ' || { c=$?; printf "\n\033[33mclaude stopped (exit %s).\033[0m\n" "$c"; '
@@ -818,7 +829,7 @@ CLAUDE_FAIL = (
 def claude_inner(claude_cmd: str, mode: str, resume: str = "") -> str:
     """resume: a conversation id → open exactly that conversation."""
     flags = (" --resume " + resume) if resume else CLAUDE_MODES.get(mode, "")
-    return CLAUDE_FIND + (claude_cmd or "claude") + flags + CLAUDE_FAIL
+    return "sh -c " + shlex.quote(CLAUDE_FIND + (claude_cmd or "claude") + flags + CLAUDE_FAIL)
 KINDS = ("shell", "claude", "run", "sync-info", "sync-monitor", "git-sync-on", "add-local", "add-server", "docker")
 KIND_TITLES = {"shell": "", "claude": "Claude", "sync-info": "sync details", "sync-monitor": "sync monitor", "git-sync-on": "sync .git"}
 
@@ -1582,9 +1593,12 @@ def chat_args(mode: str, model: str = "", resume: str = "", effort: str = "") ->
 
 
 def chat_remote_script(rpath: str, claude_cmd: str, args: list) -> str:
-    inner = CLAUDE_FIND + "exec " + (claude_cmd or "claude") + " " + " ".join(shlex.quote(x) for x in args)
+    cmd = claude_cmd or "claude"
+    inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "") + "exec " + cmd + " "
+             + " ".join(shlex.quote(x) for x in args))
+    # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
     return (f"cd {remote_path_expr(rpath)} || exit 97; "
-            f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote(inner)}')
+            f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote("exec sh -c " + shlex.quote(inner))}')
 
 
 # Claude keeps running on the server when the connection drops. A small program

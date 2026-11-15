@@ -40,6 +40,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.24.1 2026-11-15  Chat on a server whose shell is zsh: "Claude stopped (exit 127)" —
+#                       claude in ~/.local/bin (added to PATH only in ~/.zshrc) was not
+#                       found. claude is now looked for in every usual place (~/.local/bin,
+#                       ~/.claude/local, npm, bun, volta, Homebrew, nvm, VS Code) with sh;
+#                       when it is really missing, the chat says so and how to install it.
 #    1.24.0 2026-11-15  Branches: the project's git branch shows next to its name; click it
 #                       (or the branch in the Git panel, or Search → "switch branch") to
 #                       switch, check out a branch that is only on GitHub, or create one.
@@ -179,7 +184,7 @@
 
 set -u -o pipefail
 
-VERSION="1.24.0"
+VERSION="1.24.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

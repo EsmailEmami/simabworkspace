@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.27.4 2026-11-15  Chat after an update / reopen: while it reconnects to Claude on the
+#                       server it says so ("reconnecting…") instead of looking dead, and when
+#                       Claude was in the middle of work the tab shows it working right away
+#                       ("Claude kept working on the server; following it again").
 #    1.27.3 2026-11-15  Project colours quieter: a thin line on top of tabs (full colour only on
 #                       the active one) and a faint frame round the work area, a little
 #                       clearer in the section you work in — no more loud coloured borders.
@@ -222,7 +226,7 @@
 
 set -u -o pipefail
 
-VERSION="1.27.3"
+VERSION="1.27.4"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

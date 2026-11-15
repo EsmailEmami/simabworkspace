@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.27.3"
+VERSION = "1.27.4"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1633,6 +1633,26 @@ def pid_alive(folder=None):
         return pid
     except (OSError, ValueError):
         return 0
+def claude_status(dpid):
+    """busy / idle of the Claude our daemon runs (Claude Code writes ~/.claude/sessions/<pid>.json)."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return ""
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            st = open("/proc/%s/stat" % n).read()
+            if int(st[st.rindex(")") + 2:].split()[1]) != dpid:
+                continue
+        except (OSError, ValueError, IndexError):
+            continue
+        try:
+            return str(json.load(open(os.path.expanduser("~/.claude/sessions/%s.json" % n))).get("status") or "")
+        except (OSError, ValueError):
+            return ""
+    return ""
 def write(n, text):
     try:
         with open(P(n + ".tmp"), "w") as f:
@@ -1776,7 +1796,8 @@ else:
 if off < 0 or off > size("out.log"):
     off = size("out.log")
 touch("seen")
-say({"type": "_sw_relay", "state": state, "off": off, "key": key})
+say({"type": "_sw_relay", "state": state, "off": off, "key": key,
+     "status": claude_status(pid) if state == "attached" else ""})
 
 def errors(pos):
     try:
@@ -2277,6 +2298,7 @@ class ChatSession:
             self.spec["relay"] = self.relay_key
         self.relay_off = -1 if built.get("relay_restored") else 0    # bytes of Claude's output read so far
         self.relay_on = False         # this connection goes through the relay
+        self.linking = False          # connecting to the relay; not known yet whether Claude still works
         self.relay_exit = None        # Claude's exit code, reported by the relay
         self.reconnecting = 0         # attempts since the connection dropped
         self.closed = False
@@ -2309,6 +2331,7 @@ class ChatSession:
             again = how == "attach"
             self.proc, self.exit_code = proc, None
             self.relay_on, self.relay_exit = False, None
+            self.linking = bool(self.relay_key)
             if not again:
                 self.busy = False
                 self.started = time.time()
@@ -2353,9 +2376,18 @@ class ChatSession:
                 self.on_change(self)
         if st in ("started", "attached") and self.session_id:
             self._write({"type": "_sw_relay_conv", "id": self.session_id})
+        was_linking, self.linking = self.linking, False
         if st == "exit":
             self.relay_exit = ev.get("code") if isinstance(ev.get("code"), int) else -1
+            self._broadcast({"t": "link", "linking": False, "busy": False})
             return
+        busy = st == "attached" and ev.get("status") == "busy"
+        if busy and not self.busy:
+            self.busy = True
+        if st == "attached" and was_linking and not self.reconnecting:
+            # the app was restarted / reopened while this Claude kept running on the server
+            self._log({"type": "_reattached", "busy": busy})
+        self._broadcast({"t": "link", "linking": False, "busy": self.busy})
         self.relay_on = True
         if self.reconnecting:
             self.reconnecting = 0
@@ -2378,6 +2410,9 @@ class ChatSession:
                 continue
             if raw.endswith(b"\n") and self.relay_off >= 0:
                 self.relay_off += len(raw)        # only whole lines: a cut-off one is read again next time
+            if self.linking:                      # no relay marker (no python3 on the server): Claude answers directly
+                self.linking = False
+                self._broadcast({"t": "link", "linking": False, "busy": self.busy})
             if isinstance(ev, dict):
                 self._handle_event(ev)
         code = proc.wait()
@@ -2499,7 +2534,7 @@ class ChatSession:
                     self.subs.discard(ws)
 
     def state(self) -> dict:
-        return {"busy": self.busy, "alive": self.alive, "code": self.exit_code, "mode": self.mode,
+        return {"busy": self.busy, "linking": self.linking, "alive": self.alive, "code": self.exit_code, "mode": self.mode,
                 "model": self.model, "effort": self.effort, "sessionId": self.session_id, "init": self.init}
 
     # websocket

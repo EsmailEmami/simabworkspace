@@ -497,6 +497,28 @@ const tests = {
     assert.ok(/\.hist\s*\{[^}]*min-height/.test(css), 'that class is the big History list');
   },
 
+  'reopened while Claude works: "reconnecting", then "working" — never a dead-looking "ready"'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen && ws.onopen();
+    feed({ t: 's', state: { alive: true, busy: false, linking: true }, events: [] });
+    assert.match(tab.stText.textContent, /reconnecting to Claude on the server/);
+    assert.notStrictEqual(tab.stText.textContent, 'ready');
+    // the relay answers: Claude is in the middle of work
+    feed({ t: 'link', linking: false, busy: true });
+    feed({ t: 'e', e: { type: '_reattached', busy: true } });
+    assert.ok(tab.busy);
+    assert.ok(tab.el.classList.contains('busy'), 'the tab shows it works');
+    assert.match(tab.stText.textContent, /working… \(picked up again\)/);
+    assert.ok(byClass(tab.msgs, 'sysline').some((l) => /kept working on the server; following it again/.test(l.textContent)));
+    // another tab: Claude was idle → plain "ready"
+    const b = newTab();
+    b.ws.onopen && b.ws.onopen();
+    b.feed({ t: 's', state: { alive: true, busy: false, linking: true }, events: [] });
+    b.feed({ t: 'link', linking: false, busy: false });
+    assert.strictEqual(b.tab.stText.textContent, 'ready');
+    assert.ok(!b.tab.busy);
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

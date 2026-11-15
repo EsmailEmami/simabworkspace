@@ -377,6 +377,7 @@
         } finally { self.replaying = false; }
         var st = m.state || {};
         if (Object.keys(self.perms).length) self.setPhase('wait', 'waiting for you');
+        else if (st.linking) self.setPhase('work', 'reconnecting to Claude on the server…');
         else if (st.busy) self.setPhase('work', 'working…');
         else if (!st.alive) self.setPhase('idle', 'not started — send a message');
         else self.setPhase('idle', 'ready');
@@ -386,6 +387,12 @@
         self.onEvent(m.e);
       } else if (m.t === 'u') {
         window.dispatchEvent(new CustomEvent('sw-usage'));
+      } else if (m.t === 'link') {
+        // the relay answered: Claude still runs (maybe in the middle of work) or it was started
+        self.setBusy(m.busy);
+        if (Object.keys(self.perms).length) self.setPhase('wait', 'waiting for you');
+        else if (m.busy) self.setPhase('work', 'working… (picked up again)');
+        else if (self.phaseKind === 'work' && /^reconnecting/.test(self.phaseText || '')) self.setPhase('idle', 'ready');
       } else if (m.t === 'busy') {
         self.setBusy(m.busy);
         if (!m.busy && self.phaseKind === 'work') self.setPhase('idle', 'ready');
@@ -726,6 +733,7 @@
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
       case '_restart': this.system('— restarted —', 'mark'); break;
+      case '_reattached': this.system(e.busy ? '— Claude kept working on the server; following it again —' : '— reconnected to the same Claude —', 'mark'); break;
       case '_reconnect': if (!this.replaying) this.system('Connection lost — Claude keeps working on the server. Reconnecting…', 'mark'); break;
       case '_reconnected': if (!this.replaying) this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'mark'); break;
       case '_exit':

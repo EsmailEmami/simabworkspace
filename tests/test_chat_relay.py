@@ -26,10 +26,14 @@ for line in sys.stdin:
     if m.get("type") == "control_request" and m["request"]["subtype"] == "initialize":
         out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"], "response": {"commands": []}}})
     elif m.get("type") == "user":
+        sess = os.path.expanduser("~/.claude/sessions")
+        os.makedirs(sess, exist_ok=True)
+        json.dump({"pid": os.getpid(), "sessionId": SID, "status": "busy"}, open(os.path.join(sess, "%d.json" % os.getpid()), "w"))
         out({"type": "system", "subtype": "init", "session_id": SID, "permissionMode": "default"})
         out({"type": "assistant", "message": {"id": "a", "content": [{"type": "text", "text": "step1"}]}, "session_id": SID})
         time.sleep(1.5)
         out({"type": "assistant", "message": {"id": "b", "content": [{"type": "text", "text": "step2"}]}, "session_id": SID})
+        json.dump({"pid": os.getpid(), "sessionId": SID, "status": "idle"}, open(os.path.join(sess, "%d.json" % os.getpid()), "w"))
         out({"type": "result", "subtype": "success", "session_id": SID})
 '''
 
@@ -159,6 +163,26 @@ class ChatRelay(unittest.TestCase):
         self.assertTrue(wait_for(lambda: s.init is not None))
         self.assertEqual(s.relay_key, "3333333333333333")
         self.assertEqual((self.home / ".cache/simabworkspace/chats/3333333333333333/conv").read_text(), sid)
+
+    def test_reopened_mid_answer_shows_it_is_still_working(self):
+        # the user's report: after an update / reopen the chat looked dead, then suddenly went on
+        s = self.make("4444444444444444")
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        self.assertFalse(s.linking)
+        s.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: "step1" in self.texts(s)))
+        s.shutdown()                                     # the app closes mid-answer
+        s2 = self.make("4444444444444444", restored=True)
+        self.addCleanup(s2.kill, True)
+        self.assertTrue(s2.state()["linking"] or any(e.get("type") == "_reattached" for e in s2.events),
+                        "until the relay answers, the chat says it is reconnecting")
+        self.assertTrue(wait_for(lambda: any(e.get("type") == "_reattached" for e in s2.events)))
+        re_ = next(e for e in s2.events if e.get("type") == "_reattached")
+        self.assertTrue(re_["busy"], "it knows Claude is in the middle of work")
+        self.assertTrue(s2.busy)
+        self.assertFalse(s2.state()["linking"])
+        self.assertTrue(wait_for(lambda: "step2" in self.texts(s2)))
+        self.assertTrue(wait_for(lambda: not s2.busy))   # and ready when it is done
 
     def test_attach_when_nothing_runs_reports_the_end(self):
         s = self.make("aaaaaaaaaaaaaaaa")

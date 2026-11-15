@@ -45,6 +45,8 @@ const state = {
   ]
 };
 let offline = false;
+const winOf = {};
+let fakeTabs = { sessions: [], windows: [], now: 0 };
 const fsTree = {
   '': [{ name: 'cheshmeh-web-app', dir: true, size: 0 }, { name: 'node_modules', dir: true, size: 0, ignored: true }, { name: 'README.md', dir: false, size: 12 }],
   'cheshmeh-web-app': [{ name: 'api', dir: true, size: 0 }, { name: 'web', dir: true, size: 0 }],
@@ -110,6 +112,8 @@ global.fetch = (url, opts) => {
     res = p.endsWith('.png') ? { path: p, size: 9, image: 'data:image/png;base64,AA==' } : { path: p, size: 12, text: 'line one\nسلام\n' };
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
+  else if (url === '/api/tabs') res = fakeTabs;
+  else if (/^\/api\/sessions\/[^/]+\/win$/.test(url)) { const id = url.split('/')[3]; winOf[id] = body.win; res = { id, title: 'moved ' + id, alive: true, exitCode: null, url: '', win: body.win, moved: 1e12, spec: { kind: 'shell', project: '', where: 'local' } }; }
   else if (url === '/api/sessions' && method === 'POST') {
     res = { id: 's' + (++seq), title: body.kind + ' ' + (body.project || 'home'), alive: true, exitCode: null, url: '',
       spec: Object.assign({ kind: body.kind, project: body.project || '', where: body.where || 'local', cmdId: body.cmdId || '' }, body.resume ? { resume: body.resume } : {}) };
@@ -550,6 +554,53 @@ const tests = {
     assert.strictEqual(global.SW.S.tabs.length, tabsBefore - 1);
     assert.strictEqual(q('.modal').length, 0);
     global.SW.closeTab(chat, true); await settle();
+  },
+
+  async 'extra windows: move a tab out, get it back, never twice'() {
+    const SW = global.SW, S = SW.S;
+    await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();
+    const tab = S.active, n = S.tabs.length;
+    const opened = [];
+    global.open = (url, name, feat) => { opened.push({ url, name, feat }); return {}; };
+    const wid = SW.moveToNewWindow(tab);
+    assert.ok(wid);
+    assert.strictEqual(opened.length, 1);
+    assert.match(opened[0].url, new RegExp('#t=testtoken&w=' + wid + '&take=' + tab.id + '$'));
+    assert.match(opened[0].feat, /popup=yes,width=\d+,height=\d+,left=\d+,top=\d+/);
+    assert.strictEqual(S.tabs.length, n - 1, 'gone from this window');
+    assert.ok(!calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/' + tab.id), 'not killed');
+    // the menu offers the other window
+    fakeTabs = { sessions: [], windows: [{ id: wid, n: 2 }], now: 0 };
+    await SW.syncTabs();
+    const t2 = S.tabs[0];
+    t2.el.dispatch('contextmenu', { clientX: 1, clientY: 1 });
+    const labels = q('button', document.body.querySelector('#menu-root')).map((b) => b.textContent.trim());
+    assert.ok(labels.indexOf('Move to new window') >= 0 && labels.indexOf('Move to window 2') >= 0, labels.join('|'));
+    document.body.querySelector('#menu-root').replaceChildren();
+    // while the move settles, the tab is not taken back
+    fakeTabs = { sessions: [{ id: tab.id, title: 'x', spec: { kind: 'shell', project: '', where: 'local' }, alive: true, win: '', moved: 1e12 }], windows: [], now: 0 };
+    await SW.syncTabs();
+    assert.ok(!S.tabs.some((t) => t.id === tab.id));
+    // a tab of a closed window comes back (moved after this window started); twice → still one tab
+    fakeTabs.sessions.push({ id: 'back1', title: 'back', spec: { kind: 'shell', project: '', where: 'local' }, alive: true, win: '', moved: 1e12 });
+    await SW.syncTabs(); await SW.syncTabs(); await settle();
+    assert.strictEqual(S.tabs.filter((t) => t.id === 'back1').length, 1);
+    // tabs of other windows and old tabs are left alone
+    fakeTabs.sessions.push({ id: 'old1', title: 'old', spec: { kind: 'shell', project: '', where: 'local' }, alive: true, win: '', moved: 0 });
+    await SW.syncTabs();
+    assert.ok(!S.tabs.some((t) => t.id === 'old1'));
+    // moved away by another window → let go here (without killing it)
+    fakeTabs.sessions[1].win = wid;
+    await SW.syncTabs(); await settle();
+    assert.ok(!S.tabs.some((t) => t.id === 'back1'));
+    assert.ok(!calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/back1'));
+    // Move to window N
+    await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();
+    const t3 = S.active;
+    await SW.moveToWindow(t3, wid); await settle();
+    assert.strictEqual(winOf[t3.id], wid);
+    assert.ok(!S.tabs.includes(t3));
+    fakeTabs = { sessions: [], windows: [], now: 0 };
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

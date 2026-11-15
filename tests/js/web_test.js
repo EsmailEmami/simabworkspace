@@ -8,6 +8,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 let document = install();
 global.location.protocol = 'https:';
 global.location.reload = () => { reloaded++; };
+let sessSeq = 0;
 let reloaded = 0;
 
 function skeleton() {
@@ -62,7 +63,7 @@ global.fetch = (url, opts) => {
       dirs: (tree[path] || []).map((n) => ({ name: n, git: n.startsWith('cheshmeh-') ? 'repo' : '', hidden: n[0] === '.', project: '' })) };
   } else if (url === '/api/manual') res = { project: body };
   else if (url === '/api/logout') res = { ok: true };
-  else if (url === '/api/sessions' && method === 'POST') res = { id: 's1', title: 'cheshmeh · server', alive: true, exitCode: null, url: '',
+  else if (url === '/api/sessions' && method === 'POST') res = { id: 's' + (++sessSeq), title: 'cheshmeh · server', alive: true, exitCode: null, url: '',
     spec: { kind: body.kind, project: body.project, where: body.where, cmdId: '' } };
   return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(res) });
 };

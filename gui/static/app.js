@@ -39,13 +39,20 @@
   // ------------------------------------------------------------------ token + api
   var token = '';
   var tm = location.hash.match(/t=([A-Za-z0-9_\-]+)/);
+  // extra windows (tabs moved to a second monitor): #w=<window id>&take=<tab ids to bring along>
+  var wm = location.hash.match(/[#&]w=([a-z0-9]{4,16})/);
+  var km = location.hash.match(/[#&]take=([a-f0-9,]+)/);
+  var WID = wm ? wm[1] : (sessionStorage.getItem('sw-win') || '');
+  var TAKE = km ? km[1].split(',').filter(Boolean) : [];
+  if (wm) sessionStorage.setItem('sw-win', WID);
   if (tm) {
     token = tm[1];
     sessionStorage.setItem('sw-token', token);
-    history.replaceState(null, '', location.pathname);
   } else {
     token = sessionStorage.getItem('sw-token') || '';
   }
+  if (tm || wm || km) history.replaceState(null, '', location.pathname);
+  function wkey(k) { return WID ? k + ':' + WID : k; }      // each window keeps its own layout
 
   function api(method, path, body) {
     var opts = { method: method, headers: { 'X-Token': token, 'X-SW': '1' }, credentials: 'same-origin' };
@@ -724,8 +731,9 @@
     this.tabs = [];
     this.active = null;
     this.tabsEl = h('div', { class: 'gtabs' });
-    this.tabsEl.addEventListener('dragover', function (e) { if (dragTab) e.preventDefault(); });
+    this.tabsEl.addEventListener('dragover', function (e) { if (dragTab || foreignDrag(e)) e.preventDefault(); });
     this.tabsEl.addEventListener('drop', function (e) {
+      if (e.target === g.tabsEl && foreignDrag(e)) { e.preventDefault(); takeDropped(e, g, null); return; }
       if (!dragTab || e.target !== g.tabsEl) return;
       e.preventDefault();
       moveTab(dragTab, g, g.tabs.length);
@@ -745,12 +753,13 @@
     this.el = h('div', { class: 'group' }, this.bar, this.panesEl, this.dropEl);
     this.el.addEventListener('mousedown', function () { if (L.focused !== g) focusGroup(g, true); }, true);
     this.el.addEventListener('dragover', function (e) {
-      if (!dragTab || g.bar.contains(e.target)) return;
+      if (!(dragTab || foreignDrag(e)) || g.bar.contains(e.target)) return;
       e.preventDefault();
       g.showDrop(dropZone(g, e));
     });
     this.el.addEventListener('dragleave', function (e) { if (!g.el.contains(e.relatedTarget)) g.showDrop(null); });
     this.el.addEventListener('drop', function (e) {
+      if (foreignDrag(e) && !g.bar.contains(e.target)) { e.preventDefault(); var fz = dropZone(g, e); g.showDrop(null); takeDropped(e, g, fz); return; }
       if (!dragTab || g.bar.contains(e.target)) return;
       e.preventDefault();
       var z = dropZone(g, e);
@@ -992,12 +1001,12 @@
       if (n.type === 'g') return { type: 'g', tabs: n.g.tabs.map(function (t) { return t.id; }), active: n.g.active ? n.g.active.id : null, focused: n.g === L.focused };
       return { type: 's', dir: n.dir, sizes: n.sizes.slice(), kids: n.kids.map(ser) };
     }
-    if (L.root) localStorage.setItem('sw-layout', JSON.stringify(ser(L.root)));
+    if (L.root) localStorage.setItem(wkey('sw-layout'), JSON.stringify(ser(L.root)));
   }, 300);
 
   function initLayout(sessionIds) {
     var saved = null;
-    try { saved = JSON.parse(localStorage.getItem('sw-layout') || 'null'); } catch (e) { saved = null; }
+    try { saved = JSON.parse(localStorage.getItem(wkey('sw-layout')) || 'null'); } catch (e) { saved = null; }
     var want = {};
     var focused = null;
     function build(n) {
@@ -1079,8 +1088,98 @@
       L.groups.length > 1 ? { label: 'Move to next section', action: function () {
         var i = L.groups.indexOf(tab.group);
         moveTab(tab, L.groups[(i + 1) % L.groups.length]);
-      } } : null
-    ];
+      } } : null,
+      '-',
+      { label: 'Move to new window', action: function () { moveToNewWindow(tab); } },
+      WID ? { label: 'Move to main window', action: function () { moveToWindow(tab, ''); } } : null
+    ].concat((S.windows || []).filter(function (w) { return w.id !== WID; }).map(function (w) {
+      return { label: 'Move to window ' + w.n, action: function () { moveToWindow(tab, w.id); } };
+    }));
+  }
+
+  // ------------------------------------------------------------------ extra windows (second monitor)
+  // Every window shows the tabs the server lists for it (win: '' = the main window). Moving a tab
+  // only changes that; each window then picks up / lets go of tabs (at once by BroadcastChannel,
+  // else on the next poll or when it gets focus).
+  var BC = null;
+  try { BC = window.BroadcastChannel ? new BroadcastChannel('sw-tabs') : null; } catch (e) { BC = null; }
+  if (BC) BC.onmessage = function () { syncTabs(); };
+  function tellWindows() { if (BC) try { BC.postMessage({ t: 'sync', from: WID }); } catch (e) { /* closed */ } }
+  var leaving = {};            // tab id -> time it left: do not take it back while the move settles
+
+  function newWid() { return Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, '') + 'w'; }
+
+  function windowUrl(wid, take) {
+    return location.pathname + '#' + (token ? 't=' + token + '&' : '') + 'w=' + wid + (take ? '&take=' + take : '');
+  }
+
+  function moveToNewWindow(tab, x, y) {
+    var wid = newWid();
+    var W = Math.max(640, window.outerWidth || 1200), H = Math.max(480, window.outerHeight || 800);
+    if (x === undefined) { x = (window.screenX || 0) + 60; y = (window.screenY || 0) + 60; }
+    var w = window.open(windowUrl(wid, tab.id), 'sw-' + wid,
+      'popup=yes,width=' + W + ',height=' + H + ',left=' + Math.round(x) + ',top=' + Math.round(y));
+    if (!w) { toast('The new window was blocked — allow pop-ups for this app and try again', 'err'); return null; }
+    leaving[tab.id] = Date.now();
+    removeTab(tab, false);
+    return wid;
+  }
+
+  function moveToWindow(tab, wid) {
+    return api('POST', 'sessions/' + tab.id + '/win', { win: wid }).then(function () {
+      leaving[tab.id] = Date.now();
+      removeTab(tab, false);
+      tellWindows();
+    }).catch(fail);
+  }
+
+  var syncing = false;
+  function syncTabs() {
+    if (syncing || !S.booted) return Promise.resolve();
+    syncing = true;
+    return api('GET', 'tabs').then(function (d) {
+      syncing = false;
+      S.windows = d.windows || [];
+      renderTitle();
+      var by = {};
+      (d.sessions || []).forEach(function (x) { by[x.id] = x; });
+      S.tabs.slice().forEach(function (t) {
+        var x = by[t.id];
+        if (x && (x.win || '') !== WID) removeTab(t, false);          // moved to another window
+      });
+      var now = Date.now();
+      (d.sessions || []).forEach(function (x) {
+        if ((x.win || '') !== WID || S.tabs.some(function (t) { return t.id === x.id; })) return;
+        if (leaving[x.id] && now - leaving[x.id] < 10000) return;
+        if (x.moved && x.moved >= S.bootNow) addTab(x, false);       // moved here (or back from a closed window)
+      });
+    }).catch(function () { syncing = false; });
+  }
+
+  function hasTabDrag(e) {
+    var ty = e.dataTransfer && e.dataTransfer.types;
+    return !!ty && Array.prototype.indexOf.call(ty, 'application/x-sw-tab') >= 0;
+  }
+  function foreignDrag(e) { return !dragTab && hasTabDrag(e); }
+
+  // a tab dragged in from another window: it becomes this window's
+  function takeDropped(e, g, zone, index) {
+    var sid = e.dataTransfer.getData('application/x-sw-tab');
+    if (!sid || S.tabs.some(function (t) { return t.id === sid; })) return Promise.resolve(null);
+    return api('POST', 'sessions/' + sid + '/win', { win: WID }).then(function (info) {
+      var target = zone && zone !== 'center' && !compact() ? splitGroup(g, zone, true) : g;
+      var t = addTab(info, false, target);
+      if (index !== undefined && index < target.tabs.length - 1) moveTab(t, target, index);
+      renderLayout();
+      tellWindows();
+      return t;
+    }).catch(function (er) { fail(er); return null; });
+  }
+
+  function outsideWindow(e) {
+    if (!e.screenX && !e.screenY) return false;            // some systems report nothing
+    var x0 = window.screenX || 0, y0 = window.screenY || 0;
+    return e.screenX < x0 || e.screenY < y0 || e.screenX > x0 + (window.outerWidth || 0) || e.screenY > y0 + (window.outerHeight || 0);
   }
 
   // ------------------------------------------------------------------ tab management
@@ -1108,9 +1207,18 @@
     saveLayout();
   }
 
-  function renderTitle() { document.title = (S.active ? S.active.info.title + ' — ' : '') + 'Simab Workspace'; }
+  function windowNumber() {
+    var w = WID && (S.windows || []).find(function (x) { return x.id === WID; });
+    return w ? w.n : 0;
+  }
+  function renderTitle() {
+    var n = windowNumber();
+    document.title = (S.active ? S.active.info.title + ' — ' : '') + 'Simab Workspace' + (n ? ' · window ' + n : '');
+  }
 
   function addTab(info, background, group) {
+    var had = S.tabs.find(function (t) { return t.id === info.id; });
+    if (had) return had;
     var tab = info.spec.kind === 'chat' ? new window.SWChat.ChatTab(info)
       : info.spec.kind === 'files' ? new window.SWFiles.FilesTab(info) : new Tab(info, estimateSize());
     var g = group || L.focused || L.groups[0];
@@ -1127,8 +1235,8 @@
     return tab;
   }
 
-  function closeTab(tab, force) {
-    var go = function () {
+  // Take a tab out of this window. kill: also end it on the server (else it lives on elsewhere).
+  function removeTab(tab, kill) {
       var i = S.tabs.indexOf(tab);
       if (i < 0) return;
       S.tabs.splice(i, 1);
@@ -1136,7 +1244,7 @@
       var gi = g.tabs.indexOf(tab);
       g.tabs.splice(gi, 1);
       tab.dispose();
-      if (!tab.gone) api('DELETE', 'sessions/' + tab.id).catch(function () {});
+      if (kill && !tab.gone) api('DELETE', 'sessions/' + tab.id).catch(function () {});
       if (g.active === tab) {
         g.active = null;
         var next = g.tabs[gi] || g.tabs[gi - 1];
@@ -1151,7 +1259,10 @@
       renderTitle();
       renderProjects();
       saveLayout();
-    };
+  }
+
+  function closeTab(tab, force) {
+    var go = function () { removeTab(tab, true); };
     // uploads/downloads keep going in the background (Mutagen does the copying), so closing is safe
     var safe = ['shell', 'sync-info', 'sync-monitor', 'add-local', 'add-server', 'git-sync-on'];
     var risky = tab.isFiles ? false : tab.isChat ? tab.busy : (tab.alive && !tab.gone && safe.indexOf(tab.info.spec.kind) < 0);
@@ -1182,7 +1293,7 @@
       }).length;
     }
     var sz = estimateSize();
-    return api('POST', 'sessions', Object.assign({}, spec, { cols: sz.cols, rows: sz.rows })).then(function (info) {
+    return api('POST', 'sessions', Object.assign({}, spec, { cols: sz.cols, rows: sz.rows }, WID ? { win: WID } : {})).then(function (info) {
       var t = addTab(info, opts.background);
       renderProjects();
       return t;
@@ -1234,16 +1345,22 @@
     el.addEventListener('dragstart', function (e) {
       dragTab = tab; el.classList.add('dragging');
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', tab.id);
+      e.dataTransfer.setData('application/x-sw-tab', tab.id);
       document.body.classList.add('dragging-tab');
     });
-    el.addEventListener('dragend', function () {
+    el.addEventListener('dragend', function (e) {
+      // dropped outside every window (on the desktop, the other monitor…): a new window, like VS Code
+      var dt = e && e.dataTransfer;
+      if (dt && dt.dropEffect === 'none' && outsideWindow(e) && !compact() && S.tabs.indexOf(tab) >= 0) {
+        moveToNewWindow(tab, e.screenX - 80, e.screenY - 20);
+      } else if (dt && dt.dropEffect === 'move') setTimeout(syncTabs, 400);      // maybe taken by another window
       el.classList.remove('dragging'); dragTab = null;
       document.body.classList.remove('dragging-tab');
       S.tabs.forEach(function (t) { t.el.classList.remove('drop-before', 'drop-after'); });
       L.groups.forEach(function (g) { g.showDrop(null); });
     });
     el.addEventListener('dragover', function (e) {
-      if (!dragTab || dragTab === tab) return;
+      if (!(dragTab || foreignDrag(e)) || dragTab === tab) return;
       e.preventDefault();
       var r = el.getBoundingClientRect();
       var after = e.clientX > r.left + r.width / 2;
@@ -1256,6 +1373,7 @@
       e.stopPropagation();
       var after = el.classList.contains('drop-after');
       el.classList.remove('drop-before', 'drop-after');
+      if (foreignDrag(e)) { takeDropped(e, tab.group, null, tab.group.tabs.indexOf(tab) + (after ? 1 : 0)); return; }
       if (!dragTab || dragTab === tab) return;
       var g = tab.group, t = dragTab;
       var idx = g.tabs.indexOf(tab) + (after ? 1 : 0);
@@ -2918,7 +3036,7 @@
 
   function setWorkMode(on) {
     document.body.classList.toggle('work-mode', on);
-    localStorage.setItem('sw-work', on ? '1' : '');
+    localStorage.setItem(wkey('sw-work'), on ? '1' : '0');
     fitAll();
     setTimeout(fitAll, 120);
   }
@@ -2992,7 +3110,8 @@
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
-    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog
+    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog,
+    moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
   };
 
   // ------------------------------------------------------------------ boot
@@ -3021,7 +3140,9 @@
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
     $('#st-ssh').addEventListener('click', function () { refreshStatus(true); });
     $('#proj-filter').addEventListener('input', function (e) { S.filter = e.target.value; renderProjects(); });
-    if (localStorage.getItem('sw-work')) setWorkMode(true);
+    // an extra window starts with the sidebar hidden: it is for the tabs
+    var wk = localStorage.getItem(wkey('sw-work'));
+    if (WID ? wk !== '0' : wk === '1') setWorkMode(true);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) { refreshProjects(); if (S.active) S.active.focus(); } });
     var asked = false;
     document.addEventListener('click', function () {
@@ -3029,6 +3150,33 @@
       asked = true;
       if (S.settings.bellNotify && window.Notification && Notification.permission === 'default') Notification.requestPermission();
     });
+  }
+
+  function startWindows(st) {
+    S.booted = true;
+    setInterval(syncTabs, 4000);
+    window.addEventListener('focus', function () { syncTabs(); });
+    if (WID) {
+      setInterval(function () { api('POST', 'windows/' + WID).catch(function () {}); }, 20000);
+      window.addEventListener('pagehide', function () {
+        // closing (or reloading): the server gives the tabs back to the main window unless we return
+        try {
+          fetch('/api/windows/' + WID, { method: 'DELETE', keepalive: true, credentials: 'same-origin', headers: { 'X-Token': token, 'X-SW': '1' } });
+        } catch (e) { /* closing anyway */ }
+        tellWindows();
+      });
+    } else {
+      // forget the saved layouts of extra windows that are gone
+      var alive = (st.windows || []).map(function (w) { return w.id; });
+      try {
+        var drop = [];
+        for (var i = 0; i < (localStorage.length || 0); i++) {
+          var k = localStorage.key(i), m = /^sw-(layout|work):([a-z0-9]+)$/.exec(k || '');
+          if (m && alive.indexOf(m[2]) < 0) drop.push(k);
+        }
+        drop.forEach(function (k) { localStorage.removeItem(k); });
+      } catch (e) { /* storage not available */ }
+    }
   }
 
   function boot() {
@@ -3045,7 +3193,10 @@
 
   function start() {
     wire();
-    api('GET', 'state').then(function (st) {
+    var take = TAKE.length ? Promise.all(TAKE.map(function (sid) {
+      return api('POST', 'sessions/' + sid + '/win', { win: WID }).catch(function () { return null; });
+    })) : WID ? api('POST', 'windows/' + WID).catch(function () {}) : Promise.resolve();
+    take.then(function () { return api('GET', 'state'); }).then(function (st) {
       S.web = !!st.web;
       document.body.classList.toggle('web', S.web);
       registerWorker();
@@ -3055,12 +3206,17 @@
       S.projectsKey = JSON.stringify(st.projects);
       S.wsl = st.wsl;
       S.home = st.home || '';
-      S.lastTabs = st.lastTabs;
+      S.lastTabs = WID ? [] : st.lastTabs;
       S.version = st.version;
+      S.windows = st.windows || [];
+      S.bootNow = st.now || 0;
+      document.body.classList.toggle('extra-window', !!WID);
       renderProjects();
       var want = sessionStorage.getItem('sw-active');
-      var placed = initLayout(st.sessions.map(function (x) { return x.id; }));
-      st.sessions.forEach(function (info) { addTab(info, true, placed[info.id] || L.focused); });
+      var mine = (st.sessions || []).filter(function (x) { return (x.win || '') === WID; });
+      if (TAKE.length) want = TAKE[0];
+      var placed = initLayout(mine.map(function (x) { return x.id; }));
+      mine.forEach(function (info) { addTab(info, true, placed[info.id] || L.focused); });
       L.groups.slice().forEach(function (g) { if (!g.tabs.length && L.groups.length > 1) removeGroup(g); });
       L.groups.forEach(function (g) {
         var a = g.tabs.find(function (x) { return x.id === g.wantActive; }) || g.tabs[0];
@@ -3072,6 +3228,7 @@
       var t = S.tabs.find(function (x) { return x.id === want; }) || (L.focused && L.focused.active) || S.tabs[0];
       if (t) activate(t); else renderEmpty();
       refreshStatus(true);
+      startWindows(st);
       // first run on a new machine: everything is set up in Settings
       if (!st.server.configured && !S.web) { toast('Welcome — set up this machine and your server here', 'ok', { timeout: 8000 }); settingsDialog(); }
       setInterval(refreshProjects, 5000);

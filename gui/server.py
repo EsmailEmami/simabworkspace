@@ -347,6 +347,9 @@ SETTING_CHOICES = {
 }
 SETTING_RANGES = {"fontSize": (9, 32), "scrollback": (1000, 100000), "port": (0, 65535)}
 WHERE = ("local", "server")
+WIN_RE = re.compile(r"[a-z0-9]{4,16}")
+WIN_TTL = 180          # an extra window that has not said hello for this long is gone (hidden windows tick slowly)
+WIN_GRACE = 6          # after "closing": seconds to come back (a reload) before its tabs go home
 
 
 class ApiError(Exception):
@@ -1294,6 +1297,9 @@ def _child_setup():
 
 
 class Session:
+    win = ""          # the window it is shown in ("" = the main window)
+    moved = 0.0       # when it last changed window
+
     def __init__(self, sid: str, built: dict, cols=120, rows=32, on_change=None):
         self.id = sid
         self.built = built
@@ -1505,7 +1511,7 @@ class Session:
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "spec": self.spec, "url": self.url,
                 "alive": self.alive, "exitCode": self.exit_code, "started": self.started,
-                "runs": self.runs}
+                "runs": self.runs, "win": self.win, "moved": self.moved}
 
 
 # ----------------------------------------------------------------------------- Claude chat (like the VS Code extension)
@@ -1939,6 +1945,8 @@ def with_dirs(files: list) -> list:
 
 
 class ChatSession:
+    win = ""
+    moved = 0.0
     """One Claude conversation shown as a chat panel."""
 
     def __init__(self, sid: str, built: dict, on_change=None):
@@ -2361,7 +2369,8 @@ class ChatSession:
 
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "spec": self.spec, "url": "",
-                "alive": self.alive, "exitCode": self.exit_code, "started": self.started, "runs": self.runs}
+                "alive": self.alive, "exitCode": self.exit_code, "started": self.started, "runs": self.runs,
+                "win": self.win, "moved": self.moved}
 
 
 def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> dict:
@@ -2786,6 +2795,8 @@ def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
 
 class FilesSession:
     """A Files tab: no process, it only keeps its place among the tabs (and after a restart)."""
+    win = ""
+    moved = 0.0
 
     def __init__(self, sid: str, project: str, title: str = ""):
         self.id = sid
@@ -2797,7 +2808,8 @@ class FilesSession:
 
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "spec": self.spec, "url": "",
-                "alive": True, "exitCode": None, "started": self.started, "runs": 1}
+                "alive": True, "exitCode": None, "started": self.started, "runs": 1,
+                "win": self.win, "moved": self.moved}
 
     def attach(self, ws):
         raise WebSocketClosed()
@@ -3541,6 +3553,7 @@ class App:
         self.token = tok if re.fullmatch(r"[A-Za-z0-9_-]{20,64}", tok or "") else secrets.token_urlsafe(24)
         self.port = 0
         self.sessions = {}            # id -> Session (insertion order = tab order)
+        self.windows = {}             # extra windows: id -> {"seen": time, "n": number shown to the user}
         self.lock = threading.RLock()
         self._projects_cache = (0.0, [])
         self._status = {"ssh": "unknown", "sshError": "", "daemon": False, "checked": 0.0}
@@ -3605,6 +3618,14 @@ class App:
     # sessions
     def create_session(self, body: dict) -> dict:
         body = body if isinstance(body, dict) else {}
+        wid = self._win_id(body.get("win"))
+        info = self._create_session(body)
+        if wid:
+            self.set_window(info["id"], wid)
+            info = self.get(info["id"]).info()
+        return info
+
+    def _create_session(self, body: dict) -> dict:
         sid = secrets.token_hex(6)
         if body.get("kind") == "chat":
             built = build_chat(body, self.conf, self.store, self.projects(max_age=10))
@@ -3670,6 +3691,61 @@ class App:
             self.sessions[sid] = s
         self._remember()
         return s.info()
+
+    # extra windows (tabs moved out to a second monitor) ---------------------------
+    def _win_id(self, wid) -> str:
+        if wid in ("", None):
+            return ""
+        if not isinstance(wid, str) or not WIN_RE.fullmatch(wid):
+            raise ApiError(400, "bad window")
+        return wid
+
+    def window_seen(self, wid: str):
+        wid = self._win_id(wid)
+        if not wid:
+            return
+        with self.lock:
+            w = self.windows.get(wid)
+            if w:
+                w["seen"] = time.time()
+            else:
+                used = {x["n"] for x in self.windows.values()}
+                n = 2
+                while n in used:
+                    n += 1
+                self.windows[wid] = {"seen": time.time(), "n": n}
+
+    def window_closed(self, wid: str):
+        """The window is closing — or reloading: its tabs go back to the main window
+        unless it says hello again within a few seconds."""
+        wid = self._win_id(wid)
+        with self.lock:
+            w = self.windows.get(wid)
+            if w:
+                w["seen"] = min(w["seen"], time.time() - WIN_TTL + WIN_GRACE)
+
+    def live_windows(self) -> list:
+        """Forget windows that stopped answering; their tabs return to the main window."""
+        now = time.time()
+        with self.lock:
+            for wid, w in list(self.windows.items()):
+                if now - w["seen"] > WIN_TTL:
+                    del self.windows[wid]
+            for s in self.sessions.values():
+                if s.win and s.win not in self.windows:
+                    s.win, s.moved = "", now
+            return sorted(({"id": k, "n": v["n"]} for k, v in self.windows.items()), key=lambda x: x["n"])
+
+    def set_window(self, sid: str, wid) -> dict:
+        s = self.get(sid)
+        wid = self._win_id(wid)
+        self.window_seen(wid)
+        s.win, s.moved = wid, time.time()
+        return s.info()
+
+    def tabs(self) -> dict:
+        wins = self.live_windows()
+        return {"sessions": [s.info() for s in self.sessions.values()], "windows": wins, "now": time.time()}
 
     def get(self, sid: str) -> Session:
         s = self.sessions.get(sid)
@@ -4504,7 +4580,8 @@ class App:
         return {"ok": True}
 
     def state(self) -> dict:
-        return {"version": VERSION, "server": self.conf.to_dict(), "settings": self.store.settings,
+        windows = self.live_windows()
+        return {"version": VERSION, "windows": windows, "now": time.time(), "server": self.conf.to_dict(), "settings": self.store.settings,
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
                 "lastTabs": self.store.data.get("lastTabs") or [], "wsl": False if self.web else is_wsl(),
                 "platform": sys.platform, "web": self.web, "home": "" if self.web else os.path.expanduser("~")}
@@ -5137,9 +5214,19 @@ class Handler(BaseHTTPRequestHandler):
                 return s.info()
             if act == "rename":
                 return app.rename(parts[1], self._body().get("title"))
+            if act == "win":
+                return app.set_window(parts[1], self._body().get("win"))
             raise ApiError(404, "not found")
         if route == ("DELETE", "sessions") and len(parts) == 2:
             app.close_session(parts[1])
+            return {"ok": True}
+        if route == ("GET", "tabs"):
+            return app.tabs()
+        if route == ("POST", "windows") and len(parts) == 2:
+            app.window_seen(parts[1])
+            return {"ok": True}
+        if route == ("DELETE", "windows") and len(parts) == 2:
+            app.window_closed(parts[1])
             return {"ok": True}
         if route == ("POST", "order"):
             app.order(self._body().get("ids"))

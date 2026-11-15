@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.26.2"
+VERSION = "1.27.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2152,6 +2152,53 @@ print(json.dumps({"path": p, "parent": os.path.dirname(p) if p != "/" else "", "
 '''
 
 FILE_LIMIT = 30000
+
+# The server's load right now: CPU (two samples 0.3 s apart), memory, the disk of the home
+# folder. "top": also the processes using the most CPU / memory. Linux (/proc) only.
+SERVER_STATS_PY = r'''
+import os, sys, json, time, subprocess
+def cpu():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    idle = v[3] + (v[4] if len(v) > 4 else 0)
+    return sum(v), idle
+try:
+    t1, i1 = cpu(); time.sleep(0.3); t2, i2 = cpu()
+    mem = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, _, rest = line.partition(":")
+            mem[k] = int(rest.split()[0]) * 1024
+except (OSError, ValueError, IndexError):
+    print(json.dumps({"error": "not available on this server"})); sys.exit()
+home = os.path.expanduser("~")
+st = os.statvfs(home)
+total, avail = st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+used = total - st.f_bfree * st.f_frsize
+out = {"cpu": round(100.0 * (1 - (i2 - i1) / float(t2 - t1)), 1) if t2 > t1 else 0.0,
+       "cores": os.cpu_count() or 1, "load": [round(x, 2) for x in os.getloadavg()],
+       "memTotal": mem.get("MemTotal", 0), "memUsed": mem.get("MemTotal", 0) - mem.get("MemAvailable", mem.get("MemFree", 0)),
+       "swapTotal": mem.get("SwapTotal", 0), "swapUsed": mem.get("SwapTotal", 0) - mem.get("SwapFree", 0),
+       "diskTotal": total, "diskUsed": used, "diskFree": avail, "diskPath": home}
+if len(sys.argv) > 1 and sys.argv[1] == "top":
+    def top(key):
+        try:
+            pr = subprocess.Popen(["ps", "-eo", "pid,user,pcpu,pmem,rss,comm", "--sort=-" + key, "--no-headers"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            text = pr.communicate(timeout=10)[0]
+        except (OSError, subprocess.SubprocessError):
+            return []
+        rows = []
+        for line in text.splitlines():
+            p = line.split(None, 5)
+            if len(rows) >= 8:
+                break
+            if len(p) == 6 and int(p[0]) not in (pr.pid, os.getpid()):
+                rows.append({"pid": int(p[0]), "user": p[1], "cpu": float(p[2]), "mem": float(p[3]), "rss": int(p[4]) * 1024, "name": p[5][:60]})
+        return rows
+    out["topCpu"], out["topMem"] = top("pcpu"), top("rss")
+print(json.dumps(out))
+'''
 
 # One folder on the server, for completing paths typed in the chat (~/… or /…): the files of
 # the SSH user, like a shell would complete them.
@@ -4463,6 +4510,23 @@ class App:
                         "mtime": int(mt) if mt.isdigit() else 0, "project": synced.get(path, "")})
         return out
 
+    def server_stats(self, top=False) -> dict:
+        """CPU / memory / disk of the server (cached 3 s: every window asks)."""
+        cache = self.__dict__.setdefault("_stats", {"t": 0.0, "data": None})
+        if not top and cache["data"] is not None and time.time() - cache["t"] < 3:
+            return cache["data"]
+        if not self.conf.configured:
+            return {"error": "the server is not configured"}
+        try:
+            r = remote_python(self.conf, SERVER_STATS_PY, ["top"] if top else [],
+                              multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=20) or {}
+        except ApiError as e:
+            r = {"error": e.message}
+        r["t"] = time.time()
+        if not top:
+            cache["t"], cache["data"] = time.time(), r
+        return r
+
     def server_ls(self, path, project: str = "") -> dict:
         """The entries of one folder on the server (files too) — path completion in the chat."""
         path = clean_str(path, 2000, "path") or "~/"
@@ -5997,6 +6061,8 @@ class Handler(BaseHTTPRequestHandler):
             if self._body().get("confirm") != "uninstall":
                 raise ApiError(400, "type uninstall to confirm")
             return app.uninstall()
+        if route == ("GET", "server-stats"):
+            return app.server_stats(top=query.get("top") == ["1"])
         if route == ("GET", "server-ls"):
             return app.server_ls((query.get("path") or [""])[0], (query.get("project") or [""])[0])
         if route == ("GET", "browse"):

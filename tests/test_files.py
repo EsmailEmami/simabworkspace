@@ -142,5 +142,33 @@ class ServerPathCompletion(base.TmpHome):
                 app.server_ls("~/x", project="no-such-project")
 
 
+class ServerStats(base.TmpHome):
+    @unittest.skipUnless(os.path.exists("/proc/stat"), "Linux only")
+    def test_real_numbers_and_a_short_cache(self):
+        r = subprocess.run([sys.executable, "-c", sw.SERVER_STATS_PY, "top"], capture_output=True, text=True, timeout=30)
+        d = json.loads(r.stdout)
+        self.assertTrue(0 <= d["cpu"] <= 100)
+        self.assertTrue(0 < d["memUsed"] < d["memTotal"])
+        self.assertTrue(0 < d["diskUsed"] <= d["diskTotal"])
+        self.assertGreaterEqual(d["cores"], 1)
+        self.assertTrue(d["topCpu"] and d["topMem"])
+        self.assertNotIn("ps", [x["name"] for x in d["topCpu"] if x["pid"] == 0])
+        app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        calls = []
+
+        def fake(conf, code, args, multiplex=True, timeout=30):
+            calls.append(args)
+            return {"cpu": 5.0}
+        with mock.patch.object(sw, "remote_python", side_effect=fake):
+            self.assertEqual(app.server_stats()["cpu"], 5.0)
+            app.server_stats()
+            self.assertEqual(len(calls), 1, "every window asks: one read per few seconds")
+            app.server_stats(top=True)
+            self.assertEqual(calls[-1], ["top"])
+        with mock.patch.object(sw, "remote_python", side_effect=sw.ApiError(502, "down")):
+            app._stats["t"] = 0
+            self.assertEqual(app.server_stats()["error"], "down")
+
+
 if __name__ == "__main__":
     unittest.main()

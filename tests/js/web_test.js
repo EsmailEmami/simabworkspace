@@ -13,7 +13,7 @@ let reloaded = 0;
 
 function skeleton() {
   ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-    'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync',
+    'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync',
     'empty-hint', 'empty-actions'].forEach((id) => {
     const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
     el.setAttribute('id', id);

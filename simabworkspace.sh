@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.27.0 2026-11-15  Sidebar: the server's load right now — CPU, RAM and disk meters above
+#                       the Claude usage (orange/red when high). Click: details and the
+#                       processes using the most CPU and memory.
 #    1.26.2 2026-11-15  Chat: type ~/ or /home/… and the server's folders and files are
 #                       offered like @ (go into folders, pick a file). Project ⋯: Copy server
 #                       path (~ written out in full) and Copy local path.
@@ -210,7 +213,7 @@
 
 set -u -o pipefail
 
-VERSION="1.26.2"
+VERSION="1.27.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

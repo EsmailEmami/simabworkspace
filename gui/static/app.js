@@ -3121,6 +3121,62 @@
     }
   }
 
+  // ------------------------------------------------------------------ server load (CPU, memory, disk)
+  function gb(b) { return b >= 1e12 ? (b / 1e12).toFixed(1) + ' TB' : b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB'; }
+  function statMeter(label, p, title) {
+    p = Math.max(0, Math.min(100, Math.round(p)));
+    return h('span', { class: 'um' + (p >= 90 ? ' err' : p >= 75 ? ' warn' : ''), title: title },
+      h('span', { class: 'ul' }, label), h('span', { class: 'ub' }, h('i', { style: 'width:' + p + '%' })), h('span', { class: 'up' }, p + '%'));
+  }
+  function renderStats() {
+    var el = $('#server-stats'), d = S.stats;
+    if (!el) return;
+    if (!d || d.error || !d.memTotal) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    var mem = 100 * d.memUsed / d.memTotal, disk = d.diskTotal ? 100 * d.diskUsed / d.diskTotal : 0;
+    el.title = 'Server now — CPU ' + d.cpu + '% of ' + d.cores + ' cores (load ' + d.load.join(' ') + ')\n' +
+      'Memory ' + gb(d.memUsed) + ' of ' + gb(d.memTotal) + '\nDisk ' + gb(d.diskUsed) + ' of ' + gb(d.diskTotal) + ' (' + gb(d.diskFree) + ' free)\nclick for details';
+    el.replaceChildren(statMeter('cpu', d.cpu), statMeter('ram', mem), statMeter('disk', disk));
+  }
+  function refreshStats() {
+    if (!serverReady() || document.hidden) return Promise.resolve();
+    return api('GET', 'server-stats').then(function (d) { S.stats = d; renderStats(); }).catch(function () {});
+  }
+  function statsDialog() {
+    var body = h('div', null, h('div', { class: 'muted' }, 'Reading the server…'));
+    var timer = null;
+    function procTable(rows, by) {
+      return h('table', { class: 'ptable' },
+        h('tr', null, h('th', null, 'process'), h('th', null, 'user'), h('th', { class: 'n' }, 'cpu*'), h('th', { class: 'n' }, 'memory')),
+        rows.map(function (r) {
+          return h('tr', null, h('td', { class: 'mono' }, r.name), h('td', { class: 'muted' }, r.user),
+            h('td', { class: 'n' + (by === 'cpu' ? ' b' : '') }, r.cpu.toFixed(1) + '%'), h('td', { class: 'n' + (by === 'mem' ? ' b' : '') }, gb(r.rss)));
+        }));
+    }
+    function big(label, p, text) {
+      p = Math.max(0, Math.min(100, Math.round(p)));
+      return h('div', { class: 'ubig' + (p >= 90 ? ' err' : p >= 75 ? ' warn' : '') },
+        h('div', { class: 'uhead' }, h('b', null, label), h('span', { class: 'muted' }, text)),
+        h('div', { class: 'ub' }, h('i', { style: 'width:' + p + '%' })));
+    }
+    function load() {
+      api('GET', 'server-stats?top=1').then(function (d) {
+        if (d.error) { body.replaceChildren(h('div', { class: 'muted' }, d.error)); return; }
+        S.stats = d; renderStats();
+        body.replaceChildren(
+          big('CPU', d.cpu, d.cpu + '% of ' + d.cores + ' cores · load ' + d.load.join(' ')),
+          big('Memory', 100 * d.memUsed / d.memTotal, gb(d.memUsed) + ' of ' + gb(d.memTotal) + (d.swapUsed > 1e8 ? ' · swap ' + gb(d.swapUsed) : '')),
+          big('Disk', d.diskTotal ? 100 * d.diskUsed / d.diskTotal : 0, gb(d.diskUsed) + ' of ' + gb(d.diskTotal) + ' · ' + gb(d.diskFree) + ' free · ' + d.diskPath),
+          h('div', { class: 'sec' }, 'Most CPU'), procTable(d.topCpu || [], 'cpu'),
+          h('div', { class: 'sec' }, 'Most memory'), procTable(d.topMem || [], 'mem'),
+          h('div', { class: 'muted', style: 'font-size:11px;margin-top:6px' }, '* cpu of a process: its average since it started (100% = one core).'));
+      }).catch(function (e) { body.replaceChildren(h('div', { class: 'muted' }, e.message)); });
+    }
+    openModal({ title: 'Server — ' + (S.server && S.server.host || ''), body: body, onclose: function () { clearInterval(timer); } });
+    load();
+    timer = setInterval(load, 4000);
+  }
+
   function refreshUsage() {
     return api('GET', 'usage').then(function (u) { S.usage = u; renderUsage(); }).catch(function () {});
   }
@@ -3514,6 +3570,7 @@
     $('#btn-palette').addEventListener('click', openPalette);
     $('#update-note').addEventListener('click', updateDialog);
     $('#usage').addEventListener('click', usageDialog);
+    $('#server-stats').addEventListener('click', statsDialog);
     $('#btn-usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     $('#btn-settings').addEventListener('click', function (e) {
@@ -3645,6 +3702,8 @@
       if (!S.web) { refreshTunnels(); setInterval(refreshTunnels, 5000); }
       refreshUsage();
       setInterval(refreshUsage, 30000);
+      refreshStats();
+      setInterval(refreshStats, 5000);
       window.addEventListener('sw-usage', debounce(refreshUsage, 500));
     }).catch(function (e) {
       if (e.status === 401 && S.web) return;          // the sign-in page is shown

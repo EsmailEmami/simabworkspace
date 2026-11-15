@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -115,6 +115,9 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tabs') res = fakeTabs;
+  else if (url.startsWith('/api/server-stats')) res = Object.assign({ cpu: 92.4, cores: 8, load: [7.1, 5, 3], memTotal: 16e9, memUsed: 12.4e9, swapTotal: 0, swapUsed: 0,
+    diskTotal: 500e9, diskUsed: 120e9, diskFree: 380e9, diskPath: '/home/esi' }, url.indexOf('top=1') > 0 ? {
+    topCpu: [{ pid: 1, user: 'esi', cpu: 180.5, mem: 2, rss: 800e6, name: 'node' }], topMem: [{ pid: 2, user: 'esi', cpu: 3, mem: 30, rss: 4.8e9, name: 'postgres' }] } : {});
   else if (url.startsWith('/api/claude-running/stop')) { fakeRunning.cheshmeh = fakeRunning.cheshmeh.filter((x) => x.pid !== body.pid); res = { ok: true, running: fakeRunning.cheshmeh }; }
   else if (url.startsWith('/api/claude-running')) res = { projects: fakeRunning, t: 0 };
   else if (url.startsWith('/api/claude-sessions/cheshmeh')) res = { sessions: [
@@ -792,6 +795,22 @@ const tests = {
     q('button', tab.watchBar).find((b) => b.textContent === 'Continue here').click(); await settle();
     const c2 = calls.filter((c) => c.url === '/api/sessions').pop();
     assert.deepStrictEqual([c2.body.resume, !!c2.body.watch], [CONV_VS, false]);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'server load: cpu, ram and disk above Claude usage; details with the busiest processes'() {
+    await new Promise((r) => setTimeout(r, 5200)); await settle();          // polled every 5 s
+    const el = document.body.querySelector('#server-stats');
+    assert.ok(!el.classList.contains('hidden'));
+    const ms = q('.um', el);
+    assert.deepStrictEqual(ms.map((m) => [m.querySelector('.ul').textContent, m.querySelector('.up').textContent]), [['cpu', '92%'], ['ram', '78%'], ['disk', '24%']]);
+    assert.ok(ms[0].classList.contains('err') && ms[1].classList.contains('warn') && !ms[2].classList.contains('warn'));
+    assert.match(el.title, /Memory 12\.4 GB of 16\.0 GB/);
+    el.click(); await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /8 cores/);
+    assert.match(modal.textContent, /postgres/);
+    assert.match(modal.textContent, /4\.8 GB/);
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

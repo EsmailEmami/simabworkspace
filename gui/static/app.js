@@ -1566,6 +1566,22 @@
     api('POST', 'editor', { project: p.name, where: where }).then(function () { toast('Opening VS Code…', 'ok'); }).catch(fail);
   }
 
+  function copyText(t) {
+    if (!t) return;
+    navigator.clipboard.writeText(t).then(function () { toast('Copied ' + t, 'ok'); }).catch(fail);
+  }
+  // the server folder in full (~ becomes the real home on the server)
+  function copyServerPath(p) {
+    var r = p.remote || '';
+    if (r !== '~' && r.indexOf('~/') !== 0) { copyText(r); return; }
+    var done = function (home) { copyText(home ? home + r.slice(1) : r); };
+    if (S.serverHome) { done(S.serverHome); return; }
+    api('GET', 'server-ls?path=' + encodeURIComponent('~/') + '&project=' + encodeURIComponent(p.name)).then(function (d) {
+      S.serverHome = d.home || '';
+      done(S.serverHome);
+    }).catch(function () { done(''); });
+  }
+
   function openFolder(p) {
     api('POST', 'open-folder/' + encodeURIComponent(p.name)).then(function (d) { toast('Opened ' + d.path, 'ok'); }).catch(fail);
   }
@@ -1617,7 +1633,7 @@
   // In the web version the things that need your own computer stay visible but disabled,
   // so people know the installed app has them.
   var APP_ONLY = 'Only in the installed app (on your computer)';
-  var WEB_HIDDEN = ['Local terminal', 'Open folder', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
+  var WEB_HIDDEN = ['Local terminal', 'Open folder', 'Copy local path', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
   function webItems(items) {
     if (!S.web) return items;
     return items.map(function (it) {
@@ -1650,6 +1666,8 @@
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
       { label: 'Open folder', k: p.localExists ? '' : 'not synced', disabled: !p.localExists, action: function () { openFolder(p); } },
+      { label: 'Copy server path', disabled: !r, action: function () { copyServerPath(p); } },
+      { label: 'Copy local path', disabled: !p.localExists, action: function () { copyText(fullLocal(p.local)); } },
       '-',
       { label: 'Git…', action: function () { gitDialog(p); } },
       { label: 'Docker containers…', disabled: !r, k: dockerCount(p.name), action: function () { dockerDialog(p); } },

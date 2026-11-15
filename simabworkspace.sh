@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.26.2 2026-11-15  Chat: type ~/ or /home/… and the server's folders and files are
+#                       offered like @ (go into folders, pick a file). Project ⋯: Copy server
+#                       path (~ written out in full) and Copy local path.
 #    1.26.1 2026-11-15  Tabs: when Claude is done the tab no longer keeps blinking — a steady
 #                       green dot until you look; blinking only while Claude waits for you,
 #                       and it stops once answered; a chat you can see is never marked.
@@ -207,7 +210,7 @@
 
 set -u -o pipefail
 
-VERSION="1.26.1"
+VERSION="1.26.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

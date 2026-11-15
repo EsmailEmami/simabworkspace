@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.26.1"
+VERSION = "1.26.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2152,6 +2152,29 @@ print(json.dumps({"path": p, "parent": os.path.dirname(p) if p != "/" else "", "
 '''
 
 FILE_LIMIT = 30000
+
+# One folder on the server, for completing paths typed in the chat (~/… or /…): the files of
+# the SSH user, like a shell would complete them.
+SERVER_LS_PY = r'''
+import os, sys, json
+raw = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "~/"
+p = os.path.expanduser(raw)
+if not p.endswith("/"):
+    p = os.path.dirname(p) + "/"
+try:
+    names = os.listdir(p)
+except OSError as e:
+    print(json.dumps({"error": e.strerror or str(e), "home": os.path.expanduser("~")})); sys.exit()
+out = []
+for n in names[:3000]:
+    try:
+        d = os.path.isdir(os.path.join(p, n))
+    except OSError:
+        d = False
+    out.append({"name": n, "dir": d})
+out.sort(key=lambda x: (not x["dir"], x["name"].startswith("."), x["name"].lower()))
+print(json.dumps({"path": raw, "home": os.path.expanduser("~"), "entries": out, "more": len(names) > 3000}))
+'''
 
 
 def local_files(root: str) -> list:
@@ -4440,6 +4463,19 @@ class App:
                         "mtime": int(mt) if mt.isdigit() else 0, "project": synced.get(path, "")})
         return out
 
+    def server_ls(self, path, project: str = "") -> dict:
+        """The entries of one folder on the server (files too) — path completion in the chat."""
+        path = clean_str(path, 2000, "path") or "~/"
+        if "\0" in path:
+            raise ApiError(400, "bad path")
+        conf = self._project_conf(self._project(project)) if project else self.conf
+        if not conf.configured:
+            raise ApiError(400, "the server is not configured")
+        r = remote_python(conf, SERVER_LS_PY, [path], multiplex=bool(self.store.settings.get("sshMultiplex"))) or {}
+        if r.get("error"):
+            raise ApiError(400, str(r["error"])[:300])
+        return r
+
     def browse(self, path) -> dict:
         """Folders inside one folder on the server — for picking a project folder."""
         path = clean_str(path, 1000, "folder") or "~"
@@ -5961,6 +5997,8 @@ class Handler(BaseHTTPRequestHandler):
             if self._body().get("confirm") != "uninstall":
                 raise ApiError(400, "type uninstall to confirm")
             return app.uninstall()
+        if route == ("GET", "server-ls"):
+            return app.server_ls((query.get("path") or [""])[0], (query.get("project") or [""])[0])
         if route == ("GET", "browse"):
             return app.browse((query.get("path") or [""])[0])
         if route == ("GET", "server-folders"):

@@ -119,5 +119,28 @@ class FilesTree(base.TmpHome):
             sw.fs_call(self.app, dict(self.p, local="", localExists=False), "list", "")
 
 
+class ServerPathCompletion(base.TmpHome):
+    def test_lists_one_server_folder_dirs_first(self):
+        home = Path(self.tmp.name) / "h"
+        (home / "my projects" / "shop").mkdir(parents=True)
+        (home / ".ssh").mkdir()
+        (home / "a.txt").write_text("x")
+        app = sw.App(self.store, sw.ServerConf("esi", "h"))
+
+        def local(conf, code, args, multiplex=True, timeout=30):
+            r = subprocess.run([sys.executable, "-c", code] + args, capture_output=True, text=True,
+                               env=dict(os.environ, HOME=str(home)))
+            return json.loads(r.stdout)
+        with mock.patch.object(sw, "remote_python", side_effect=local):
+            d = app.server_ls("~/")
+            self.assertEqual(d["home"], str(home))
+            self.assertEqual([(e["name"], e["dir"]) for e in d["entries"]], [("my projects", True), (".ssh", True), ("a.txt", False)])
+            self.assertEqual([e["name"] for e in app.server_ls("~/my projects/sh")["entries"]], ["shop"])
+            with self.assertRaises(sw.ApiError):
+                app.server_ls("~/nope/")
+            with self.assertRaises(sw.ApiError):
+                app.server_ls("~/x", project="no-such-project")
+
+
 if __name__ == "__main__":
     unittest.main()

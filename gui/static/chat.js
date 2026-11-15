@@ -1115,7 +1115,7 @@
   P.key = function (e) {
     if (e.isComposing) return;
     if (SW.isGlobalShortcut(e)) return;
-    var popup = !this.slashEl.classList.contains('hidden') && (this.slashItems || []).some(function (x) { return x.kind === 'cmd' || x.kind === 'file'; });
+    var popup = !this.slashEl.classList.contains('hidden') && (this.slashItems || []).some(function (x) { return x.kind === 'cmd' || x.kind === 'file' || x.kind === 'path'; });
     if (popup && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
       var n = this.slashItems.length;
@@ -1168,12 +1168,26 @@
   P.slashPopup = function () {
     var self = this;
     var v = this.ta.value, pos = this.ta.selectionStart;
-    var items = null;
+    var items = null, pt;
     var sm = v.match(/^\/([\w:-]*)$/);
     if (sm && this.commands.length) {
       var q = sm[1].toLowerCase();
       items = this.commands.filter(function (c) { return c.name.toLowerCase().indexOf(q) === 0; }).slice(0, 12)
         .map(function (c) { return { kind: 'cmd', c: c }; });
+    } else if ((pt = this.pathToken(v, pos))) {
+      // a path on the server: ~/… or /… — the SSH user's files, like @ for the project
+      this.mentionStart = pos - pt.length;
+      var dir = pt.slice(0, pt.lastIndexOf('/') + 1), pre = pt.slice(dir.length);
+      var list = this.serverDir(dir);
+      if (!list) items = [{ kind: 'loading', text: 'loading ' + dir + '…' }];
+      else if (list.error) items = [{ kind: 'none', text: list.error }];
+      else {
+        var pl = pre.toLowerCase();
+        var ents = list.entries.filter(function (e) { return (pre[0] === '.' || e.name[0] !== '.') && e.name.toLowerCase().indexOf(pl) >= 0; });
+        ents.sort(function (a, b) { return (b.name.toLowerCase().indexOf(pl) === 0) - (a.name.toLowerCase().indexOf(pl) === 0) || (b.dir - a.dir); });
+        items = ents.slice(0, 60).map(function (e) { return { kind: 'path', path: dir + e.name + (e.dir ? '/' : ''), name: e.name + (e.dir ? '/' : '') }; });
+        if (!items.length) items = [{ kind: 'none' }];
+      }
     } else {
       var mm = v.slice(0, pos).match(/(^|\s)@([^\s@]*)$/);
       if (mm && this.info.spec.project) {
@@ -1187,8 +1201,12 @@
     this.slashItems = items;
     this.slashSel = 0;
     this.slashEl.replaceChildren.apply(this.slashEl, items.map(function (it, i) {
-      if (it.kind === 'loading') return h('div', { class: 'sl muted' }, 'loading files…');
-      if (it.kind === 'none') return h('div', { class: 'sl muted' }, 'no match');
+      if (it.kind === 'loading') return h('div', { class: 'sl muted' }, it.text || 'loading files…');
+      if (it.kind === 'none') return h('div', { class: 'sl muted' }, it.text || 'no match');
+      if (it.kind === 'path') {
+        return h('div', { class: 'sl', title: it.path, onmousedown: function (e) { e.preventDefault(); self.pickSlash(i); } },
+          h('span', { class: 'fi' }, /\/$/.test(it.path) ? '📁' : '📄'), h('span', { class: 'fp', dir: 'ltr' }, it.name));
+      }
       var row = it.kind === 'cmd'
         ? [h('b', { dir: 'ltr' }, '/' + it.c.name), it.c.argumentHint ? h('span', { class: 'muted', dir: 'ltr' }, ' ' + it.c.argumentHint) : null,
           it.c.description ? h('span', { class: 'sd', dir: 'auto' }, it.c.description) : null]
@@ -1197,6 +1215,30 @@
     }));
     this.slashEl.classList.remove('hidden');
     this.markSlash();
+  };
+
+  // the word before the caret, when it is a path on the server: ~/… or /… (a "/" at the very
+  // start of the message without a second "/" stays a slash command)
+  P.pathToken = function (v, pos) {
+    var m = v.slice(0, pos).match(/(^|\s)((?:~\/|\/)[^\s]*)$/);
+    if (!m) return null;
+    var tok = m[2], atStart = m.index === 0 && !m[1];
+    if (tok[0] === '/' && atStart && tok.indexOf('/', 1) < 0) return null;
+    return tok;
+  };
+
+  // folder listings on the server, kept for 30 s (no SSH call for every key)
+  var DIRS = {};
+  P.serverDir = function (dir) {
+    var self = this, key = (this.info.spec.project || '') + '|' + dir, c = DIRS[key];
+    if (c && (c.loading || Date.now() - c.t < 30000)) return c.data;
+    DIRS[key] = { loading: true, data: null, t: Date.now() };
+    api('GET', 'server-ls?path=' + encodeURIComponent(dir) + '&project=' + encodeURIComponent(this.info.spec.project || '')).then(function (d) {
+      DIRS[key] = { data: { entries: d.entries || [] }, t: Date.now() };
+    }).catch(function (e) {
+      DIRS[key] = { data: { error: e.message }, t: Date.now() };
+    }).then(function () { if (document.activeElement === self.ta) self.slashPopup(); });
+    return null;
   };
 
   P.loadFiles = function () {
@@ -1241,10 +1283,10 @@
     if (it.kind === 'cmd') {
       this.ta.value = '/' + it.c.name + ' ';
       this.slashEl.classList.add('hidden');
-    } else if (it.kind === 'file') {
+    } else if (it.kind === 'file' || it.kind === 'path') {
       var v = this.ta.value, pos = this.ta.selectionStart;
       var isDir = /\/$/.test(it.path);
-      var ins = '@' + it.path + (isDir ? '' : ' ');
+      var ins = (it.kind === 'file' ? '@' : '') + it.path + (isDir ? '' : ' ');
       this.ta.value = v.slice(0, this.mentionStart) + ins + v.slice(pos);
       var caret = this.mentionStart + ins.length;
       this.ta.setSelectionRange(caret, caret);

@@ -170,6 +170,19 @@ const tests = {
     S.home = old;
   },
 
+  async 'project menu: copy the server path (~ in full) and the local path'() {
+    await settle();
+    const SW = global.SW;
+    const copied = [];
+    navigator.clipboard.writeText = (t) => { copied.push(t); return Promise.resolve(); };
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.trim().indexOf('Copy server path') === 0).click(); await settle();
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.trim().indexOf('Copy local path') === 0).click(); await settle();
+    assert.deepStrictEqual(copied, ['/home/esi/cheshmeh', '/l/cheshmeh']);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
   async 'project menu: Open folder opens the local copy'() {
     await settle();
     q('.act.more')[0].click();

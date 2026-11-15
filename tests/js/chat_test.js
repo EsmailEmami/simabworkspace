@@ -396,6 +396,53 @@ const tests = {
     S.active = tab;
   },
 
+  async 'typing ~/ or /home/… lists the server folder, like @ for the project'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    const asked = [];
+    global.apiImpl = (method, path) => {
+      asked.push(path);
+      const dir = decodeURIComponent(path.split('path=')[1].split('&')[0]);
+      const listing = { '~/': [{ name: 'projects', dir: true }, { name: 'notes.md', dir: false }, { name: '.ssh', dir: true }],
+        '~/projects/': [{ name: 'shop', dir: true }, { name: 'todo.txt', dir: false }],
+        '/home/': [{ name: 'esi', dir: true }] }[dir];
+      return listing ? Promise.resolve({ entries: listing, home: '/home/esi' }) : Promise.reject(new Error('No such file or directory'));
+    };
+    const type = async (text) => {
+      tab.ta.value = text; tab.ta.selectionStart = tab.ta.selectionEnd = text.length;
+      tab.ta.focus(); tab.slashPopup(); await new Promise((r) => setTimeout(r, 5));
+    };
+    const shown = () => tab.slashEl.classList.contains('hidden') ? [] : byClass(tab.slashEl, 'sl').map((e) => e.textContent.replace(/^[📁📄]/u, ''));
+    await type('look at ~/');
+    assert.deepStrictEqual(shown(), ['projects/', 'notes.md'], 'dot files only when asked for');
+    assert.match(asked[0], /^server-ls\?path=~%2F&project=p$/);
+    // a folder: goes in and keeps listing
+    tab.pickSlash(0); await new Promise((r) => setTimeout(r, 5));
+    assert.strictEqual(tab.ta.value, 'look at ~/projects/');
+    assert.deepStrictEqual(shown(), ['shop/', 'todo.txt']);
+    // filter, then a file ends the path
+    await type('look at ~/projects/to');
+    assert.deepStrictEqual(shown(), ['todo.txt']);
+    tab.pickSlash(0);
+    assert.strictEqual(tab.ta.value, 'look at ~/projects/todo.txt ');
+    assert.ok(tab.slashEl.classList.contains('hidden'));
+    // the same folder again: no second request
+    const n = asked.length;
+    await type('and ~/pro');
+    assert.strictEqual(asked.length, n);
+    assert.deepStrictEqual(shown(), ['projects/']);
+    await type('cat ~/.s');
+    assert.deepStrictEqual(shown(), ['.ssh/']);
+    // absolute paths too; at the start of a message only with a second "/" (else it is a command)
+    await type('/home/');
+    assert.deepStrictEqual(shown(), ['esi/']);
+    await type('/hel');
+    assert.ok(!shown().some((t) => /esi/.test(t)), 'a command, not a path');
+    await type('x /nope/');
+    assert.match(shown()[0], /No such file/);
+    global.apiImpl = () => Promise.resolve({});
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

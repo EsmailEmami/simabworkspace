@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.27.3 2026-11-15  Project colours quieter: a thin line on top of tabs (full colour only on
+#                       the active one) and a faint frame round the work area, a little
+#                       clearer in the section you work in — no more loud coloured borders.
 #    1.27.2 2026-11-15  Chat: the "— resumed —" line (and restarted / reconnected / compacted)
 #                       no longer shows as a big empty box — a CSS class clash with the
 #                       History list.
@@ -219,7 +222,7 @@
 
 set -u -o pipefail
 
-VERSION="1.27.2"
+VERSION="1.27.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

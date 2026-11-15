@@ -393,7 +393,7 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .tab.colored.active { background: color-mix(in srgb, var(--pc) 13%, var(--bg)); color: #fff; }
 .tab.colored:not(.active):hover { background: color-mix(in srgb, var(--pc) 7%, var(--bg2)); }
 .group.focused .tab.colored.active::before { display: none; }
-.pane.chat .cbox { border-top: 2px solid var(--pc, var(--line2)); }
+.pane.chat .cbox { border-top: 2px solid color-mix(in srgb, var(--pc, var(--line2)) 60%, var(--line2)); }
 .swatches { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
 .swatch { height: 32px; border-radius: 7px; border: 2px solid transparent; padding: 0; position: relative; }
 .swatch.on { border-color: #fff; }
@@ -788,10 +788,15 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 .tab.done .mark { display: block; background: var(--ok); animation: none; }
 .tab.done .k.claude { color: var(--ok); }
 .tab.bell .mark { display: block; }
-/* project colour: the whole tab outlined, the work area framed */
-.tab.colored { box-shadow: inset 0 2px 0 var(--pc), inset 1px 0 0 color-mix(in srgb, var(--pc) 35%, transparent), inset -1px 0 0 color-mix(in srgb, var(--pc) 35%, transparent); }
-.tab.colored.active { box-shadow: inset 0 3px 0 var(--pc), inset 2px 0 0 var(--pc), inset -2px 0 0 var(--pc); }
-.pane.colored::after { content: ""; position: absolute; inset: 0; border: 2px solid color-mix(in srgb, var(--pc) 70%, transparent); border-top-width: 3px; pointer-events: none; z-index: 6; }
+/* project colour, kept quiet (loud frames tired the eyes): a thin line on top of the tab —
+   full colour on the active one — and a faint frame round the work area, a little clearer
+   in the section you work in */
+.tab.colored { box-shadow: inset 0 2px 0 color-mix(in srgb, var(--pc) 40%, transparent); }
+.tab.colored.active { box-shadow: inset 0 2px 0 var(--pc); background: color-mix(in srgb, var(--pc) 7%, var(--bg)); }
+.tab.colored:not(.active):hover { background: color-mix(in srgb, var(--pc) 4%, var(--bg2)); }
+.pane.colored::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 6;
+  border: 1px solid color-mix(in srgb, var(--pc) 16%, transparent); border-top: 2px solid color-mix(in srgb, var(--pc) 30%, transparent); }
+.group.focused .pane.colored::after { border-color: color-mix(in srgb, var(--pc) 26%, transparent); border-top-color: color-mix(in srgb, var(--pc) 55%, transparent); }
 
 /* server load in the sidebar (above Claude usage) */
 .sstats { margin-bottom: 4px; }

@@ -45,6 +45,8 @@ const state = {
   ]
 };
 let offline = false;
+const CONV_VS = '11111111-aaaa-bbbb-cccc-000000000001', CONV_OLD = '11111111-aaaa-bbbb-cccc-000000000002';
+let fakeRunning = { cheshmeh: [{ pid: 4242, sessionId: CONV_VS, cwd: '/home/esi/cheshmeh', status: 'busy', owner: 'vscode', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 600, updated: Date.now() / 1000 - 5 }] };
 const winOf = {};
 let fakeTabs = { sessions: [], windows: [], now: 0 };
 const fsTree = {
@@ -113,6 +115,11 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tabs') res = fakeTabs;
+  else if (url.startsWith('/api/claude-running/stop')) { fakeRunning.cheshmeh = fakeRunning.cheshmeh.filter((x) => x.pid !== body.pid); res = { ok: true, running: fakeRunning.cheshmeh }; }
+  else if (url.startsWith('/api/claude-running')) res = { projects: fakeRunning, t: 0 };
+  else if (url.startsWith('/api/claude-sessions/cheshmeh')) res = { sessions: [
+    { id: CONV_VS, mtime: Date.now() / 1000, title: 'Fix the payment page', first: 'fix it', last: '', prompts: 4 },
+    { id: CONV_OLD, mtime: Date.now() / 1000 - 9000, title: 'Old work', first: 'x', last: '', prompts: 2 }] };
   else if (url.startsWith('/api/git/cheshmeh/log')) res = { upstream: 'origin/main', ahead: 1, behind: 1, commits: [
     { hash: 'b'.repeat(40), short: 'bbbbbbb', author: 'Sara', date: Date.now() / 1000 - 120, refs: ['origin/main'], merge: false, subject: 'from GitHub', state: 'pull' },
     { hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'Me', date: Date.now() / 1000 - 600, refs: ['HEAD -> main'], merge: false, subject: 'my change', state: 'push' },
@@ -718,6 +725,58 @@ const tests = {
     last.click(); await settle();
     const made = calls.filter((c) => c.url === '/api/git/shop/switch').pop();
     assert.deepStrictEqual([made.body.branch, made.body.create], ['fix/login', true]);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'Claude sessions: running ones show on the project; watch, stop, never a second Claude'() {
+    const SW = global.SW;
+    await SW.refreshRunning(true); await settle();
+    const badge = q('.gb.run')[0];
+    assert.ok(badge, 'a running Claude shows on the project');
+    assert.strictEqual(badge.textContent, '✳1');
+    assert.ok(badge.classList.contains('busy'));
+    assert.match(badge.getAttribute('title'), /VS Code · busy/);
+    badge.click(); await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /Claude sessions — cheshmeh/);
+    const row = q('.run-row', modal)[0];
+    assert.match(row.textContent, /Fix the payment page/);
+    assert.match(row.textContent, /VS Code · working/);
+    assert.deepStrictEqual(q('button', row).map((b) => b.textContent), ['Watch', 'Continue here', 'Stop']);
+    // earlier conversations do not list the running one again
+    assert.deepStrictEqual(q('.sess-main', modal).map((e) => e.querySelector('.st').textContent), ['Old work']);
+    // opening the running conversation any other way asks first
+    const before = calls.filter((c) => c.url === '/api/sessions').length;
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh', resume: CONV_VS, title: 'Claude · Fix the payment page' }); await settle();
+    assert.strictEqual(calls.filter((c) => c.url === '/api/sessions').length, before, 'no second Claude started');
+    const ask = q('.modal').pop();
+    assert.match(ask.textContent, /Already running in VS Code/);
+    assert.deepStrictEqual(q('.btn', ask).map((b) => b.textContent), ['Cancel', 'Watch it', 'Stop it there, continue here']);
+    // Watch it: a read-only tab
+    q('button', ask).find((b) => b.textContent === 'Watch it').click(); await settle();
+    const w = calls.filter((c) => c.url === '/api/sessions').pop();
+    assert.deepStrictEqual([w.body.kind, w.body.resume, w.body.watch], ['chat', CONV_VS, true]);
+    const tab = SW.S.active;
+    tab.applyState({ alive: true, busy: true, watch: { running: true, status: 'busy', owner: 'vscode' } });
+    assert.ok(tab.pane.classList.contains('watching'));
+    assert.match(tab.watchBar.textContent, /Watching — runs in VS Code, working/);
+    tab.ta.value = 'hello'; tab.submit();
+    assert.ok(!global.sockets[global.sockets.length - 1].sent.some((m) => m.t === 'send'), 'nothing is sent while watching');
+    // Stop it from the Claude sessions dialog
+    document.body.querySelector('#modal-root').replaceChildren();
+    SW.claudeSessionsDialog(SW.project('cheshmeh')); await settle();
+    const m2 = q('.modal').pop();
+    q('button', q('.run-row', m2)[0]).find((b) => b.textContent === 'Stop').click(); await settle();
+    q('.btn.danger', q('.modal').pop()).pop().click(); await settle();
+    const st = calls.filter((c) => c.url === '/api/claude-running/stop').pop();
+    assert.deepStrictEqual(st.body, { project: 'cheshmeh', pid: 4242, sessionId: CONV_VS });
+    assert.strictEqual(q('.gb.run').length, 0, 'gone from the project');
+    tab.applyState({ alive: true, busy: false, watch: { running: false, status: '', owner: '' } });
+    assert.match(tab.watchBar.textContent, /not running any more/);
+    // now it can be continued here without a question
+    q('button', tab.watchBar).find((b) => b.textContent === 'Continue here').click(); await settle();
+    const c2 = calls.filter((c) => c.url === '/api/sessions').pop();
+    assert.deepStrictEqual([c2.body.resume, !!c2.body.watch], [CONV_VS, false]);
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

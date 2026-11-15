@@ -312,7 +312,8 @@
       if (self.agentsEl && Object.keys(self.agents || {}).length) self.renderAgents();
     }, 1000);
     this.agentsEl = h('div', { class: 'agents hidden' });
-    var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.attachEl,
+    this.watchBar = h('div', { class: 'watchbar hidden' });
+    var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.watchBar, this.attachEl,
       h('div', { class: 'cbox' }, this.ta,
         h('div', { class: 'cbar' },
           this.modeSel, this.modelSel, this.effortSel,
@@ -496,6 +497,7 @@
     this.effortSel.value = this.effort;
     this.setBusy(st.busy);
     if (st.init) this.applyInit(st.init);
+    if (st.watch) this.setWatch(st.watch);
     this.setModelValue(this.model);
     this.applyInfo();
   };
@@ -700,6 +702,7 @@
           : e.allow ? (e.always ? '✓ allowed (always)' : '✓ allowed') : '✗ denied' + (e.message ? ': ' + e.message : ''));
         break;
       case '_init': this.applyInit(e.info || {}); break;
+      case '_watch': this.setWatch(e); break;
       case '_mode': this.setMode(e.mode); break;
       case '_model': this.model = e.model || 'opus'; this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
       case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; if (!this.replaying) this.system('effort: ' + e.effort); break;
@@ -1268,7 +1271,40 @@
     }));
   };
 
+  // Watching a conversation another Claude runs (VS Code, a terminal): read-only, with a way in.
+  var WHERE = { simab: 'this app', vscode: 'VS Code', terminal: 'a terminal', other: 'another program' };
+  P.setWatch = function (w) {
+    var self = this, project = this.info.spec.project, conv = this.info.spec.resume || this.sessionId;
+    this.watching = w;
+    this.pane.classList.add('watching');
+    this.setBusy(w.status === 'busy');
+    var where = WHERE[w.owner] || 'another program';
+    var cont = h('button', { class: 'btn sm primary', onclick: function () {
+      var x = SW.runningConv(project, conv);
+      var go = function () {
+        SW.closeTab(self, true);
+        SW.openSession({ kind: 'chat', project: project, resume: conv, title: self.info.title.replace(/^Watch · /, 'Claude · '), force: true });
+      };
+      if (!x) { go(); return; }
+      SW.confirmDlg('Stop it in ' + where + ' and continue here?', 'Continue here').then(function (ok) {
+        if (ok) SW.claudeStop(project, x).then(go).catch(fail);
+      });
+    } }, 'Continue here');
+    var stop = w.running ? h('button', { class: 'btn sm danger', onclick: function () {
+      var x = SW.runningConv(project, conv);
+      if (!x) return;
+      SW.confirmDlg('Stop the Claude running this conversation in ' + where + '?', 'Stop', true).then(function (ok) {
+        if (ok) SW.claudeStop(project, x).then(function () { toast('Stopped', 'ok'); }).catch(fail);
+      });
+    } }, 'Stop it') : null;
+    this.watchBar.classList.remove('hidden');
+    this.watchBar.replaceChildren.apply(this.watchBar, [
+      h('span', null, 'Watching — ', w.running ? 'runs in ' + where + (w.status === 'busy' ? ', working' : w.status ? ', ' + w.status : '') : 'not running any more'),
+      h('span', { class: 'grow' }), stop, cont].filter(Boolean));
+  };
+
   P.submit = function () {
+    if (this.watching) return;
     var queued = this.busy;              // Claude is working: the message waits for its turn
     if (!queued) {
       this.turnStart = Date.now();

@@ -40,6 +40,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.26.0 2026-11-15  Claude sessions: see every Claude running on the server per project —
+#                       here, in VS Code or in a terminal (✳N on the project, working/idle).
+#                       Project ⋯ → Sessions: Show / Open / Watch (live, read-only) /
+#                       Continue here (stops it there first) / Stop. Opening a conversation
+#                       that runs elsewhere asks first — no second Claude on it.
 #    1.25.0 2026-11-15  Git panel: a History tab — the branch's commits, each marked ↑ not
 #                       pushed / ↓ not pulled / ✓ on both sides, with a summary of what to
 #                       push or pull; click a commit to see it. .gitignore: Find file and @
@@ -198,7 +203,7 @@
 
 set -u -o pipefail
 
-VERSION="1.25.0"
+VERSION="1.26.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

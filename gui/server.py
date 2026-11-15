@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.25.0"
+VERSION = "1.26.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1895,6 +1895,104 @@ print(json.dumps(out))
 
 HISTORY_PAGE = 40
 
+# Claude sessions running on the server — from this app, VS Code or a terminal. Claude Code
+# writes ~/.claude/sessions/<pid>.json while it runs (sessionId, cwd, status busy/idle,
+# entrypoint cli / claude-vscode / sdk-cli, procStart = field 22 of /proc/<pid>/stat).
+#   list                 → {"home", "sessions": [...]}   only processes that really run
+#   stop PID SESSION_ID  → stops it (only when that pid still runs that conversation)
+CLAUDE_RUNNING_PY = r'''
+import os, sys, json, glob, time, signal
+D = os.path.expanduser("~/.claude/sessions")
+def proc(pid):
+    try:
+        st = open("/proc/%d/stat" % pid).read()
+        rest = st[st.rindex(")") + 2:].split()
+        return int(rest[1]), rest[19]              # ppid, start time
+    except (OSError, ValueError, IndexError):
+        return None, None
+def cmd(pid):
+    try:
+        return open("/proc/%d/cmdline" % pid, "rb").read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return []
+def running(info):
+    pid = info.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    ppid, start = proc(pid)
+    if start is not None and info.get("procStart") and str(info["procStart"]) != start:
+        return False                               # the pid was reused: an old file
+    if os.path.exists("/proc/%d/stat" % pid):
+        try:
+            if open("/proc/%d/stat" % pid).read().split(")")[-1].split()[0] == "Z":
+                return False
+        except OSError:
+            pass
+    return True
+def owner(info):
+    pid = info["pid"]
+    ep = str(info.get("entrypoint") or "")
+    exe = (cmd(pid) or [""])[0]
+    if "vscode" in ep or ".vscode-server" in exe or ".cursor-server" in exe:
+        return "vscode", ""
+    if ep == "cli":
+        return "terminal", ""
+    # our relay starts Claude through exec only: it is Claude's parent (a Claude started by
+    # something running inside one of our chats is not ours)
+    p, _s = proc(pid)
+    c = cmd(p) if p and p > 1 else []
+    if "simabworkspace/chats" in " ".join(c[:3]) and "daemon" in c:
+        k = c.index("daemon")
+        return "simab", c[k + 1] if len(c) > k + 1 else ""
+    return "other", ""
+def sessions():
+    out = []
+    for f in glob.glob(os.path.join(D, "*.json")):
+        try:
+            info = json.load(open(f))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(info, dict) or not running(info):
+            continue
+        who, relay = owner(info)
+        ms = lambda k: (info.get(k) or 0) / 1000.0
+        out.append({"pid": info["pid"], "sessionId": str(info.get("sessionId") or ""), "cwd": str(info.get("cwd") or ""),
+                    "status": str(info.get("status") or ""), "entrypoint": str(info.get("entrypoint") or ""),
+                    "name": str(info.get("name") or ""), "tmux": str(info.get("tmux") or ""), "owner": who, "relay": relay,
+                    "started": ms("startedAt"), "updated": ms("statusUpdatedAt") or ms("updatedAt")})
+    out.sort(key=lambda x: -x["started"])
+    return out
+op = sys.argv[1] if len(sys.argv) > 1 else "list"
+if op == "list":
+    print(json.dumps({"home": os.path.expanduser("~"), "sessions": sessions()}))
+elif op == "stop":
+    pid, sid = int(sys.argv[2]), sys.argv[3]
+    me = [x for x in sessions() if x["pid"] == pid and x["sessionId"] == sid]
+    if not me:
+        print(json.dumps({"error": "this Claude session is not running any more"}))
+        sys.exit()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        print(json.dumps({"error": "cannot stop it: " + (e.strerror or str(e))}))
+        sys.exit()
+    end = time.time() + 6
+    while time.time() < end and any(x["pid"] == pid for x in sessions()):
+        time.sleep(0.2)
+    if any(x["pid"] == pid for x in sessions()):
+        try:
+            os.kill(pid, 9)                      # SIGKILL
+        except OSError:
+            pass
+    print(json.dumps({"ok": True}))
+'''
+
 # args: project dir, conversation id, [before, limit] → one page, newest last:
 # {"total": all messages, "start": index of the first one returned, "entries": [...]}
 REMOTE_HISTORY_PY = r'''
@@ -1952,6 +2050,64 @@ while k > 0 and k > start - 10 and not (out[k]["type"] == "user" and isinstance(
     k -= 1
 start = k if k > 0 and out[k]["type"] == "user" else start
 print(json.dumps({"total": total, "start": start, "entries": out[start:end]}))
+'''
+
+
+# args: project dir, conversation id, byte offset → what was added to the transcript since
+# (whole lines only): {"off": new offset, "size": file size, "entries": [...]} — for watching
+REMOTE_TAIL_PY = r'''
+import sys, os, json
+f = os.path.expanduser("~/.claude/projects/%s/%s.jsonl" % (sys.argv[1], sys.argv[2]))
+off = int(sys.argv[3])
+LIM = 8000
+def cut(s):
+    return s if len(s) <= LIM else s[:LIM] + "\n…"
+try:
+    size = os.path.getsize(f)
+except OSError:
+    print(json.dumps({"off": off, "size": -1, "entries": []})); sys.exit()
+if off < 0 or off > size:
+    off = size
+out = []
+with open(f, "rb") as fh:
+    fh.seek(off)
+    data = fh.read(4000000)
+end = data.rfind(b"\n") + 1
+for raw in data[:end].split(b"\n"):
+    line = raw.decode("utf-8", "replace")
+    if '"type":"user"' not in line and '"type":"assistant"' not in line:
+        continue
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if e.get("type") not in ("user", "assistant") or e.get("isSidechain") or e.get("isMeta"):
+        continue
+    m = e.get("message") or {}
+    c = m.get("content")
+    if isinstance(c, list):
+        nc = []
+        for b in c:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "image":
+                nc.append({"type": "text", "text": "[image]"})
+            elif t == "tool_result":
+                r = b.get("content")
+                if isinstance(r, list):
+                    r = "\n".join(x.get("text", "[image]") for x in r if isinstance(x, dict))
+                nc.append({"type": "tool_result", "tool_use_id": b.get("tool_use_id"),
+                           "is_error": b.get("is_error", False), "content": cut(str(r or ""))})
+            elif t == "thinking":
+                nc.append({"type": "thinking", "thinking": cut(b.get("thinking") or "")})
+            elif t in ("text", "tool_use"):
+                nc.append(b)
+        c = nc
+    elif isinstance(c, str):
+        c = cut(c)
+    out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c}})
+print(json.dumps({"off": off + end, "size": size, "entries": out}))
 '''
 
 
@@ -2449,6 +2605,116 @@ class ChatSession:
         return {"id": self.id, "title": self.title, "spec": self.spec, "url": "",
                 "alive": self.alive, "exitCode": self.exit_code, "started": self.started, "runs": self.runs,
                 "win": self.win, "moved": self.moved}
+
+
+class WatchSession:
+    """A chat tab that only watches a conversation another Claude works on (VS Code, a
+    terminal…): the transcript on the server is read as it grows. Nothing is sent to Claude."""
+    win = ""
+    moved = 0.0
+    POLL = 1.5
+
+    def __init__(self, sid: str, built: dict, offset: int, status_fn=None, multiplex=True):
+        self.id = sid
+        self.built = built
+        self.title = built["title"]
+        self.spec = dict(built["spec"], watch=True)
+        self.conv = built["resume"]
+        self.offset = offset
+        self.status_fn = status_fn            # () -> running info of the conversation, or None
+        self.multiplex = multiplex
+        self.lock = threading.RLock()
+        self.subs = set()
+        self.events = collections.deque(maxlen=4000)
+        self.closed = False
+        self.alive = True
+        self.exit_code = None
+        self.started = time.time()
+        self.runs = 1
+        self.watch = {"running": True, "status": "", "owner": ""}
+        h = built.get("history")
+        if h and h.get("entries"):
+            self.events.append({"type": "_history", "entries": h["entries"], "start": h.get("start", 0), "total": h.get("total", 0)})
+        self.update_status()
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def update_status(self):
+        r = self.status_fn() if self.status_fn else None
+        w = {"running": bool(r), "status": (r or {}).get("status", ""), "owner": (r or {}).get("owner", "")}
+        if w != self.watch:
+            self.watch = w
+            self._log({"type": "_watch", **w})
+
+    def _loop(self):
+        n = 0
+        while not self.closed:
+            time.sleep(self.POLL)
+            if self.closed:
+                break
+            try:
+                r = remote_python(self.built["conf"], REMOTE_TAIL_PY,
+                                  [claude_project_dir(self.built["rpath"]), self.conv, str(self.offset)], multiplex=self.multiplex)
+            except ApiError:
+                continue
+            if isinstance(r, dict) and isinstance(r.get("off"), int):
+                self.offset = r["off"]
+                for e in r.get("entries") or []:
+                    if isinstance(e, dict):
+                        self._log(e)
+            n += 1
+            if n % 3 == 0:
+                self.update_status()
+
+    def _log(self, ev):
+        with self.lock:
+            self.events.append(ev)
+            for ws in list(self.subs):
+                try:
+                    ws.send_json({"t": "e", "e": ev})
+                except WebSocketClosed:
+                    self.subs.discard(ws)
+
+    def state(self) -> dict:
+        return {"busy": self.watch.get("status") == "busy", "alive": True, "code": None, "mode": "default", "model": "",
+                "effort": "", "sessionId": self.conv, "init": None, "watch": self.watch}
+
+    def attach(self, ws):
+        with self.lock:
+            ws.send_json({"t": "s", "events": list(self.events), "state": self.state()})
+            self.subs.add(ws)
+
+    def detach(self, ws):
+        with self.lock:
+            self.subs.discard(ws)
+
+    def handle(self, m):
+        pass                                   # watching only
+
+    def kill(self, wait=False, remote=True):
+        with self.lock:
+            self.closed = True
+            for ws in list(self.subs):
+                try:
+                    ws.send_json({"t": "gone"})
+                    ws.close()
+                except (WebSocketClosed, OSError):
+                    pass
+            self.subs.clear()
+
+    def shutdown(self):
+        self.kill()
+
+    def stop(self):
+        pass
+
+    def restart(self, fresh=False):
+        pass
+
+    def info(self) -> dict:
+        return {"id": self.id, "title": self.title, "spec": self.spec, "url": "", "alive": True, "exitCode": None,
+                "started": self.started, "runs": 1, "win": self.win, "moved": self.moved}
 
 
 def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> dict:
@@ -3867,6 +4133,32 @@ class App:
                          and body["resume"] in (x.session_id, x.spec.get("resume"))), None)
             if same:
                 return same.info()          # already open (maybe in another window): that tab, not a second Claude
+        if body.get("kind") == "chat" and body.get("watch") is True:
+            conv = body.get("resume") if isinstance(body.get("resume"), str) else ""
+            if not UUID_RE.fullmatch(conv):
+                raise ApiError(400, "which conversation?")
+            built = build_chat(dict(body, relay=None), self.conf, self.store, self.projects(max_age=10))
+            pname = built["spec"]["project"]
+            if not (isinstance(body.get("title"), str) and body["title"].strip()):
+                built["title"] = "Watch · " + (pname or "home")
+            try:
+                built["history"] = remote_python(built["conf"], REMOTE_HISTORY_PY,
+                                                 [claude_project_dir(built["rpath"]), conv, "", str(HISTORY_PAGE)],
+                                                 multiplex=bool(self.store.settings.get("sshMultiplex")))
+                start = remote_python(built["conf"], REMOTE_TAIL_PY, [claude_project_dir(built["rpath"]), conv, "-1"],
+                                      multiplex=bool(self.store.settings.get("sshMultiplex")))
+                offset = start.get("off", 0) if isinstance(start, dict) else 0
+            except ApiError as e:
+                raise ApiError(502, "cannot read this conversation on the server: " + e.message)
+
+            def status():
+                return self.claude_running_one(pname, conv)
+            w = WatchSession(sid, built, offset, status_fn=status, multiplex=bool(self.store.settings.get("sshMultiplex")))
+            w.start()
+            with self.lock:
+                self.sessions[sid] = w
+            self._remember()
+            return w.info()
         if body.get("kind") == "chat":
             built = build_chat(body, self.conf, self.store, self.projects(max_age=10))
             if built["resume"]:
@@ -4523,7 +4815,7 @@ class App:
 
     def chat_history_page(self, sid: str, before: int) -> dict:
         s = self.get(sid)
-        if not isinstance(s, ChatSession):
+        if not isinstance(s, (ChatSession, WatchSession)):
             raise ApiError(400, "not a chat tab")
         conv = s.built.get("resume") or ""
         if not conv or "conf" not in s.built:
@@ -4545,6 +4837,70 @@ class App:
         out = remote_python(conf, REMOTE_LIST_PY, [claude_project_dir(rpath)],
                             multiplex=bool(self.store.settings.get("sshMultiplex")))
         return out if isinstance(out, list) else []
+
+    # Claude sessions running on the server (this app, VS Code, terminals) -------------
+    def claude_running(self, force=False) -> dict:
+        """{project name: [running sessions]} for every project, cached for a few seconds."""
+        cache = self.__dict__.setdefault("_running", {"t": 0.0, "data": {}})
+        if not force and time.time() - cache["t"] < 4:
+            return cache["data"]
+        if not self.conf.configured:
+            return {}
+        groups = {}
+        for p in self.projects(max_age=10):
+            if not p.get("remote"):
+                continue
+            c = self._project_conf(p)
+            groups.setdefault((c.target, str(c.port)), (c, []))[1].append(p)
+        out = {}
+        here = {}
+        for s in list(self.sessions.values()):
+            if isinstance(s, ChatSession) and not s.closed:
+                if s.session_id:
+                    here[s.session_id] = s.id
+                if s.relay_key:
+                    here["relay:" + s.relay_key] = s.id
+        for conf, projects in groups.values():
+            try:
+                r = remote_python(conf, CLAUDE_RUNNING_PY, ["list"], multiplex=bool(self.store.settings.get("sshMultiplex"))) or {}
+            except ApiError:
+                continue
+            home = str(r.get("home") or "")
+            roots = []
+            for p in projects:
+                rp = p["remote"].rstrip("/") or "/"
+                if rp == "~" or rp.startswith("~/"):
+                    rp = home + rp[1:]
+                roots.append((rp, p["name"]))
+            roots.sort(key=lambda x: -len(x[0]))
+            for x in r.get("sessions") or []:
+                if not isinstance(x, dict):
+                    continue
+                cwd = str(x.get("cwd") or "")
+                name = next((n for rp, n in roots if cwd == rp or cwd.startswith(rp.rstrip("/") + "/")), None)
+                if not name:
+                    continue
+                x["tab"] = here.get(x.get("sessionId")) or here.get("relay:" + str(x.get("relay") or "")) or ""
+                out.setdefault(name, []).append(x)
+        cache["t"], cache["data"] = time.time(), out
+        return out
+
+    def claude_running_one(self, project: str, conv: str):
+        for x in (self.claude_running() or {}).get(project, []):
+            if x.get("sessionId") == conv:
+                return x
+        return None
+
+    def claude_stop(self, project: str, pid, conv) -> dict:
+        p = self._project(project)
+        if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(conv, str) or not UUID_RE.fullmatch(conv):
+            raise ApiError(400, "which Claude session?")
+        r = remote_python(self._project_conf(p), CLAUDE_RUNNING_PY, ["stop", str(pid), conv],
+                          multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30) or {}
+        if r.get("error"):
+            raise ApiError(409, str(r["error"]))
+        self.activity.add("claude-stop", project, conv)
+        return {"ok": True, "running": self.claude_running(force=True).get(project, [])}
 
     def _remember(self):
         specs = []
@@ -5459,6 +5815,11 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("DELETE", "sessions") and len(parts) == 2:
             app.close_session(parts[1])
             return {"ok": True}
+        if route == ("GET", "claude-running"):
+            return {"projects": app.claude_running(force=query.get("force") == ["1"]), "t": time.time()}
+        if route == ("POST", "claude-running") and parts[1:] == ["stop"]:
+            b = self._body()
+            return app.claude_stop(b.get("project") or "", b.get("pid"), b.get("sessionId"))
         if route == ("GET", "tabs"):
             return app.tabs()
         if route == ("POST", "windows") and len(parts) == 2:
@@ -5655,7 +6016,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(m, dict):
                     continue
                 t = m.get("t")
-                if isinstance(sess, ChatSession):
+                if isinstance(sess, (ChatSession, WatchSession)):
                     if t == "p":
                         ws.send_json({"t": "p"})
                     else:

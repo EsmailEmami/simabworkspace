@@ -262,6 +262,13 @@ const tests = {
     for (let i = 60; i < 80; i++) older = older.concat(msg(i));
     const asked = [];
     global.apiImpl = (method, path) => { asked.push(path); return Promise.resolve({ total: 200, start: 120, entries: older }); };
+    // the browser scrolling by itself (the chat put back into the page) loads nothing
+    tab.scroller.scrollTop = 0;
+    tab.scroller.dispatch('scroll');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepStrictEqual(asked, []);
+    // the user scrolling up does
+    tab.scroller.dispatch('wheel', { deltaY: -100 });
     tab.scroller.scrollTop = 0;
     tab.scroller.dispatch('scroll');
     await new Promise((r) => setTimeout(r, 10));
@@ -272,6 +279,84 @@ const tests = {
     assert.strictEqual(texts[20], 'q80');
     assert.strictEqual(tab.histStart, 120);
     global.apiImpl = () => Promise.resolve({});
+  },
+
+  'switching tabs or a layout change never jumps to the first message'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    const sc = tab.scroller;
+    sc.scrollHeight = 5000; sc.clientHeight = 500; sc.scrollTop = 4500;
+    assert.strictEqual(tab.stick, true);
+    // the browser resets the scroll when the chat is put back into the page
+    sc.scrollTop = 0;
+    sc.dispatch('scroll');
+    assert.strictEqual(sc.scrollTop, 5000, 'pinned to the end again');
+    assert.strictEqual(tab.stick, true);
+    // the user scrolls up to read: that place is kept over a reset, and after switching back
+    sc.dispatch('wheel', { deltaY: -300 });
+    sc.scrollTop = 2000;
+    sc.dispatch('scroll');
+    assert.strictEqual(tab.stick, false);
+    tab.userScrollAt = 0;
+    sc.scrollTop = 0;
+    sc.dispatch('scroll');
+    assert.strictEqual(sc.scrollTop, 2000);
+    sc.scrollTop = 0;
+    tab.ensureOpen();
+    assert.strictEqual(sc.scrollTop, 2000);
+    // back to the end with the ↓ button; switching tabs keeps it at the end
+    tab.jumpBtn.click();
+    assert.strictEqual(tab.stick, true);
+    sc.scrollTop = 0;
+    tab.ensureOpen();
+    assert.strictEqual(sc.scrollTop, 5000);
+  },
+
+  'the message box hides after 3 seconds away and is back at once'() {
+    const { tab } = newTab();
+    const S = global.SW.S;
+    S.active = tab;
+    document.hasFocus = () => true;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'));
+    // another tab is active: nothing yet, then hidden after 3 s
+    S.active = { other: true };
+    document.activeElement = null;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'), 'not at once');
+    tab.awaySince = Date.now() - 3100;
+    tab.updateAway();
+    assert.ok(tab.pane.classList.contains('away'));
+    // the mouse over the chat: back at once
+    tab.pane.dispatch('mouseenter');
+    assert.ok(!tab.pane.classList.contains('away'));
+    tab.pane.dispatch('mouseleave');
+    tab.awaySince = Date.now() - 3100;
+    tab.updateAway();
+    assert.ok(tab.pane.classList.contains('away'));
+    // the window in the background hides the active chat's box too
+    S.active = tab;
+    document.hasFocus = () => false;
+    tab.awaySince = Date.now() - 3100;
+    tab.updateAway();
+    assert.ok(tab.pane.classList.contains('away'));
+    // coming back to the tab (activate → ensureOpen) shows it
+    document.hasFocus = () => true;
+    tab.ensureOpen();
+    assert.ok(!tab.pane.classList.contains('away'));
+    // typing in it keeps it, whatever is active
+    S.active = { other: true };
+    tab.ta.focus();
+    tab.awaySince = Date.now() - 9000;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'));
+    // never on touch screens
+    document.activeElement = null;
+    tab.touch = true;
+    tab.awaySince = Date.now() - 9000;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'));
+    delete document.hasFocus;
   },
 
   'a message sent while Claude works is queued, then picked up'() {

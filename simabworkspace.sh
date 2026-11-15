@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.23.1 2026-11-15  Chat: switching tabs (or splitting, moving, reconnecting) no longer
+#                       jumps to the first message — it stays at the end, or where you were
+#                       reading. The message box hides after 3 s while you work elsewhere
+#                       (the live status stays) and is back as soon as you return.
 #    1.23.0 2026-11-15  Extra windows for a second monitor: tab menu → Move to new window,
 #                       or drag a tab out of the window; drag tabs between windows; each
 #                       window has its own tabs and splits. Chat fix: opening a conversation
@@ -165,7 +169,7 @@
 
 set -u -o pipefail
 
-VERSION="1.23.0"
+VERSION="1.23.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

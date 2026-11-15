@@ -5,6 +5,7 @@
   var SW = window.SW;
   var h = SW.h, api = SW.api, toast = SW.toast, fail = SW.fail, S = SW.S, faNum = SW.faNum;
 
+  var AWAY_MS = 3000;          // hide the message box after this long away from the chat
   var MODES = [
     ['default', 'ask', 'Asks before editing files or running commands'],
     ['acceptEdits', 'auto-edit', 'Edits files without asking; still asks for commands'],
@@ -248,11 +249,28 @@
     // messages
     this.msgs = h('div', { class: 'chat-msgs' });
     this.scroller = h('div', { class: 'chat-scroll' }, this.msgs);
+    // Only scrolling done by the user moves the view. The browser also scrolls by itself (to the top
+    // when the chat is put back into the page: switching or moving tabs, splitting, a reconnect…);
+    // that must not unpin the end or load older messages.
+    this.userScrollAt = 0;
+    this.savedTop = 0;
+    var byUser = function (e) {
+      self.userScrollAt = Date.now();
+      if (e && e.type === 'wheel' && e.deltaY < 0 && self.scroller.scrollTop < 80) self.loadOlder();   // short chats do not scroll
+    };
+    ['wheel', 'touchmove', 'pointerdown', 'keydown'].forEach(function (ev) { self.scroller.addEventListener(ev, byUser, { passive: true }); });
     this.scroller.addEventListener('scroll', function () {
       var s = self.scroller;
-      if (s.scrollTop < 80) self.loadOlder();
-      self.stick = s.scrollHeight - s.scrollTop - s.clientHeight < 80;
-      self.jumpBtn.classList.toggle('hidden', self.stick);
+      if (Date.now() - self.userScrollAt < 1500) {
+        if (s.scrollTop < 80) self.loadOlder();
+        self.stick = s.scrollHeight - s.scrollTop - s.clientHeight < 80;
+        self.savedTop = s.scrollTop;
+        self.jumpBtn.classList.toggle('hidden', self.stick);
+        return;
+      }
+      if (self.stick) { if (s.scrollHeight - s.scrollTop - s.clientHeight > 2) s.scrollTop = s.scrollHeight; }
+      else if (s.scrollTop === 0 && self.savedTop > 0) s.scrollTop = self.savedTop;        // put back where you were
+      else self.savedTop = s.scrollTop;
     });
     this.scroller.addEventListener('contextmenu', function (e) {
       if (window.getSelection && String(window.getSelection())) return;      // keep the browser menu for copying
@@ -289,11 +307,12 @@
     this.statusEl = h('div', { class: 'cstatus', title: 'Live status' }, this.stDot, this.stText, this.stExtra);
     this.conn = 'connecting';
     this.timer = setInterval(function () {
+      self.updateAway();
       if (self.turnStart || self.conn !== 'online') self.renderStatus();
       if (self.agentsEl && Object.keys(self.agents || {}).length) self.renderAgents();
     }, 1000);
     this.agentsEl = h('div', { class: 'agents hidden' });
-    var composer = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.attachEl,
+    var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.attachEl,
       h('div', { class: 'cbox' }, this.ta,
         h('div', { class: 'cbar' },
           this.modeSel, this.modelSel, this.effortSel,
@@ -305,15 +324,23 @@
 
     this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
+    this.pane.addEventListener('mouseenter', function () { self.hover = true; self.updateAway(); });
+    this.pane.addEventListener('mouseleave', function () { self.hover = false; });
     this.applyInfo();
     this.connect();
   }
 
   var P = ChatTab.prototype;
 
-  P.focus = function () { this.ta.focus(); };
-  P.ensureOpen = function () {};
-  P.doFit = function () {};
+  P.focus = function () { this.awaySince = 0; this.setAway(false); this.ta.focus(); };
+  P.ensureOpen = function () {
+    var self = this;
+    this.awaySince = 0;
+    this.setAway(false);
+    this.restoreScroll();
+    requestAnimationFrame(function () { self.restoreScroll(); });
+  };
+  P.doFit = function () { this.restoreScroll(); };
   P.toggleFa = function () {};
   P.renderFa = function () {};
   P.toggleComposer = function () { this.ta.focus(); };
@@ -424,6 +451,7 @@
     var anchor = this.topEl && this.topEl.parentNode === real ? this.topEl.nextSibling : real.firstChild;
     Array.prototype.slice.call(temp.childNodes).forEach(function (n) { real.insertBefore(n, anchor); });
     sc.scrollTop = sc.scrollHeight - fromBottom;            // keep what you were looking at in place
+    this.savedTop = sc.scrollTop;
   };
 
   P.renderAgents = function () {
@@ -514,6 +542,36 @@
 
   P.scrollEnd = function () {
     if (this.stick) this.scroller.scrollTop = this.scroller.scrollHeight;
+  };
+
+  // back in view (tab switched to, moved, layout changed): at the end, or where you were reading
+  P.restoreScroll = function () {
+    var sc = this.scroller;
+    if (this.stick) sc.scrollTop = sc.scrollHeight;
+    else if (this.savedTop && sc.scrollTop !== this.savedTop) sc.scrollTop = this.savedTop;
+    this.jumpBtn.classList.toggle('hidden', this.stick);
+  };
+
+  // The message box hides when you are not working in this chat for 3 seconds (another tab or
+  // section is active, or the window is in the background) and the mouse is not over it.
+  // It comes back at once when you return. Not on touch screens / phones.
+  P.isPresent = function () {
+    var S = SW.S, b = document.body;
+    if (this.touch || (b && b.classList.contains('compact'))) return true;
+    if (this.hover || this.composerEl.contains(document.activeElement)) return true;
+    var focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+    return S.active === this && focused;
+  };
+  P.updateAway = function () {
+    if (this.isPresent()) { this.awaySince = 0; this.setAway(false); return; }
+    if (!this.awaySince) this.awaySince = Date.now();
+    if (Date.now() - this.awaySince >= AWAY_MS) this.setAway(true);
+  };
+  P.setAway = function (on) {
+    if (!!this.away === on) return;
+    this.away = on;
+    this.pane.classList.toggle('away', on);
+    this.restoreScroll();          // the chat got taller / shorter: stay at the end
   };
 
   P.add = function (el) {
@@ -1284,6 +1342,11 @@
     this.el.remove();
     this.pane.remove();
   };
+
+  // back to this window: the message box of the chat you are in shows at once
+  window.addEventListener('focus', function () {
+    ((SW.S && SW.S.tabs) || []).forEach(function (t) { if (t.isChat && t.updateAway) t.updateAway(); });
+  });
 
   window.SWChat = { ChatTab: ChatTab, markdown: markdown, fmtTime: fmtTime };
 })();

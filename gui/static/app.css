@@ -726,3 +726,7 @@ body.compact .files-back { display: inline-grid; }
 body.compact .ft-row { height: 34px; font-size: 13.5px; }
 body.compact .files-filter { height: 32px; }
 @media (pointer: coarse) { .ft-row { height: 34px; } .files-vhead .btn.sm { height: 32px; } .files-bar .icon-btn { width: 32px; height: 32px; } }
+
+/* chat: the message box hides while you work elsewhere (the live status line stays) */
+.pane.chat.away .chat-composer .cbox, .pane.chat.away .chat-composer .attach, .pane.chat.away .chat-composer .slash { display: none; }
+.pane.chat.away .chat-composer { padding-bottom: 4px; }

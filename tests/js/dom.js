@@ -138,7 +138,8 @@ function install() {
   global.requestAnimationFrame = (f) => f();
   const winListeners = {};
   global.addEventListener = (t, fn) => { (winListeners[t] = winListeners[t] || []).push(fn); };
-  global.dispatchEvent = (ev) => { (winListeners[ev.type] || []).forEach((f) => f(ev)); return true; };
+  global.removeEventListener = (t, fn) => { winListeners[t] = (winListeners[t] || []).filter((f) => f !== fn); };
+  global.dispatchEvent = (ev) => { (winListeners[ev.type] || []).slice().forEach((f) => f(ev)); return true; };
   if (typeof global.CustomEvent !== 'function') global.CustomEvent = class { constructor(type, o) { this.type = type; this.detail = o && o.detail; } };
   global.innerWidth = 1400; global.innerHeight = 900;
   global.ResizeObserver = class { observe() {} disconnect() {} };

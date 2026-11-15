@@ -922,10 +922,30 @@
     return Math.max(1, Math.round(node.sizes[i] / sum * 1000));
   }
 
+  // drag with mouse, finger or pen: start(e) returns {move(e), up()}; the page does not scroll meanwhile
+  function onDrag(el, start) {
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button) return;                     // only the main mouse button
+      e.preventDefault();
+      var d = start(e);
+      if (!d) return;
+      function move(ev) { if (ev.pointerId === e.pointerId) d.move(ev); }
+      function up(ev) {
+        if (ev.pointerId !== e.pointerId) return;
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        d.up();
+      }
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
+
   function gutter(node, i, splitEl) {
     var gEl = h('div', { class: 'gutter ' + node.dir });
-    gEl.addEventListener('mousedown', function (e) {
-      e.preventDefault();
+    onDrag(gEl, function (e) {
       var cells = Array.prototype.filter.call(splitEl.children, function (c) { return c.classList.contains('cell'); });
       var a = cells[i], b = cells[i + 1];
       var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
@@ -945,15 +965,12 @@
         b.style.flex = grow(node, i + 1) + ' 1 0px';
       }
       function up() {
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
         gEl.classList.remove('drag');
         document.body.classList.remove('resizing-h', 'resizing-v');
         fitAll();
         saveLayout();
       }
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
+      return { move: move, up: up };
     });
     gEl.addEventListener('dblclick', function () {
       var sum = node.sizes[i] + node.sizes[i + 1];
@@ -3517,18 +3534,21 @@
   (function () {
     var w = Number(localStorage.getItem('sw-side')) || 230;
     document.documentElement.style.setProperty('--side', w + 'px');
-    var rz = $('#resizer'), drag = false;
-    rz.addEventListener('mousedown', function (e) { drag = true; rz.classList.add('drag'); e.preventDefault(); });
-    window.addEventListener('mousemove', function (e) {
-      if (!drag) return;
-      w = Math.max(170, Math.min(480, e.clientX));
-      document.documentElement.style.setProperty('--side', w + 'px');
-    });
-    window.addEventListener('mouseup', function () {
-      if (!drag) return;
-      drag = false; rz.classList.remove('drag');
-      localStorage.setItem('sw-side', String(w));
-      fitAll();
+    var rz = $('#resizer');
+    // pointer events: mouse, touch (tablet) and pen alike
+    onDrag(rz, function () {
+      rz.classList.add('drag');
+      return {
+        move: function (e) {
+          w = Math.max(170, Math.min(480, e.clientX));
+          document.documentElement.style.setProperty('--side', w + 'px');
+        },
+        up: function () {
+          rz.classList.remove('drag');
+          localStorage.setItem('sw-side', String(w));
+          fitAll();
+        }
+      };
     });
   })();
 

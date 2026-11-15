@@ -69,7 +69,7 @@ textarea.inp { height: auto; padding: 7px 9px; resize: vertical; }
 #proj-filter:focus { border-color: var(--line2); }
 #projects { flex: 1; overflow-y: auto; padding: 0 6px 10px; }
 .side-foot { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-top: 1px solid var(--line); }
-#resizer { width: 3px; margin-left: -2px; cursor: col-resize; flex: none; z-index: 5; }
+#resizer { width: 3px; margin-left: -2px; cursor: col-resize; flex: none; z-index: 5; position: relative; touch-action: none; }
 #resizer:hover, #resizer.drag { background: var(--accent); }
 
 .proj-head { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
@@ -109,7 +109,7 @@ body.work-mode #show-side { display: block; }
 .split.h { flex-direction: row; }
 .split.v { flex-direction: column; }
 .cell { display: flex; min-width: 0; min-height: 0; }
-.gutter { flex: none; background: var(--line); z-index: 3; }
+.gutter { flex: none; background: var(--line); z-index: 3; position: relative; touch-action: none; }
 .gutter.h { width: 3px; cursor: col-resize; }
 .gutter.v { height: 3px; cursor: row-resize; }
 .gutter:hover, .gutter.drag { background: var(--accent); }
@@ -595,6 +595,10 @@ body.web #st-sync { display: none; }
   .btn.sm { height: 30px; }
   .fbtn { padding: 8px 0; }
   .q-step { min-height: 32px; padding: 6px 12px; }
+  /* a finger needs more than 3 px: an invisible wider grip round the sidebar edge and split bars */
+  #resizer::before, .gutter.h::before { content: ''; position: absolute; top: 0; bottom: 0; left: -10px; right: -10px; }
+  .gutter.v::before { content: ''; position: absolute; left: 0; right: 0; top: -10px; bottom: -10px; }
+  #resizer.drag, .gutter.drag { background: var(--accent); }
 }
 
 /* server folder picker */

@@ -40,6 +40,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.31.1 2026-11-15  Tablet: the sidebar edge and the bars between sections can be dragged
+#                       with a finger (pointer events, wider grip on touch screens).
 #    1.31.0 2026-11-15  Rename a project in the list (⋯ → Rename…; its real name stays).
 #                       Closing a working chat asks: close only the tab and let it finish,
 #                       or stop it; a chat open on another device too is never stopped
@@ -248,7 +250,7 @@
 
 set -u -o pipefail
 
-VERSION="1.31.0"
+VERSION="1.31.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -681,6 +681,23 @@ const tests = {
     global.SW.closeTab(chat, true); await settle();
   },
 
+  async 'sidebar width can be dragged with a finger (pointer events), not only a mouse'() {
+    const rz = document.body.querySelector('#resizer');
+    const ev = (type, x, id) => global.dispatchEvent({ type, clientX: x, clientY: 10, pointerId: id, pointerType: 'touch' });
+    rz.dispatch('pointerdown', { button: 0, pointerId: 7, pointerType: 'touch', clientX: 230, clientY: 10 });
+    ev('pointermove', 900, 8);                                  // another finger: ignored
+    assert.notStrictEqual(document.documentElement.style['--side'], '480px');
+    ev('pointermove', 320, 7);
+    assert.strictEqual(document.documentElement.style['--side'], '320px');
+    ev('pointerup', 320, 7);
+    assert.strictEqual(localStorage.getItem('sw-side'), '320');
+    ev('pointermove', 400, 7);                                  // after lifting the finger nothing moves
+    assert.strictEqual(document.documentElement.style['--side'], '320px');
+    const css = fs.readFileSync(path.join(ROOT, 'gui/static/app.css'), 'utf8');
+    assert.match(css, /#resizer \{[^}]*touch-action: none/);
+    assert.match(css, /\.gutter \{[^}]*touch-action: none/);
+  },
+
   async 'a project can be renamed (shown name only)'() {
     const shop = state.projects[1];
     q('.proj-head')[1].querySelector('.icon-btn').click();

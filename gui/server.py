@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.24.3"
+VERSION = "1.25.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1995,37 +1995,12 @@ print(json.dumps({"path": p, "parent": os.path.dirname(p) if p != "/" else "", "
                   "git": os.path.exists(os.path.join(p, ".git")), "dirs": dirs}))
 '''
 
-FILE_SKIP = {"node_modules", ".git", "dist", "build", ".angular", "vendor", "tmp", ".next", ".cache", ".dart_tool",
-             "__pycache__", ".venv", ".gradle", ".nuxt", ".idea", "coverage", "docker/data"}
 FILE_LIMIT = 30000
 
 
 def local_files(root: str) -> list:
-    """Project files for @-mentions: git's list (respects .gitignore), else a walk."""
-    git = which("git")
-    if git and os.path.isdir(os.path.join(root, ".git")):
-        try:
-            r = subprocess.run([git, "-C", root, "ls-files", "-co", "--exclude-standard"], capture_output=True,
-                               timeout=20, stdin=subprocess.DEVNULL)
-            if r.returncode == 0:
-                return r.stdout.decode("utf-8", "replace").splitlines()[:FILE_LIMIT]
-        except (OSError, subprocess.SubprocessError):
-            pass
-    out = []
-    for d, dirs, files in os.walk(root):
-        rel = os.path.relpath(d, root)
-        dirs[:] = sorted(x for x in dirs if x not in FILE_SKIP and not x.startswith(".")
-                         and os.path.join(rel, x).lstrip("./") not in FILE_SKIP)
-        for f in sorted(files):
-            out.append(f if rel == "." else os.path.join(rel, f))
-            if len(out) >= FILE_LIMIT:
-                return out
-    return out
-
-
-REMOTE_FILES_SH = ("(git ls-files -co --exclude-standard 2>/dev/null || find . -type d \\( -name node_modules "
-                   "-o -name .git -o -name dist -o -name vendor -o -name tmp \\) -prune -o -type f -print "
-                   "| sed 's|^\\./||') | head -n %d" % FILE_LIMIT)
+    """Project files for Find file / @-mentions (see fs_all in FS_PY)."""
+    return fs_local()["fs_all"](root)
 
 
 def with_dirs(files: list) -> list:
@@ -2665,6 +2640,17 @@ class GitRepo:
             raise ApiError(400, err.strip()[-500:] or "git status failed")
         st = parse_git_status(out)
         st.update(repo=True, where=self.where, path=self.repo)
+        # tracked files that .gitignore names: .gitignore does not apply to files git already
+        # tracks, so their changes keep showing — mark them (they can be "untracked")
+        tracked = [f["path"] for f in st["files"] if not f["untracked"] and f["x"] != "D" and f["y"] != "D"]
+        if tracked:
+            c2, ign, _ = self.run(["check-ignore", "--no-index", "-z", "--stdin"], timeout=20,
+                                  stdin="\0".join(tracked).encode())
+            names = set(x for x in ign.split("\0") if x) if c2 in (0, 1) else set()
+            for f in st["files"]:
+                if f["path"] in names:
+                    f["ignored"] = True
+            st["ignoredTracked"] = sum(1 for f in st["files"] if f.get("ignored"))
         code, last, _ = self.run(["log", "-1", "--format=%h %s"], timeout=15)
         st["last"] = last.strip() if code == 0 else ""
         return st
@@ -2725,6 +2711,53 @@ class GitRepo:
 
     def fetch(self) -> str:
         return self.check(["fetch", "--prune"], timeout=120)
+
+    def untrack(self, files) -> str:
+        """Stop tracking files (they stay on disk) — for files .gitignore names."""
+        if not isinstance(files, list) or not files or not all(isinstance(f, str) and git_path_ok(f) for f in files):
+            raise ApiError(400, "pick at least one file")
+        self.flush()
+        out = self.check(["rm", "-r", "--cached", "--quiet", "--"] + files)
+        self.flush()
+        return out
+
+    # history --------------------------------------------------------------------
+    def log(self, limit=80) -> dict:
+        """Recent commits of this branch and of its upstream, each marked: push (only here),
+        pull (only on the remote, as of the last fetch), synced, or local (no upstream)."""
+        code, up, _ = self.run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], timeout=15)
+        up = up.strip() if code == 0 else ""
+        refs = ["HEAD"] + ([up] if up else [])
+        fmt = "%H%x00%h%x00%an%x00%at%x00%D%x00%P%x00%s"
+        code, out, err = self.run(["log", "--date-order", f"-n{int(limit)}", "--format=" + fmt] + refs + ["--"], timeout=30)
+        if code != 0:
+            if any(x in err for x in ("does not have any commits", "bad default revision", "unknown revision", "bad revision 'HEAD'")):
+                return {"upstream": up, "commits": [], "ahead": 0, "behind": 0}
+            raise ApiError(400, err.strip()[-500:] or "git log failed")
+        ahead, behind = set(), set()
+        if up:
+            for rng, into in ((f"{up}..HEAD", ahead), (f"HEAD..{up}", behind)):
+                c, o, _ = self.run(["rev-list", "-n2000", rng, "--"], timeout=30)
+                if c == 0:
+                    into.update(o.split())
+        commits = []
+        for line in out.splitlines():
+            parts = line.split("\0")
+            if len(parts) < 7:
+                continue
+            full, short, author, date, refs_, parents, subject = parts[:7]
+            state = "push" if full in ahead else "pull" if full in behind else "synced" if up else "local"
+            commits.append({"hash": full, "short": short, "author": author, "date": int(date) if date.isdigit() else 0,
+                            "refs": [r.strip() for r in refs_.split(",") if r.strip()], "merge": len(parents.split()) > 1,
+                            "subject": subject[:300], "state": state})
+        return {"upstream": up, "commits": commits, "ahead": len(ahead), "behind": len(behind)}
+
+    def show(self, rev: str) -> str:
+        if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{4,40}", rev):
+            raise ApiError(400, "bad commit")
+        text = self.check(["show", "--no-color", "--stat", "--patch", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%B", rev, "--"],
+                          timeout=30)
+        return text if len(text) < 400_000 else text[:400_000] + "\n… (cut)"
 
     # branches -----------------------------------------------------------------
     def branches(self) -> dict:
@@ -2883,11 +2916,57 @@ def fs_read(root, rel):
     return res
 
 
+WALK_SKIP = FS_SKIP | {".git", ".idea", "docker/data"}
+
+
+def fs_git_files(folder, prefix):
+    """git's own list of a repository: tracked + untracked, without what .gitignore names."""
+    try:
+        r = subprocess.run(["git", "-C", folder, "ls-files", "-co", "--exclude-standard", "-z"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=30,
+                           env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [prefix + x for x in r.stdout.decode("utf-8", "replace").split("\0") if x]
+
+
+def fs_all(root, limit=30000):
+    """Every file of a project, for Find file and @-mentions. Inside git repositories git's
+    list is used (so .gitignore counts) — also when the project folder holds several of them."""
+    root = os.path.realpath(os.path.expanduser(root or "~"))
+    if os.path.exists(os.path.join(root, ".git")):
+        got = fs_git_files(root, "")
+        if got is not None:
+            return got[:limit]
+    out = []
+    for d, dirs, files in os.walk(root):
+        rel = os.path.relpath(d, root)
+        rel = "" if rel == "." else rel.replace(os.sep, "/") + "/"
+        if rel and os.path.exists(os.path.join(d, ".git")):
+            got = fs_git_files(d, rel)
+            if got is not None:
+                out.extend(got)
+                dirs[:] = []
+                if len(out) >= limit:
+                    break
+                continue
+        dirs[:] = sorted(x for x in dirs if x not in WALK_SKIP and not x.startswith(".") and (rel + x) not in WALK_SKIP)
+        out.extend(rel + f for f in sorted(files))
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 def fs_main(argv):
     try:
         op, root, rel = argv[0], argv[1], argv[2] if len(argv) > 2 else ""
-        if op not in ("list", "read"):
+        if op not in ("list", "read", "all"):
             raise FsError("bad request")
+        if op == "all":
+            print(json.dumps({"files": fs_all(root)}))
+            return
         print(json.dumps(fs_list(root, rel) if op == "list" else fs_read(root, rel)))
     except FsError as e:
         print(json.dumps({"error": str(e)}))
@@ -4431,17 +4510,11 @@ class App:
         if p.get("localExists"):
             files = local_files(p["local"])
         elif p.get("remote"):
-            conf = self.conf
-            ep = p.get("endpoint") or {}
-            conf = conf.with_endpoint(ep.get("user"), ep.get("host"), ep.get("port"))
-            cmd = f"cd {remote_path_expr(p['remote'])} && " + REMOTE_FILES_SH
-            try:
-                r = subprocess.run(ssh_base(conf, multiplex=bool(self.store.settings.get("sshMultiplex")))
-                                   + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
-            except (OSError, subprocess.SubprocessError) as e:
-                raise ApiError(502, f"could not list files on the server: {e}")
-            files = [x for x in r.stdout.decode("utf-8", "replace").splitlines() if x][:FILE_LIMIT]
+            res = remote_python(self._project_conf(p), FS_PY, ["all", p["remote"]],
+                                multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=60) or {}
+            if res.get("error"):
+                raise ApiError(400, str(res["error"]))
+            files = [x for x in res.get("files") or [] if isinstance(x, str)][:FILE_LIMIT]
         else:
             files = []
         files = with_dirs(files)
@@ -5431,6 +5504,14 @@ class Handler(BaseHTTPRequestHandler):
             repo = GitRepo(app, p, rq if isinstance(rq, str) else "", wh if wh in WHERE else None)
             if method == "GET" and act == "status":
                 return repo.status()
+            if method == "GET" and act == "log":
+                return repo.log()
+            if method == "GET" and act == "show":
+                return {"diff": repo.show((query.get("hash") or [""])[0])}
+            if method == "POST" and act == "untrack":
+                repo.untrack(body.get("files"))
+                app.invalidate()
+                return {"status": repo.status()}
             if method == "GET" and act == "branches":
                 return repo.branches()
             if method == "POST" and act == "switch":

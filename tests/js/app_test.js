@@ -113,6 +113,12 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tabs') res = fakeTabs;
+  else if (url.startsWith('/api/git/cheshmeh/log')) res = { upstream: 'origin/main', ahead: 1, behind: 1, commits: [
+    { hash: 'b'.repeat(40), short: 'bbbbbbb', author: 'Sara', date: Date.now() / 1000 - 120, refs: ['origin/main'], merge: false, subject: 'from GitHub', state: 'pull' },
+    { hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'Me', date: Date.now() / 1000 - 600, refs: ['HEAD -> main'], merge: false, subject: 'my change', state: 'push' },
+    { hash: 'c'.repeat(40), short: 'ccccccc', author: 'Me', date: Date.now() / 1000 - 86400 * 3, refs: [], merge: false, subject: 'old', state: 'synced' }] };
+  else if (url.startsWith('/api/git/cheshmeh/show')) res = { diff: 'commit ' + 'a'.repeat(40) + '\n+added line' };
+  else if (url === '/api/git/cheshmeh/untrack') res = { status: Object.assign({}, gitStatus, { files: gitStatus.files.filter((f) => !f.ignored) }) };
   else if (url.startsWith('/api/browse')) {
     const p = decodeURIComponent(url.split('path=')[1] || '~');
     const tree = { '/home/esi': ['work', 'cheshmeh'], '/home/esi/work': ['old-app'], '/home/esi/work/old-app': [] };
@@ -232,6 +238,34 @@ const tests = {
     assert.deepStrictEqual(post.body, { repo: 'cheshmeh-web-app', where: 'local', message: 'fix api', files: ['api/main.go'] });
     assert.ok(calls.some((c) => c.url.indexOf('/diff?repo=cheshmeh-web-app&where=local&path=') > 0), 'diff asks the right repository');
     assert.strictEqual(q('.gfile', modal).length, 1);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'git panel: history shows what to push and pull; files in .gitignore can be untracked'() {
+    gitStatus.files.push({ path: '.env', x: ' ', y: 'M', conflict: false, untracked: false, ignored: true });
+    q('.act').find((b) => b.textContent.indexOf('Git') === 0).click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.match(q('.ghead', modal)[0].textContent, /↓2 to pull/);
+    // .gitignore'd but tracked
+    assert.ok(q('.ftag', modal).some((t) => t.textContent === 'ignored'));
+    const stop = q('button', modal).find((b) => b.textContent === 'Stop tracking it');
+    assert.ok(stop, 'offers to stop tracking it');
+    stop.click(); await settle();
+    const un = calls.filter((c) => c.url === '/api/git/cheshmeh/untrack').pop();
+    assert.deepStrictEqual(un.body.files, ['.env']);
+    assert.ok(!q('button', modal).some((b) => b.textContent === 'Stop tracking it'));
+    // history
+    q('.gtab', modal).find((b) => b.textContent === 'History').click(); await settle();
+    assert.match(q('.hsum', modal)[0].textContent, /↑ 1 commit to push · ↓ 1 commit to pull/);
+    const rows = q('.hrow', modal);
+    assert.deepStrictEqual(rows.map((r) => [r.querySelector('.hm').textContent, r.querySelector('.hsub').textContent]),
+      [['↓', 'from GitHub'], ['↑', 'my change'], ['✓', 'old']]);
+    assert.ok(q('.href', rows[1]).some((r) => r.textContent === 'main'));
+    rows[1].click(); await settle();
+    assert.ok(calls.some((c) => c.url.indexOf('/api/git/cheshmeh/show?repo=cheshmeh-web-app&where=local&hash=' + 'a'.repeat(40)) === 0));
+    assert.match(q('.gdiff', modal)[0].textContent, /\+added line/);
+    gitStatus.files.pop();
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

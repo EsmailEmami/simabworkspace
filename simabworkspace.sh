@@ -40,6 +40,12 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.25.0 2026-11-15  Git panel: a History tab — the branch's commits, each marked ↑ not
+#                       pushed / ↓ not pulled / ✓ on both sides, with a summary of what to
+#                       push or pull; click a commit to see it. .gitignore: Find file and @
+#                       in the chat follow each repository's .gitignore (also when the
+#                       project holds several); files named in .gitignore that git still
+#                       tracks are marked, with "Stop tracking".
 #    1.24.3 2026-11-15  Add project → From this machine: "Browse…" next to the server folder
 #                       opens the server's folders — go in and out, then "Use this folder",
 #                       "Inside it: <your folder's name>" or "New folder…". From the server:
@@ -192,7 +198,7 @@
 
 set -u -o pipefail
 
-VERSION="1.24.3"
+VERSION="1.25.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

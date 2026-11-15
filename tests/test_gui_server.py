@@ -889,6 +889,24 @@ class ProjectFiles(unittest.TestCase):
             self.assertIn("a.py", files)
             self.assertNotIn("secret.txt", files)
 
+    def test_several_repositories_in_one_project_each_with_its_gitignore(self):
+        # the project folder is not a repository itself, but holds some: their .gitignore counts
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        with tempfile.TemporaryDirectory() as d:
+            for repo in ("api", "web"):
+                subprocess.run(["git", "init", "-q", str(Path(d, repo))], check=True)
+            Path(d, "api", ".gitignore").write_text(".env\nbin/\n")
+            Path(d, "web", ".gitignore").write_text("*.log\n")
+            for f in ("api/main.go", "api/.env", "api/bin/server", "web/app.ts", "web/debug.log", "notes.md", "node_modules/x.js"):
+                Path(d, f).parent.mkdir(parents=True, exist_ok=True)
+                Path(d, f).write_text("x")
+            files = sorted(sw.local_files(d))
+            self.assertEqual(files, ["api/.gitignore", "api/main.go", "notes.md", "web/.gitignore", "web/app.ts"])
+            # the same on the server (the script run with python3 -c)
+            r = subprocess.run([sys.executable, "-c", sw.FS_PY, "all", d], capture_output=True, text=True)
+            self.assertEqual(sorted(json.loads(r.stdout)["files"]), files)
+
 
 class GitStatusParse(unittest.TestCase):
     def test_branch_and_files(self):
@@ -1054,6 +1072,63 @@ class GitFlow(TmpHome):
                 repo.switch(bad, create=True)
         # the summary knows the branch
         self.assertEqual(self.app.git_summary_one(self.p)["branch"], "feature/login")
+
+    def test_history_shows_what_to_push_and_pull(self):
+        repo = sw.GitRepo(self.app, self.p)
+        self.assertEqual([c["state"] for c in repo.log()["commits"]], ["local"])        # no upstream yet
+        repo.push()
+        lg = repo.log()
+        self.assertEqual((lg["upstream"], lg["ahead"], lg["behind"]), ("origin/main", 0, 0))
+        self.assertEqual([(c["subject"], c["state"]) for c in lg["commits"]], [("first", "synced")])
+        # someone else pushes; we commit locally
+        b = self.clone(self.remote, "b4")
+        Path(b, "x.txt").write_text("x\n")
+        self.git(b, "add", "x.txt")
+        self.git(b, "commit", "-qm", "from b")
+        self.git(b, "push", "-q")
+        Path(self.a, "f.txt").write_text("two\n")
+        repo.commit("mine", None)
+        repo.fetch()
+        lg = repo.log()
+        self.assertEqual((lg["ahead"], lg["behind"]), (1, 1))
+        states = {c["subject"]: c["state"] for c in lg["commits"]}
+        self.assertEqual(states, {"mine": "push", "from b": "pull", "first": "synced"})
+        c = next(c for c in lg["commits"] if c["subject"] == "mine")
+        self.assertEqual((c["author"], len(c["hash"]), c["merge"]), ("T", 40, False))
+        self.assertIn("HEAD -> main", c["refs"])
+        shown = repo.show(c["short"])
+        self.assertIn("mine", shown)
+        self.assertIn("+two", shown)
+        for bad in ("HEAD", "--all", "x" * 3, "../etc"):
+            with self.assertRaises(sw.ApiError):
+                repo.show(bad)
+        # an empty repository: no history, no error
+        e = os.path.join(self.tmp.name, "empty")
+        subprocess.run(["git", "init", "-q", e], check=True)
+        self.assertEqual(sw.GitRepo(self.app, dict(self.p, local=e)).log()["commits"], [])
+
+    def test_files_in_gitignore_but_tracked_are_marked_and_can_be_untracked(self):
+        repo = sw.GitRepo(self.app, self.p)
+        Path(self.a, ".env").write_text("A=1\n")
+        self.git(self.a, "add", ".env")
+        self.git(self.a, "commit", "-qm", "oops, .env")
+        Path(self.a, ".gitignore").write_text(".env\nlogs/\n")
+        Path(self.a, ".env").write_text("A=2\n")
+        Path(self.a, "logs").mkdir()
+        Path(self.a, "logs", "x.log").write_text("x")             # ignored and untracked: not listed at all
+        st = repo.status()
+        by = {f["path"]: f for f in st["files"]}
+        self.assertEqual(set(by), {".env", ".gitignore"})
+        self.assertTrue(by[".env"].get("ignored"))
+        self.assertFalse(by[".gitignore"].get("ignored"))
+        self.assertEqual(st["ignoredTracked"], 1)
+        repo.untrack([".env"])
+        st = repo.status()
+        by = {f["path"]: f for f in st["files"]}
+        self.assertEqual((by[".env"]["x"], by[".env"].get("ignored")), ("D", None))     # removed from git, still on disk
+        self.assertTrue(Path(self.a, ".env").exists())
+        with self.assertRaises(sw.ApiError):
+            repo.untrack(["../x"])
 
     def test_not_a_repo(self):
         d = os.path.join(self.tmp.name, "plain")
@@ -1741,7 +1816,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.24.3"', text)
+        self.assertIn('VERSION="1.25.0"', text)
 
 
 if __name__ == "__main__":

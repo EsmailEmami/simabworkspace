@@ -40,6 +40,12 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.23.0 2026-11-15  Extra windows for a second monitor: tab menu → Move to new window,
+#                       or drag a tab out of the window; drag tabs between windows; each
+#                       window has its own tabs and splits. Chat fix: opening a conversation
+#                       again (Reopen last session, History, the web version, another window)
+#                       uses the Claude that is still working on it — no second Claude, and
+#                       its live output shows in the chat.
 #    1.22.0 2026-11-15  Files tab (project ⋯ → Files): the project's folders, git changes
 #                       marked on files and folders, files shown read-only (text, images),
 #                       their changes one click away, "Ask Claude" puts @file in the chat,
@@ -159,7 +165,7 @@
 
 set -u -o pipefail
 
-VERSION="1.22.0"
+VERSION="1.23.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

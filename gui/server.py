@@ -52,7 +52,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.22.0"
+VERSION = "1.23.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1576,15 +1576,22 @@ IDLE = 1800
 DM = []                                  # the daemon, when this relay started it (reaped here)
 def P(n):
     return os.path.join(d, n)
-def pid_alive():
-    if DM and DM[0].poll() is not None:
+def pid_alive(folder=None):
+    if folder is None and DM and DM[0].poll() is not None:
         return 0
     try:
-        pid = int(open(P("pid")).read().strip())
+        pid = int(open(os.path.join(folder or d, "pid")).read().strip())
         os.kill(pid, 0)
         return pid
     except (OSError, ValueError):
         return 0
+def write(n, text):
+    try:
+        with open(P(n + ".tmp"), "w") as f:
+            f.write(text)
+        os.replace(P(n + ".tmp"), P(n))
+    except OSError:
+        pass
 def size(n):
     try:
         return os.path.getsize(P(n))
@@ -1657,7 +1664,32 @@ if mode == "kill":
 
 os.makedirs(d, mode=0o700, exist_ok=True)
 off = int(sys.argv[3])
+conv = sys.argv[5] if mode == "start" and len(sys.argv) > 5 else ""
 pid = pid_alive()
+if not pid and conv:
+    # this conversation may already have a Claude working on it (opened again after the app
+    # restarted, from History, from the web version…): use that one, never a second Claude
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        names = []
+    for k in names:
+        o = os.path.join(base, k)
+        if k == key:
+            continue
+        try:
+            same = open(os.path.join(o, "conv")).read().strip() == conv
+        except OSError:
+            same = False
+        if same and pid_alive(o):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
+            key, d = k, o
+            pid = pid_alive()
+            off = size("out.log")          # only what comes next; earlier messages come from the history
+            break
 if pid:
     state = "attached"
 elif mode == "attach":
@@ -1683,6 +1715,8 @@ else:
     touch("out.log")
     touch("err.log")
     touch("seen")
+    if conv:
+        write("conv", conv)
     dm = subprocess.Popen([sys.executable, "-c", os.environ["SW_RELAY"], "daemon", key, sys.argv[4]],
                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                           start_new_session=True, close_fds=True)
@@ -1694,7 +1728,7 @@ else:
 if off < 0 or off > size("out.log"):
     off = size("out.log")
 touch("seen")
-say({"type": "_sw_relay", "state": state, "off": off})
+say({"type": "_sw_relay", "state": state, "off": off, "key": key})
 
 def errors(pos):
     try:
@@ -1719,6 +1753,14 @@ def inputs():
                 p = pid_alive()
                 if p:
                     os.kill(p, signal.SIGTERM)
+                continue
+            if line.startswith(b'{"type": "_sw_relay_conv"'):
+                try:
+                    c = json.loads(line).get("id") or ""
+                except ValueError:
+                    c = ""
+                if c and all(ch in "0123456789abcdef-" for ch in c):
+                    write("conv", c)       # which conversation this Claude is on (found again by it)
                 continue
             if w is None:
                 w = os.open(P("in"), os.O_WRONLY)
@@ -1752,9 +1794,12 @@ while True:
 '''
 
 
-def chat_relay_command(mode: str, key: str, offset: int = 0, script: str = "") -> str:
-    """The remote command for the relay; without python3 on the server Claude runs directly (as before)."""
-    args = " ".join(shlex.quote(str(a)) for a in ([mode, key] + ([] if mode == "kill" else [offset]) + ([script] if mode == "start" else [])))
+def chat_relay_command(mode: str, key: str, offset: int = 0, script: str = "", conv: str = "") -> str:
+    """The remote command for the relay; without python3 on the server Claude runs directly (as before).
+    conv: the conversation being resumed — a Claude already working on it is used instead of a new one."""
+    conv = conv if conv and UUID_RE.fullmatch(conv) else ""
+    args = " ".join(shlex.quote(str(a)) for a in ([mode, key] + ([] if mode == "kill" else [offset])
+                                                    + ([script] + ([conv] if conv else []) if mode == "start" else [])))
     fallback = f"exec sh -c {shlex.quote(script)}" if mode == "start" else "exit 0"
     return (f"if command -v python3 >/dev/null 2>&1; then SW_RELAY={shlex.quote(CHAT_RELAY_PY)}; export SW_RELAY; exec python3 -c \"$SW_RELAY\" {args}; "
             f"else {fallback}; fi")
@@ -2000,7 +2045,7 @@ class ChatSession:
     def _connect(self, how="start"):
         if self.relay_key:
             argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort,
-                                           relay=(how, self.relay_key, self.relay_off))
+                                           relay=(how, self.relay_key, self.relay_off, self.session_id or ""))
         else:
             argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort)
         env = dict(os.environ, PATH=tool_path())
@@ -2049,6 +2094,14 @@ class ChatSession:
         st = ev.get("state")
         if isinstance(ev.get("off"), int):
             self.relay_off = ev["off"]
+        k = ev.get("key")
+        if isinstance(k, str) and RELAY_KEY_RE.fullmatch(k) and k != self.relay_key:
+            self.relay_key = k                     # the Claude that was already on this conversation
+            self.spec["relay"] = k
+            if self.on_change:
+                self.on_change(self)
+        if st in ("started", "attached") and self.session_id:
+            self._write({"type": "_sw_relay_conv", "id": self.session_id})
         if st == "exit":
             self.relay_exit = ev.get("code") if isinstance(ev.get("code"), int) else -1
             return
@@ -2132,6 +2185,8 @@ class ChatSession:
         if isinstance(sid, str) and UUID_RE.fullmatch(sid) and sid != self.session_id:
             self.session_id = sid
             self.spec["resume"] = sid
+            if self.relay_on:
+                self._write({"type": "_sw_relay_conv", "id": sid})
             if self.on_change:
                 self.on_change(self)
         if t == "stream_event":
@@ -2400,7 +2455,7 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY)."""
         script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_))
         if relay:
-            script = chat_relay_command(relay[0], relay[1], relay[2], script)
+            script = chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")
         return ssh_base(c, multiplex=multiplex and not relay) + ["-T", c.target, script]
 
     relay = spec.get("relay") if isinstance(spec.get("relay"), str) and RELAY_KEY_RE.fullmatch(spec.get("relay")) else ""
@@ -3627,6 +3682,11 @@ class App:
 
     def _create_session(self, body: dict) -> dict:
         sid = secrets.token_hex(6)
+        if body.get("kind") == "chat" and isinstance(body.get("resume"), str) and body["resume"]:
+            same = next((x for x in list(self.sessions.values()) if isinstance(x, ChatSession) and not x.closed
+                         and body["resume"] in (x.session_id, x.spec.get("resume"))), None)
+            if same:
+                return same.info()          # already open (maybe in another window): that tab, not a second Claude
         if body.get("kind") == "chat":
             built = build_chat(body, self.conf, self.store, self.projects(max_age=10))
             if built["resume"]:

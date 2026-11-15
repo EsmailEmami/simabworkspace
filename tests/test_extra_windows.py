@@ -81,6 +81,19 @@ class ExtraWindows(base.TmpHome):
         self.app.windows["abcd"]["seen"] = time.time() - sw.WIN_TTL - 1
         self.assertEqual(self.wins()[t["id"]], "")
 
+    def test_opening_an_open_conversation_brings_its_tab_here(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        built = {"make_argv": None, "cwd": self.tmp.name, "title": "Claude · p", "resume": sid, "mode": "default",
+                 "model": "", "relay": "", "spec": {"kind": "chat", "project": "p", "where": "server", "resume": sid}}
+        c = sw.ChatSession("chat1", built)
+        c.session_id = sid
+        self.app.sessions["chat1"] = c
+        info = self.app.create_session({"kind": "chat", "project": "p", "resume": sid, "win": "abcd"})
+        self.assertEqual((info["id"], info["win"]), ("chat1", "abcd"))
+        self.assertEqual(len(self.app.sessions), 1, "no second chat, no second Claude")
+        c.closed = True
+        del self.app.sessions["chat1"]
+
     def test_bad_window_ids(self):
         t = self.files_tab()
         for bad in ("../x", "A" * 3, "x" * 40, 5, "UPPER"):

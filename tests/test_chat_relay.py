@@ -65,13 +65,13 @@ class ChatRelay(unittest.TestCase):
         self.addCleanup(env.stop)
         self.calls = []
 
-    def make(self, key, restored=False):
+    def make(self, key, restored=False, resume=""):
         script = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(SLOW_CLAUDE)}"
 
         def make_argv(mode, model, resume, effort="", relay=None):
             self.calls.append(relay)
-            return ["sh", "-c", sw.chat_relay_command(relay[0], relay[1], relay[2], script)]
-        built = {"make_argv": make_argv, "cwd": str(self.home), "title": "Claude · p", "resume": "", "mode": "default",
+            return ["sh", "-c", sw.chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")]
+        built = {"make_argv": make_argv, "cwd": str(self.home), "title": "Claude · p", "resume": resume, "mode": "default",
                  "model": "", "relay": key, "relay_restored": restored, "spec": {"kind": "chat", "project": "p", "where": "server"}}
         s = sw.ChatSession("c1", built)
         s.start()
@@ -125,6 +125,41 @@ class ChatRelay(unittest.TestCase):
         s2.kill()
         self.assertTrue(wait_for(lambda: not alive(pid)))
 
+    def test_opening_the_conversation_again_uses_the_claude_already_on_it(self):
+        # the user's bug: the tab came back without its relay (or from History / the web version),
+        # a second Claude started on the same conversation while the first one was still working
+        sid = "11111111-2222-3333-4444-555555555555"
+        s = self.make("1111111111111111")
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        s.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: "step1" in self.texts(s)))
+        conv = self.home / ".cache/simabworkspace/chats/1111111111111111/conv"
+        self.assertTrue(wait_for(lambda: conv.exists() and conv.read_text() == sid), "the relay knows the conversation")
+        s.shutdown()                                     # the app quits mid-answer: Claude keeps working
+        pid = self.claude_pids()[0]
+        s2 = self.make("2222222222222222", resume=sid)     # a NEW tab for the same conversation
+        self.addCleanup(s2.kill, True)
+        self.assertTrue(wait_for(lambda: s2.init is not None))
+        self.assertEqual(self.claude_pids(), [pid], "no second Claude")
+        self.assertEqual((s2.relay_key, s2.spec["relay"]), ("1111111111111111", "1111111111111111"))
+        self.assertFalse((self.home / ".cache/simabworkspace/chats/2222222222222222").exists())
+        # its live output reaches the new tab, and the next message goes to the same Claude
+        self.assertTrue(wait_for(lambda: "step2" in self.texts(s2)))
+        s2.handle({"t": "send", "content": "again"})
+        self.assertTrue(wait_for(lambda: self.texts(s2).count("step2") >= 2))
+        self.assertEqual(self.claude_pids(), [pid])
+        # closing the tab stops that Claude
+        s2.kill()
+        self.assertTrue(wait_for(lambda: not alive(pid)))
+
+    def test_a_finished_conversation_starts_a_new_claude(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        s = self.make("3333333333333333", resume=sid)
+        self.addCleanup(s.kill, True)
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        self.assertEqual(s.relay_key, "3333333333333333")
+        self.assertEqual((self.home / ".cache/simabworkspace/chats/3333333333333333/conv").read_text(), sid)
+
     def test_attach_when_nothing_runs_reports_the_end(self):
         s = self.make("aaaaaaaaaaaaaaaa")
         self.assertTrue(wait_for(lambda: s.init is not None))
@@ -141,6 +176,9 @@ class ChatRelay(unittest.TestCase):
         self.assertIn("exec sh -c 'cd x; exec claude'", cmd)          # no python3: as before
         self.assertIn("start 0123456789abcdef 12 'cd x; exec claude'", cmd)
         self.assertIn("kill 0123456789abcdef; else exit 0", sw.chat_relay_command("kill", "0123456789abcdef"))
+        sid = "11111111-2222-3333-4444-555555555555"
+        self.assertIn("start 0123456789abcdef 0 'cd x' " + sid, sw.chat_relay_command("start", "0123456789abcdef", 0, "cd x", sid))
+        self.assertNotIn("evil", sw.chat_relay_command("start", "0123456789abcdef", 0, "cd x", "evil; rm -rf"))
         compile(sw.CHAT_RELAY_PY, "relay", "exec")
 
 

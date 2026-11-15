@@ -2985,6 +2985,7 @@
         var spec = { kind: sp.kind, where: sp.where, project: sp.project, cmdId: sp.cmdId, title: sp.title, claudeMode: sp.kind === 'claude' ? 'continue' : 'new' };
         if (sp.kind === 'docker') { spec.container = sp.container; spec.action = sp.action; }
         if ((sp.kind === 'chat' || sp.kind === 'claude') && sp.resume) spec.resume = sp.resume;
+        if (sp.kind === 'chat' && sp.relay) spec.relay = sp.relay;      // the same Claude on the server, if it still works
         return openSession(spec, { background: i > 0 });
       });
     });

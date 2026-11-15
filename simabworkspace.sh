@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.23.2 2026-11-15  macOS: "keyword controlpath extra arguments at end of line" — the
+#                       shared SSH connection no longer lives under a home folder with a
+#                       space (or a very long one); a private /tmp folder is used instead.
 #    1.23.1 2026-11-15  Chat: switching tabs (or splitting, moving, reconnecting) no longer
 #                       jumps to the first message — it stays at the end, or where you were
 #                       reading. The message box hides after 3 s while you work elsewhere
@@ -169,7 +172,7 @@
 
 set -u -o pipefail
 
-VERSION="1.23.1"
+VERSION="1.23.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

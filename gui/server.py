@@ -28,6 +28,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import signal
 import socket
 import sqlite3
@@ -52,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.23.1"
+VERSION = "1.23.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -702,14 +703,35 @@ def remote_path_expr(p: str) -> str:
     return shlex.quote(p)
 
 
+def control_path() -> str:
+    """Where ssh keeps the shared connection. ssh refuses a ControlPath with a space in it
+    ("keyword controlpath extra arguments at end of line" — e.g. a Mac home folder with a
+    space), and a socket path must stay short (104 bytes on macOS, ssh adds 17 while making
+    it). Then a private folder in /tmp is used; "" = no shared connection at all."""
+    d = os.path.join(os.path.expanduser("~"), ".ssh")
+    if not re.search(r"\s", d) and len(d) <= 45:
+        return os.path.join(d, "sw-%C")
+    try:
+        uid = os.getuid()
+        d = f"/tmp/sw-{uid}"
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.lstat(d)
+        if st.st_uid != uid or not stat.S_ISDIR(st.st_mode):
+            return ""                      # someone else's folder: do not share connections through it
+        os.chmod(d, 0o700)
+    except (OSError, AttributeError):
+        return ""
+    return os.path.join(d, "sw-%C")
+
+
 def ssh_base(conf: ServerConf, multiplex=True, batch=False) -> list:
     a = ["ssh", "-p", str(conf.port),
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
          "-o", "StrictHostKeyChecking=accept-new"]
     if conf.key and os.path.isfile(os.path.expanduser(conf.key)):
         a += ["-i", os.path.expanduser(conf.key)]
-    if multiplex and not IS_WIN:          # Windows OpenSSH has no ControlMaster
-        cp = os.path.join(os.path.expanduser("~"), ".ssh", "sw-%C")
+    cp = control_path() if multiplex and not IS_WIN else ""      # Windows OpenSSH has no ControlMaster
+    if cp:
         a += ["-o", "ControlMaster=auto", "-o", f"ControlPath={cp}", "-o", "ControlPersist=10m"]
     if batch:
         a += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6"]

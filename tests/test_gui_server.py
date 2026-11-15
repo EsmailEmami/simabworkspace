@@ -406,6 +406,37 @@ class Fingerprint(unittest.TestCase):
         self.assertEqual(len(a), 12)
 
 
+class SshControlPath(unittest.TestCase):
+    """macOS: ssh refused ControlPath when the home folder has a space in it."""
+
+    def opts(self, argv):
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-o"]
+
+    def test_normal_home_uses_dot_ssh(self):
+        with mock.patch.dict(os.environ, {"HOME": "/Users/abdollah"}):
+            argv = sw.ssh_base(sw.ServerConf("u", "h", "22", ""))
+        self.assertIn("ControlPath=/Users/abdollah/.ssh/sw-%C", self.opts(argv))
+
+    def test_home_with_a_space_or_too_long(self):
+        for home in ("/Users/Abdollah M", "/Users/" + "x" * 60):
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                argv = sw.ssh_base(sw.ServerConf("u", "h", "22", ""))
+            cp = [o for o in self.opts(argv) if o.startswith("ControlPath=")]
+            self.assertEqual(len(cp), 1, home)
+            self.assertNotRegex(cp[0], r"\s")
+            self.assertEqual(cp[0], f"ControlPath=/tmp/sw-{os.getuid()}/sw-%C")
+            self.assertLessEqual(len(cp[0]) - len("ControlPath=") + 17 + 40 - 2, 104)
+            st = os.stat(f"/tmp/sw-{os.getuid()}")
+            self.assertEqual(oct(st.st_mode & 0o777), "0o700")
+
+    def test_no_shared_connection_when_tmp_folder_is_not_ours(self):
+        with mock.patch.dict(os.environ, {"HOME": "/Users/A B"}), \
+                mock.patch.object(sw.os, "lstat", return_value=os.stat_result((0o40700, 0, 0, 0, os.getuid() + 1, 0, 0, 0, 0, 0))):
+            argv = sw.ssh_base(sw.ServerConf("u", "h", "22", ""))
+        self.assertFalse(any(o.startswith(("ControlPath", "ControlMaster")) for o in self.opts(argv)))
+        self.assertIn("ServerAliveInterval=15", self.opts(argv))
+
+
 class SshAlias(TmpHome):
     def test_block_is_replaced_not_duplicated(self):
         f = Path(self.tmp.name) / "ssh_config"
@@ -1573,7 +1604,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.23.1"', text)
+        self.assertIn('VERSION="1.23.2"', text)
 
 
 if __name__ == "__main__":

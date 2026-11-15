@@ -52,7 +52,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.21.2"
+VERSION = "1.22.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2615,6 +2615,206 @@ class GitRepo:
         return self.check(["fetch", "--prune"], timeout=120)
 
 
+# ----------------------------------------------------------------------------- file explorer
+# The Files tab lists folders and shows files of a project. The same small script
+# runs here (exec'd in-process) for the local copy, and on the server over SSH
+# (python3 -c) — so both sides behave the same. Paths never leave the project:
+# every request is resolved with realpath and must stay inside the project root.
+FS_PY = r'''
+import os, sys, json, base64, subprocess
+
+FS_SKIP = {"node_modules", "dist", "build", ".angular", "vendor", "tmp", ".next", ".cache", ".dart_tool",
+           "__pycache__", ".venv", ".gradle", ".nuxt", "coverage"}
+FS_MAX_LIST = 3000
+FS_MAX_TEXT = 1000000
+FS_MAX_IMAGE = 3000000
+FS_IMAGES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+             ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".bmp": "image/bmp"}
+
+
+class FsError(Exception):
+    pass
+
+
+def fs_resolve(root, rel):
+    root = os.path.realpath(os.path.expanduser(root or "~"))
+    if not os.path.isdir(root):
+        raise FsError("the project folder does not exist")
+    rel = (rel or "").strip("/")
+    if rel and (rel.startswith("-") or ".." in rel.split("/") or "\0" in rel):
+        raise FsError("bad path")
+    full = os.path.realpath(os.path.join(root, rel)) if rel else root
+    if full != root and not full.startswith(root.rstrip(os.sep) + os.sep):
+        raise FsError("this path is outside the project")
+    return root, full
+
+
+def fs_ignored(folder, names):
+    """Names git ignores in this folder (empty when it is not inside a repository)."""
+    if not names:
+        return set()
+    try:
+        r = subprocess.run(["git", "-C", folder, "check-ignore", "-z", "--stdin"], input="\0".join(names).encode(),
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+                           env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C"))
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {x for x in r.stdout.decode("utf-8", "replace").split("\0") if x}
+
+
+def fs_list(root, rel):
+    root, full = fs_resolve(root, rel)
+    if not os.path.isdir(full):
+        raise FsError("not a folder")
+    out = []
+    try:
+        it = sorted(os.scandir(full), key=lambda e: e.name.lower())
+    except OSError as e:
+        raise FsError("cannot read this folder: " + (e.strerror or str(e)))
+    for e in it:
+        if e.name == ".git":
+            continue
+        try:
+            isdir = e.is_dir()
+            st = e.stat() if not e.is_symlink() or os.path.exists(e.path) else e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        out.append({"name": e.name, "dir": isdir, "size": 0 if isdir else st.st_size,
+                    "mtime": int(st.st_mtime), "link": e.is_symlink()})
+    out.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+    more = len(out) > FS_MAX_LIST
+    out = out[:FS_MAX_LIST]
+    # symlinks are left out: git stops at the first path "beyond a symbolic link"
+    ign = fs_ignored(full, [x["name"] + ("/" if x["dir"] else "") for x in out if not x["link"]])
+    for x in out:
+        if x["name"] + ("/" if x["dir"] else "") in ign or x["name"] in ign or (x["dir"] and x["name"] in FS_SKIP):
+            x["ignored"] = True
+    return {"path": (rel or "").strip("/"), "entries": out, "more": more}
+
+
+def fs_read(root, rel):
+    root, full = fs_resolve(root, rel)
+    if not rel or not os.path.isfile(full):
+        raise FsError("not a file")
+    size = os.path.getsize(full)
+    res = {"path": rel.strip("/"), "size": size, "mtime": int(os.path.getmtime(full))}
+    ext = os.path.splitext(full)[1].lower()
+    if ext in FS_IMAGES:
+        if size > FS_MAX_IMAGE:
+            res["tooBig"] = True
+            return res
+        with open(full, "rb") as f:
+            res["image"] = "data:" + FS_IMAGES[ext] + ";base64," + base64.b64encode(f.read()).decode()
+        return res
+    if size > FS_MAX_TEXT:
+        res["tooBig"] = True
+        return res
+    with open(full, "rb") as f:
+        data = f.read()
+    if b"\0" in data[:8000]:
+        res["binary"] = True
+        return res
+    res["text"] = data.decode("utf-8", "replace")
+    return res
+
+
+def fs_main(argv):
+    try:
+        op, root, rel = argv[0], argv[1], argv[2] if len(argv) > 2 else ""
+        if op not in ("list", "read"):
+            raise FsError("bad request")
+        print(json.dumps(fs_list(root, rel) if op == "list" else fs_read(root, rel)))
+    except FsError as e:
+        print(json.dumps({"error": str(e)}))
+    except OSError as e:
+        print(json.dumps({"error": e.strerror or str(e)}))
+
+
+if __name__ == "__main__":
+    fs_main(sys.argv[1:])
+'''
+
+_FS = {}
+
+
+def fs_local():
+    """The FS_PY functions, loaded once into this process."""
+    if not _FS:
+        ns = {"__name__": "simab_fs"}
+        exec(compile(FS_PY, "<fs>", "exec"), ns)
+        _FS.update(ns)
+    return _FS
+
+
+def fs_path_ok(path: str) -> bool:
+    return path == "" or git_path_ok(path.strip("/"))
+
+
+def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
+    """List a folder / read a file of a project, on this machine or on the server."""
+    if op not in ("list", "read"):
+        raise ApiError(404, "not found")
+    if not isinstance(path, str) or not fs_path_ok(path):
+        raise ApiError(400, "bad path")
+    if app.web:
+        where = "server"
+    if where not in WHERE:
+        where = "local" if project.get("localExists") else "server"
+    if where == "local" and not project.get("localExists"):
+        where = "server"
+    if where == "server" and not (project.get("remote") and app.conf.configured):
+        raise ApiError(400, "this project has no folder to show")
+    if where == "local":
+        ns = fs_local()
+        try:
+            res = ns["fs_list"](project["local"], path) if op == "list" else ns["fs_read"](project["local"], path)
+        except ns["FsError"] as e:
+            raise ApiError(400, str(e))
+        except OSError as e:
+            raise ApiError(400, e.strerror or str(e))
+    else:
+        conf = app._project_conf(project)
+        res = remote_python(conf, FS_PY, [op, project["remote"], path],
+                            multiplex=bool(app.store.settings.get("sshMultiplex")), timeout=40)
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer from the server")
+        if res.get("error"):
+            raise ApiError(400, str(res["error"]))
+    res["where"] = where
+    return res
+
+
+class FilesSession:
+    """A Files tab: no process, it only keeps its place among the tabs (and after a restart)."""
+
+    def __init__(self, sid: str, project: str, title: str = ""):
+        self.id = sid
+        self.spec = {"kind": "files", "project": project, "where": ""}
+        self.title = title or "Files · " + project
+        self.alive = True
+        self.exit_code = None
+        self.started = time.time()
+
+    def info(self) -> dict:
+        return {"id": self.id, "title": self.title, "spec": self.spec, "url": "",
+                "alive": True, "exitCode": None, "started": self.started, "runs": 1}
+
+    def attach(self, ws):
+        raise WebSocketClosed()
+
+    def detach(self, ws):
+        pass
+
+    def kill(self, wait=False):
+        pass
+
+    def stop(self):
+        pass
+
+    def restart(self):
+        pass
+
+
 # ----------------------------------------------------------------------------- activity history
 class Activity:
     """What you did (newest first when listed), in the activity table."""
@@ -3427,6 +3627,16 @@ class App:
                 self.sessions[sid] = c
             self._remember()
             return c.info()
+        if body.get("kind") == "files":
+            p = self._project(body.get("project") or "")
+            if not (p.get("remote") or (p.get("localExists") and not self.web)):
+                raise ApiError(400, "this project has no folder to show")
+            title = body.get("title") if isinstance(body.get("title"), str) and body.get("title").strip() else ""
+            s = FilesSession(sid, p["name"], title[:80])
+            with self.lock:
+                self.sessions[sid] = s
+            self._remember()
+            return s.info()
         body = {k: v for k, v in body.items() if k != "_docker"}
         if self.web:
             if body.get("kind") not in WEB_KINDS:
@@ -4940,6 +5150,9 @@ class Handler(BaseHTTPRequestHandler):
             return app.open_folder(parts[1])
         if route == ("POST", "pick-folder"):
             return app.pick_folder(str(self._body().get("start") or ""))
+        if route == ("GET", "fs") and len(parts) == 3:
+            p = app._project(parts[1])
+            return fs_call(app, p, parts[2], (query.get("path") or [""])[0], (query.get("where") or [None])[0])
         if route == ("GET", "files") and len(parts) == 2:
             return {"files": app.project_files(parts[1])}
         if parts and parts[0] == "git" and len(parts) >= 3:

@@ -228,6 +228,7 @@
     if (spec.kind === 'run') return ['▶', 'run'];
     if (spec.kind === 'sync-info' || spec.kind === 'sync-monitor') return ['⇅', ''];
     if (spec.kind === 'docker') return ['▣', 'server'];
+    if (spec.kind === 'files') return ['▤', 'files'];
     return ['›', spec.where === 'server' ? 'server' : 'local'];
   }
 
@@ -1110,7 +1111,8 @@
   function renderTitle() { document.title = (S.active ? S.active.info.title + ' — ' : '') + 'Simab Workspace'; }
 
   function addTab(info, background, group) {
-    var tab = info.spec.kind === 'chat' ? new window.SWChat.ChatTab(info) : new Tab(info, estimateSize());
+    var tab = info.spec.kind === 'chat' ? new window.SWChat.ChatTab(info)
+      : info.spec.kind === 'files' ? new window.SWFiles.FilesTab(info) : new Tab(info, estimateSize());
     var g = group || L.focused || L.groups[0];
     paintTab(tab);
     tab.group = g;
@@ -1152,7 +1154,7 @@
     };
     // uploads/downloads keep going in the background (Mutagen does the copying), so closing is safe
     var safe = ['shell', 'sync-info', 'sync-monitor', 'add-local', 'add-server', 'git-sync-on'];
-    var risky = tab.isChat ? tab.busy : (tab.alive && !tab.gone && safe.indexOf(tab.info.spec.kind) < 0);
+    var risky = tab.isFiles ? false : tab.isChat ? tab.busy : (tab.alive && !tab.gone && safe.indexOf(tab.info.spec.kind) < 0);
     if (!force && risky && S.settings.confirmClose) {
       confirmDlg('“' + tab.info.title + '” is still running. Close it and stop what it is doing?', 'Close', true)
         .then(function (ok) { if (ok) go(); });
@@ -1165,6 +1167,10 @@
     if (spec.kind === 'chat' && spec.resume) {
       var open = S.tabs.find(function (t) { return t.isChat && !t.gone && (t.sessionId === spec.resume || t.info.spec.resume === spec.resume); });
       if (open) { activate(open); return Promise.resolve(open); }
+    }
+    if (spec.kind === 'files') {
+      var fx = S.tabs.find(function (t) { return t.isFiles && !t.gone && t.info.spec.project === spec.project; });
+      if (fx) { activate(fx); return Promise.resolve(fx); }
     }
     if (spec.kind === 'run') {
       var ex = S.tabs.find(function (t) { return t.info.spec.kind === 'run' && t.info.spec.cmdId === spec.cmdId && t.info.spec.project === spec.project && !t.gone; });
@@ -1188,7 +1194,7 @@
   }
 
   function tabMenu(tab, x, y) {
-    if (tab.isChat) { tab.menu(x, y, layoutItems(tab)); return; }
+    if (tab.isChat || tab.isFiles) { tab.menu(x, y, layoutItems(tab)); return; }
     var run = tab.info.spec.kind === 'run';
     showMenu(x, y, [
       { label: 'Copy', k: 'Ctrl+Shift+C', disabled: !tab.term.hasSelection(), action: function () { navigator.clipboard.writeText(tab.term.getSelection()).catch(fail); } },
@@ -1344,6 +1350,7 @@
   }
 
   function hasRemote(p) { return !!p.remote && serverReady(); }
+  function openFiles(p) { return openSession({ kind: 'files', project: p.name }); }
   function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) ? 'server' : 'local', project: p.name }); }
   function openCode(p) { openEditor(p, hasRemote(p) ? 'server' : 'local'); }
 
@@ -1377,6 +1384,7 @@
       { label: 'Past chats…', disabled: !r, action: function () { pickClaudeSession(p.name, function (sid, title) { openSession({ kind: 'chat', project: p.name, resume: sid, title: 'Claude · ' + title }); }); } },
       { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
+      { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
       { label: 'Server terminal', disabled: !r, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
       { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
@@ -2660,6 +2668,7 @@
         var running = !!runningCmd(n, c.id);
         items.push({ label: n + ': ' + (running ? 'stop ' : 'run ') + c.name, grp: n, action: function () { runCommand(p, c); } });
       });
+      if (hasRemote(p) || p.localExists) items.push({ label: n + ': files', grp: n, action: function () { openFiles(p); } });
       items.push({ label: n + ': git — changes, commit, pull, push', grp: n, action: function () { gitDialog(p); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
     });
@@ -2729,6 +2738,7 @@
     if (cur) {
       items.push({ header: cur.name });
       if (hasRemote(cur)) items.push({ label: 'Claude', action: function () { openSession({ kind: 'chat', project: cur.name }); } });
+      if (hasRemote(cur) || cur.localExists) items.push({ label: 'Files', action: function () { openFiles(cur); } });
       if (hasRemote(cur)) items.push({ label: 'Server terminal', action: function () { openSession({ kind: 'shell', where: 'server', project: cur.name }); } });
       if (cur.localExists) items.push({ label: 'Local terminal', action: function () { openSession({ kind: 'shell', where: 'local', project: cur.name }); } });
     }
@@ -2981,7 +2991,8 @@
     closeTab: closeTab, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
-    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal
+    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
+    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog
   };
 
   // ------------------------------------------------------------------ boot

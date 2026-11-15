@@ -45,6 +45,11 @@ const state = {
   ]
 };
 let offline = false;
+const fsTree = {
+  '': [{ name: 'cheshmeh-web-app', dir: true, size: 0 }, { name: 'node_modules', dir: true, size: 0, ignored: true }, { name: 'README.md', dir: false, size: 12 }],
+  'cheshmeh-web-app': [{ name: 'api', dir: true, size: 0 }, { name: 'web', dir: true, size: 0 }],
+  'cheshmeh-web-app/api': [{ name: 'main.go', dir: false, size: 30 }]
+};
 const now = Date.now() / 1000;
 const dockerSummary = { summary: { cheshmeh: { total: 3, running: 2, bad: 1 } }, events: [], seq: 0 };
 const containers = [
@@ -95,6 +100,16 @@ global.fetch = (url, opts) => {
   else if (url === '/api/usage') res = usage;
   else if (url.startsWith('/api/git/cheshmeh/diff')) res = { diff: '@@ -1 +1 @@\n-a\n+b' };
   else if (url.startsWith('/api/git/cheshmeh/commit')) res = { output: 'ok', status: Object.assign({}, gitStatus, { files: [gitStatus.files[1]], ahead: 1 }) };
+  else if (url.startsWith('/api/fs/cheshmeh/list')) {
+    const p = decodeURIComponent(url.split('path=')[1] || '');
+    res = fsTree[p] ? { path: p, entries: fsTree[p], more: false, where: 'local' } : null;
+    if (!res) return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'not a folder' }) });
+  }
+  else if (url.startsWith('/api/fs/cheshmeh/read')) {
+    const p = decodeURIComponent(url.split('path=')[1] || '');
+    res = p.endsWith('.png') ? { path: p, size: 9, image: 'data:image/png;base64,AA==' } : { path: p, size: 12, text: 'line one\nسلام\n' };
+  }
+  else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/sessions' && method === 'POST') {
     res = { id: 's' + (++seq), title: body.kind + ' ' + (body.project || 'home'), alive: true, exitCode: null, url: '',
       spec: Object.assign({ kind: body.kind, project: body.project || '', where: body.where || 'local', cmdId: body.cmdId || '' }, body.resume ? { resume: body.resume } : {}) };
@@ -111,6 +126,7 @@ const byText = (sel, text) => q(sel).find((e) => e.textContent.trim() === text);
 
 require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
+global.SW && require(path.join(ROOT, 'gui/static/files.js'));
 
 const tests = {
   'local paths: ~ shown as the real folder (Windows and Linux)'() {
@@ -471,6 +487,69 @@ const tests = {
     await new Promise((r) => setTimeout(r, 2300));
     await settle();
     assert.strictEqual(q('.conn-lost').length, 0, 'gone when the app is back');
+  },
+
+  async 'Files tab: tree with git marks, file view, changes, Ask Claude, find file'() {
+    const before = calls.length;
+    q('.act.more')[0].click();
+    const it = q('button').find((b) => b.textContent.trim() === 'Files');
+    assert.ok(it && !it.disabled, 'Files in the project menu');
+    it.click();
+    await settle();
+    const post = calls.slice(before).find((c) => c.method === 'POST' && c.url === '/api/sessions');
+    assert.deepStrictEqual([post.body.kind, post.body.project], ['files', 'cheshmeh']);
+    const tab = global.SW.S.active;
+    assert.ok(tab.isFiles);
+    const rows = () => q('.ft-row', tab.pane);
+    const names = () => rows().map((r) => r.querySelector('.ft-name').textContent);
+    assert.deepStrictEqual(names(), ['cheshmeh-web-app', 'node_modules', 'README.md']);
+    assert.ok(rows()[1].classList.contains('ignored'));
+    // the repository folder has changes inside (from the git status of cheshmeh-web-app)
+    assert.ok(rows()[0].classList.contains('changed-in'));
+    assert.strictEqual(q('.files-git', tab.pane)[0].textContent, '⎇ 2');
+    // open folders: the git code shows on the file itself
+    rows()[0].click(); await settle();
+    rows().find((r) => r.textContent.indexOf('api') >= 0).click(); await settle();
+    assert.deepStrictEqual(names(), ['cheshmeh-web-app', 'api', 'main.go', 'web', 'node_modules', 'README.md']);
+    const main = rows()[2];
+    assert.ok(main.classList.contains('changed') && main.classList.contains('cM'));
+    assert.strictEqual(main.querySelector('.gcode').textContent, 'M');
+    assert.match(localStorage.getItem('sw-files:cheshmeh'), /cheshmeh-web-app\/api/);
+    // the file, read-only, with line numbers
+    main.click(); await settle();
+    assert.ok(calls.some((c) => c.url === '/api/fs/cheshmeh/read?path=' + encodeURIComponent('cheshmeh-web-app/api/main.go')));
+    assert.strictEqual(q('.ft-nums', tab.pane)[0].textContent, '1\n2');
+    assert.strictEqual(q('.ft-text', tab.pane)[0].textContent, 'line one\nسلام');
+    assert.ok(tab.body.classList.contains('viewing'));
+    // its changes: the diff of the right repository and path
+    q('button', tab.vhead).find((b) => b.textContent === 'Changes').click(); await settle();
+    const diff = calls.filter((c) => c.url.startsWith('/api/git/cheshmeh/diff')).pop();
+    assert.match(diff.url, /repo=cheshmeh-web-app&where=local&path=api%2Fmain\.go&untracked=0/);
+    assert.ok(q('.gl', tab.pane).some((l) => l.classList.contains('add')));
+    // Ask Claude: a chat opens with @path in the message box
+    q('button', tab.vhead).find((b) => b.textContent === 'Ask Claude').click(); await settle();
+    const chat = global.SW.S.active;
+    assert.ok(chat.isChat, 'a Claude chat opened');
+    assert.strictEqual(chat.ta.value, '@cheshmeh-web-app/api/main.go ');
+    // opening Files again goes back to the same tab
+    const n = calls.length;
+    global.SW.openSession({ kind: 'files', project: 'cheshmeh' }); await settle();
+    assert.strictEqual(global.SW.S.active, tab);
+    assert.ok(!calls.slice(n).some((c) => c.url === '/api/sessions'));
+    // find file
+    tab.filter.value = 'x.t';
+    tab.filter.dispatch('input'); await settle();
+    assert.deepStrictEqual(rows().map((r) => r.querySelector('.ft-name').textContent), ['x.ts']);
+    assert.ok(rows()[0].classList.contains('cU'), 'conflict marked in the results too');
+    tab.filter.dispatch('keydown', { key: 'Enter' }); await settle();
+    assert.strictEqual(tab.file.path, 'cheshmeh-web-app/web/x.ts');
+    assert.strictEqual(tab.filter.value, '');
+    // closing never asks (nothing runs)
+    const tabsBefore = global.SW.S.tabs.length;
+    global.SW.closeTab(tab); await settle();
+    assert.strictEqual(global.SW.S.tabs.length, tabsBefore - 1);
+    assert.strictEqual(q('.modal').length, 0);
+    global.SW.closeTab(chat, true); await settle();
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

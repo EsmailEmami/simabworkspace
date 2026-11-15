@@ -677,3 +677,52 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .tab.bell .k.claude { animation: claude-blink .6s ease-in-out infinite; color: var(--warn); }
 .tab.busy .k.claude ~ .mark { display: none; }
 @media (prefers-reduced-motion: reduce) { .tab.busy .k.claude, .tab.bell .k.claude { animation-duration: 2.4s; } }
+
+/* Files tab: tree on the left, the file (or its changes) on the right */
+.tab .k.files { color: #9ece6a; }
+.files-body { display: flex; flex-direction: row; min-height: 0; flex: 1; }
+.files-side { width: 290px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); min-width: 0; background: var(--bg2); }
+.files-bar { display: flex; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--line); }
+.files-filter { height: 26px; font-size: 12px; }
+.files-git { width: auto; padding: 0 6px; font-size: 12px; color: var(--warn); white-space: nowrap; }
+.files-tree { flex: 1; overflow: auto; padding: 4px 0 12px; font-size: 12.5px; }
+.ft-row { display: flex; align-items: center; gap: 4px; height: 24px; padding-right: 8px; cursor: pointer; white-space: nowrap; user-select: none; }
+.ft-row:hover { background: var(--bg3); }
+.ft-row.sel { background: #1b2230; }
+.ft-row.ignored .ft-name { color: var(--faint); }
+.ft-caret { width: 12px; flex: none; color: var(--faint); font-size: 10px; text-align: center; }
+.ft-name { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; unicode-bidi: plaintext; }
+.ft-row.dir .ft-name { color: var(--text); }
+.ft-row.changed.cM .ft-name { color: var(--warn); }
+.ft-row.changed.cA .ft-name, .ft-row.changed.cN .ft-name { color: var(--ok); }
+.ft-row.changed.cU .ft-name, .ft-row.changed.cD .ft-name { color: var(--err); }
+.ft-row.changed-in .ft-name { color: #cfb27a; }
+.ft-row .gcode, .ft-row .ft-dot { margin-left: auto; flex: none; }
+.ft-dot { color: var(--warn); width: 12px; text-align: center; }
+.ft-row.match { padding-left: 10px; }
+.ft-dir { color: var(--faint); overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; min-width: 0; flex: 1 1 auto; direction: ltr; }
+.ft-more { flex: none; margin-left: 2px; }
+.files-note { padding: 10px 12px; font-size: 12px; }
+.files-view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.files-vhead { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-bottom: 1px solid var(--line); min-height: 37px; flex-wrap: wrap; }
+.files-vhead:empty { display: none; }
+.files-path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+.files-size { font-size: 11.5px; white-space: nowrap; }
+.files-vhead .btn.on { border-color: var(--accent); color: var(--accent); }
+.files-back { display: none; }
+.files-vbody { flex: 1; overflow: auto; min-height: 0; }
+.files-code { display: flex; align-items: flex-start; min-width: max-content; }
+.files-code pre { margin: 0; padding: 8px 0; font: 12.5px/1.55 var(--mono); }
+.ft-nums { flex: none; text-align: right; color: var(--faint); padding: 8px 10px 8px 12px !important; user-select: none; border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg); }
+.ft-text { padding: 8px 14px !important; white-space: pre; unicode-bidi: plaintext; text-align: left; tab-size: 4; }
+.files-img { padding: 16px; }
+.files-img img { max-width: 100%; max-height: 70vh; cursor: zoom-in; background: repeating-conic-gradient(#1a1e26 0 25%, #12151b 0 50%) 0 0 / 16px 16px; }
+/* phones: one panel at a time — the tree, or the file with a back arrow */
+body.compact .files-side { width: 100%; border-right: none; }
+body.compact .files-view { display: none; }
+body.compact .files-body.viewing .files-side { display: none; }
+body.compact .files-body.viewing .files-view { display: flex; }
+body.compact .files-back { display: inline-grid; }
+body.compact .ft-row { height: 34px; font-size: 13.5px; }
+body.compact .files-filter { height: 32px; }
+@media (pointer: coarse) { .ft-row { height: 34px; } .files-vhead .btn.sm { height: 32px; } .files-bar .icon-btn { width: 32px; height: 32px; } }

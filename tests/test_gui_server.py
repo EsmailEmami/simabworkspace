@@ -496,6 +496,29 @@ class HttpServer(TmpHome):
         except ValueError:
             return r.status, raw
 
+    def test_files_tab_lives_among_the_tabs(self):
+        root = os.path.join(self.tmp.name, "loc")
+        os.makedirs(os.path.join(root, "a"))
+        Path(root, "a", "b.txt").write_text("hello\n")
+        st, d = self.req("POST", "/api/manual", {"name": "loc", "local": root})
+        self.assertEqual(st, 200, d)
+        st, tab = self.req("POST", "/api/sessions", {"kind": "files", "project": "loc"})
+        self.assertEqual(st, 200, tab)
+        self.assertEqual((tab["spec"]["kind"], tab["title"], tab["alive"]), ("files", "Files · loc", True))
+        st, s = self.req("GET", "/api/state")
+        self.assertIn(tab["id"], [x["id"] for x in s["sessions"]])
+        self.assertIn("files", [x["kind"] for x in self.store.data["lastTabs"]])
+        st, d = self.req("GET", "/api/fs/loc/list?path=a")
+        self.assertEqual((st, [e["name"] for e in d["entries"]]), (200, ["b.txt"]))
+        st, d = self.req("GET", "/api/fs/loc/read?path=a/b.txt")
+        self.assertEqual(d["text"], "hello\n")
+        self.assertEqual(self.req("GET", "/api/fs/loc/read?path=../x")[0], 400)
+        self.assertEqual(self.req("GET", "/api/fs/nope/list")[0], 404)
+        st, d = self.req("POST", f"/api/sessions/{tab['id']}/rename", {"title": "Tree"})
+        self.assertEqual(d["title"], "Tree")
+        self.assertEqual(self.req("DELETE", f"/api/sessions/{tab['id']}")[0], 200)
+        self.assertEqual(self.req("POST", "/api/sessions", {"kind": "files", "project": "nope"})[0], 404)
+
     def test_auth_and_host_checks(self):
         self.assertEqual(self.req("GET", "/api/ping", token=False)[0], 401)
         self.assertEqual(self.req("GET", "/api/ping", host="evil.com")[0], 403)
@@ -986,7 +1009,7 @@ class FrontendJs(unittest.TestCase):
         node = find_node()
         if not node:
             self.skipTest("node not found")
-        for f in ("app.js", "chat.js"):
+        for f in ("app.js", "chat.js", "files.js"):
             r = subprocess.run([node, "--check", str(ROOT / "gui" / "static" / f)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -1005,6 +1028,8 @@ class FrontendJs(unittest.TestCase):
         methods = set(re.findall(r"\bP\.([A-Za-z_]\w*)\s*=\s*function", chat))
         self.assertIn("group", props)
         self.assertEqual(props & methods, set())
+        files = (ROOT / "gui" / "static" / "files.js").read_text()
+        self.assertEqual(props & set(re.findall(r"\bP\.([A-Za-z_]\w*)\s*=\s*function", files)), set())
 
     def test_web_version(self):
         node = find_node()
@@ -1548,7 +1573,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.21.2"', text)
+        self.assertIn('VERSION="1.22.0"', text)
 
 
 if __name__ == "__main__":

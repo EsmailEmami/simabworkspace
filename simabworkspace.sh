@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.22.0 2026-11-15  Files tab (project ⋯ → Files): the project's folders, git changes
+#                       marked on files and folders, files shown read-only (text, images),
+#                       their changes one click away, "Ask Claude" puts @file in the chat,
+#                       Find file. Works in the web version too (reads the server).
 #    1.21.2 2026-11-15  Chat: Claude keeps working on the server when the connection drops;
 #                       the window reconnects by itself to the SAME Claude and shows what it
 #                       did meanwhile (no second Claude on the conversation). Closing the
@@ -155,7 +159,7 @@
 
 set -u -o pipefail
 
-VERSION="1.21.2"
+VERSION="1.22.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

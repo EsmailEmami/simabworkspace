@@ -672,6 +672,29 @@ const tests = {
     assert.ok(tab.agentsEl.classList.contains('hidden'), 'cleared when the turn ends');
   },
 
+  'phone: one chip for mode / model / effort, its menu changes them'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    feed({ t: 's', events: [], state: { alive: true, busy: false, mode: 'auto', model: 'opus', effort: 'high' } });
+    const chip = tab.optsBtn;
+    assert.ok(tab.sendBtn.parentNode === chip.parentNode, 'chip and send share the bar');
+    assert.match(chip.textContent, /auto.*Opus 5\.5.*high/);
+    assert.match(chip.className, /m-auto/);
+    let items = null;
+    global.SW.showMenu = (x, y, it) => { items = it; };
+    chip.click();
+    assert.deepStrictEqual(items.filter((i) => i.header).map((i) => i.header), ['Mode', 'Model', 'Effort']);
+    assert.ok(items.some((i) => i.label === '✓ high'), 'current choice ticked');
+    items.find((i) => i.label && /Sonnet/.test(i.label)).action();
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1], { t: 'model', model: 'sonnet' });
+    assert.match(chip.textContent, /Sonnet/);
+    items.find((i) => i.label && /plan$/.test(i.label)).action();
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1], { t: 'mode', mode: 'plan' });
+    feed({ t: 'e', e: { type: '_effort', effort: 'low' } });
+    assert.match(chip.textContent, /low/);
+    global.SW.showMenu = () => {};
+  },
+
   'markdown: code, lists, tables, links'() {
     const md = global.SWChat.markdown('# عنوان\n\nمتن `کد` و **پررنگ** https://x.dev\n\n- یک\n- دو\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfmt.Println(1)\n```');
     assert.strictEqual(md.querySelectorAll('h3').length, 1);

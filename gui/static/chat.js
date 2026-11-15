@@ -300,6 +300,9 @@
     this.effortSel = h('select', { class: 'mini-sel effort', title: 'Thinking effort', onchange: function () { self.send({ t: 'effort', effort: self.effortSel.value }); } },
       EFFORTS.map(function (e) { return h('option', { value: e }, e); }));
     this.effortSel.value = 'medium';
+    // phones: the three selects fold into one chip ("auto · Opus 5.5 · medium") that opens a menu
+    this.optsBtn = h('button', { class: 'cb-opts', title: 'Mode, model and effort', onclick: function () { self.optsMenu(); } });
+    [this.modeSel, this.modelSel, this.effortSel].forEach(function (sel) { sel.addEventListener('change', function () { self.paintOpts(); }); });
     this.sendBtn = h('button', { class: 'send', title: 'Send (Enter)', onclick: function () { self.submit(); } }, '↑');
     this.stopBtn = h('button', { class: 'stopbtn hidden', title: 'Stop (Esc)', onclick: function () { self.interrupt(); } }, '■');
     this.stDot = h('i', { class: 'dot' });
@@ -325,7 +328,7 @@
     var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.watchBar, this.attachEl,
       h('div', { class: 'cbox' }, this.ta,
         h('div', { class: 'cbar' },
-          this.modeSel, this.modelSel, this.effortSel,
+          this.modeSel, this.modelSel, this.effortSel, this.optsBtn,
           h('label', { class: 'clip', title: 'Attach image' }, '+', h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'hidden', onchange: function (e) { self.addFiles(e.target.files); e.target.value = ''; } })),
           h('span', { class: 'grow' }),
           h('button', { class: 'link cb-hist', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, h('span', { class: 'lbl' }, 'history'), h('span', { class: 'ico' }, '⟲')),
@@ -516,6 +519,7 @@
     this.model = st.model || 'opus';
     this.effort = st.effort || 'medium';
     this.effortSel.value = this.effort;
+    this.paintOpts();
     this.setBusy(st.busy);
     if (st.init) this.applyInit(st.init);
     if (st.watch) this.setWatch(st.watch);
@@ -543,6 +547,42 @@
     v = v && v !== 'default' ? v : 'opus';
     this.modelSel.value = v;
     if (this.modelSel.value !== v) { this.modelSel.append(h('option', { value: v }, v)); this.modelSel.value = v; }
+    this.paintOpts();
+  };
+
+  // the phone chip: what is chosen now, coloured like the mode select
+  function selText(sel) {
+    var o = Array.prototype.filter.call(sel.children || [], function (x) { return x.value === sel.value; })[0];
+    return o ? o.textContent : sel.value;
+  }
+  P.paintOpts = function () {
+    if (!this.optsBtn) return;
+    this.optsBtn.className = 'cb-opts m-' + this.modeSel.value;
+    this.optsBtn.replaceChildren(
+      h('span', { class: 'o-mode' }, selText(this.modeSel)),
+      h('span', { class: 'o-model' }, selText(this.modelSel)),
+      h('span', { class: 'o-effort' }, selText(this.effortSel)), h('span', { class: 'o-car' }, '▾'));
+  };
+  P.optsMenu = function () {
+    var self = this;
+    var items = [];
+    [['Mode', this.modeSel, 'mode'], ['Model', this.modelSel, 'model'], ['Effort', this.effortSel, 'effort']].forEach(function (g, i) {
+      if (i) items.push('-');
+      items.push({ header: g[0] });
+      Array.prototype.forEach.call(g[1].children, function (o) {
+        items.push({ label: (o.value === g[1].value ? '✓ ' : '   ') + o.textContent, action: function () {
+          if (g[1].value === o.value) return;
+          g[1].value = o.value;
+          var m = { t: g[2] }; m[g[2]] = o.value;
+          self.send(m);
+          self.paintOpts();
+        } });
+      });
+    });
+    var r = this.optsBtn.getBoundingClientRect();
+    SW.showMenu(r.left, r.top, items);
+    var menu = document.querySelector('#menu-root .menu');     // open upwards, just above the chip
+    if (menu) menu.style.top = Math.max(4, r.top - menu.getBoundingClientRect().height - 6) + 'px';
   };
 
   P.setMode = function (mode) {
@@ -550,6 +590,7 @@
     this.mode = mode;
     this.modeSel.value = mode;
     this.modeSel.className = 'mini-sel mode m-' + mode;
+    this.paintOpts();
   };
 
   // the user can see this chat now: it is the active tab of its section and the window is in front
@@ -746,7 +787,7 @@
       case '_watch': this.setWatch(e); break;
       case '_mode': this.setMode(e.mode); break;
       case '_model': this.model = e.model || 'opus'; this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
-      case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; if (!this.replaying) this.system('effort: ' + e.effort); break;
+      case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; this.paintOpts(); if (!this.replaying) this.system('effort: ' + e.effort); break;
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
       case '_restart': this.system('— restarted —', 'mark'); break;

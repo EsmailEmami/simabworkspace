@@ -40,6 +40,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.30.1 2026-11-15  Chat box on phones: mode, model and effort fold into one chip that opens
+#                       a menu, so the send button (and new / history) always fit.
 #    1.30.0 2026-11-15  Claude's questions step by step, like Claude Code: one question at a
 #                       time with a step bar on top, Back / Next (and ←/→, 1–9 keys), a choice
 #                       moves on by itself, and a last step lists every answer before sending.
@@ -242,7 +244,7 @@
 
 set -u -o pipefail
 
-VERSION="1.30.0"
+VERSION="1.30.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

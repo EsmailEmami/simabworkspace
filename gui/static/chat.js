@@ -862,6 +862,8 @@
       this.renderAgents();
     }
     if (name === 'TodoWrite') this.todos = b.input && b.input.todos;
+    if (name === 'Skill') this.lastSkill = card;
+    card._name = name;
     void self;
     return card;
   };
@@ -916,6 +918,12 @@
         if (src.type === 'base64' && src.data) srcs.push('data:' + (src.media_type || 'image/png') + ';base64,' + src.data);
       }
     });
+    // not typed by the user: an agent's report, a skill's instructions, a system note —
+    // shown folded into the card it belongs to, opened with a click (like a command's output)
+    if (texts.length && this.isSynthetic(e, texts.join('\n\n'))) {
+      this.attachSynthetic(e, texts.join('\n\n'));
+      return;
+    }
     if (texts.length || images) {
       this.turnText = false;
       var echo = this.echoes && this.echoes[0];
@@ -932,6 +940,62 @@
       this.lastUser = bubble;
       if (!this.replaying) { this.stick = true; this.scrollEnd(); }
     }
+  };
+
+  var AGENT_RE = /^\s*(?:Another Claude session sent a message:\s*)?<agent-message\b[^>]*?(?:from="([^"]*)")?[^>]*>/;
+  var SKILL_RE = /^\s*Base directory for this skill:/;
+  P.isSynthetic = function (e, text) {
+    return e.isSynthetic === true || e.isMeta === true || !!(e.origin && e.origin.kind && e.origin.kind !== 'human')
+      || AGENT_RE.test(text) || SKILL_RE.test(text);
+  };
+
+  function foldBox(label, text, md) {
+    return h('details', { class: 'fold' }, h('summary', null, label),
+      md ? h('div', { class: 'fold-md', dir: 'auto' }, markdown(text)) : preBox(text));
+  }
+
+  P.attachSynthetic = function (e, text) {
+    var self = this, m = text.match(AGENT_RE);
+    if (m) {
+      var id = (e.origin && e.origin.from) || m[1] || '';
+      var who = (e.origin && e.origin.name) || 'agent';
+      var body = text.replace(AGENT_RE, '').replace(/<\/agent-message>\s*$/, '').trim();
+      var at = body.indexOf('The report follows:');
+      if (at >= 0) body = body.slice(at + 'The report follows:'.length).replace(/^\s*\n/, '');
+      body = body.replace(/^ {2}/gm, '');                     // the harness indents every line of the report
+      // the Agent card that started it: its launch result names the agent id
+      var card = null;
+      Object.keys(this.cards).forEach(function (k) {
+        var c = self.cards[k];
+        if (!card && (c._name === 'Agent' || c._name === 'Task') && id && c._res && c._res.textContent.indexOf(id) >= 0) card = c;
+      });
+      if (card) {
+        card._status.className = 'st ok';
+        card._status.textContent = '✓';
+        card._res.classList.remove('hidden');
+        card._res.append(foldBox('report', body, true));
+        return;
+      }
+      this.add(this.foldCard('Agent', 'report · ' + who, foldBox('report', body, true)));
+      return;
+    }
+    if (SKILL_RE.test(text) && this.lastSkill && !this.lastSkill._skillText) {
+      this.lastSkill._skillText = true;
+      this.lastSkill._res.classList.remove('hidden');
+      this.lastSkill._res.append(foldBox('skill instructions', text, true));
+      return;
+    }
+    var first = text.split('\n')[0].slice(0, 90);
+    this.add(this.foldCard(SKILL_RE.test(text) ? 'Skill' : 'Note', SKILL_RE.test(text) ? 'instructions' : first, foldBox('full text', text, true)));
+  };
+
+  // a closed card like a tool's, for text Claude Code adds by itself
+  P.foldCard = function (name, summary, content) {
+    var card = h('div', { class: 'tool-card t-' + name + ' synthetic' },
+      h('div', { class: 'tool-head', onclick: function () { card.classList.toggle('open'); } },
+        h('span', { class: 'tname' }, name), h('span', { class: 'tsum', dir: 'auto' }, summary), h('i', { class: 'st ok' }, '✓')),
+      h('div', { class: 'tool-body' }, content));
+    return card;
   };
 
   P.onResult = function (e) {

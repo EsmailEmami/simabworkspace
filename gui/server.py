@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.27.0"
+VERSION = "1.27.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2039,7 +2039,8 @@ with open(f, encoding="utf-8", errors="replace") as fh:
             c = cut(c)
         if e.get("isMeta"):
             continue
-        out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c}})
+        out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c},
+                    **{k: e[k] for k in ("isSynthetic", "origin") if k in e}})
 total = len(out)
 end = total if before is None else max(0, min(before, total))
 start = max(0, end - limit)
@@ -2106,7 +2107,8 @@ for raw in data[:end].split(b"\n"):
         c = nc
     elif isinstance(c, str):
         c = cut(c)
-    out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c}})
+    out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c},
+                **{k: e[k] for k in ("isSynthetic", "origin") if k in e}})
 print(json.dumps({"off": off + end, "size": size, "entries": out}))
 '''
 

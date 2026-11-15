@@ -443,6 +443,50 @@ const tests = {
     global.apiImpl = () => Promise.resolve({});
   },
 
+  'an agent report or a skill text is folded into its card, never shown as if the user wrote it'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    // a message of the user is waiting to be picked up (queued) — a report must not take its place
+    ws.onopen && ws.onopen();
+    tab.ta.value = 'my question'; tab.submit();
+    const bubbles = () => byClass(tab.msgs, 'umsg').map((b) => b.textContent);
+    // Agent started in the background
+    feed({ t: 'e', e: { type: 'assistant', message: { id: 'a1', content: [{ type: 'tool_use', id: 'toolu_A', name: 'Agent', input: { description: 'Review Task 2', subagent_type: 'general-purpose' } }] } } });
+    feed({ t: 'e', e: { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_A', content: 'Async agent launched successfully. agentId: a34d12aeca56395c2 (internal ID)' }] } } });
+    // its report comes back as a synthetic "user" message (the real shape)
+    feed({ t: 'e', e: { type: 'user', isReplay: true, isSynthetic: true, parent_tool_use_id: null,
+      origin: { kind: 'peer', from: 'a34d12aeca56395c2', name: 'general-purpose' },
+      message: { role: 'user', content: 'Another Claude session sent a message: <agent-message from="a34d12aeca56395c2">\n[Subagent hand-back] The text below is the final report. The report follows:\n  ### Spec Compliance\n\n  - ✅ Spec compliant.\n</agent-message>' } } });
+    assert.deepStrictEqual(bubbles(), ['my question'], 'the report is not a user message');
+    const card = tab.cards.toolu_A;
+    const rep = card._res.querySelectorAll('.fold');
+    assert.strictEqual(rep.length, 1);
+    assert.strictEqual(rep[0].querySelector('summary').textContent, 'report');
+    assert.match(rep[0].textContent, /Spec Compliance/);
+    assert.doesNotMatch(rep[0].textContent, /Subagent hand-back/);
+    assert.ok(!card.classList.contains('open'), 'folded until clicked');
+    // the queued message is still waiting for its echo
+    assert.ok(byClass(tab.msgs, 'umsg')[0].classList.contains('pending') || byClass(tab.msgs, 'umsg')[0].classList.contains('queued'));
+    // a skill: its instructions go into the Skill card
+    feed({ t: 'e', e: { type: 'assistant', message: { id: 'a2', content: [{ type: 'tool_use', id: 'toolu_S', name: 'Skill', input: { skill: 'subagent-driven-development' } }] } } });
+    feed({ t: 'e', e: { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_S', content: 'Launching skill: subagent-driven-development' }] } } });
+    feed({ t: 'e', e: { type: 'user', isSynthetic: true, message: { role: 'user', content: [{ type: 'text', text: 'Base directory for this skill: /home/u/.claude/skills/x\n\n# Subagent-Driven Development\n\nExecute plan…' }] } } });
+    assert.deepStrictEqual(bubbles(), ['my question']);
+    const sk = tab.cards.toolu_S._res.querySelectorAll('.fold');
+    assert.strictEqual(sk.length, 1);
+    assert.strictEqual(sk[0].querySelector('summary').textContent, 'skill instructions');
+    // a report without its card (e.g. after a reload): its own folded card
+    feed({ t: 'e', e: { type: 'user', isSynthetic: true, origin: { kind: 'peer', from: 'zzz', name: 'reviewer' },
+      message: { content: '<agent-message from="zzz">done</agent-message>' } } });
+    const own = byClass(tab.msgs, 'synthetic').pop();
+    assert.match(own.textContent, /Agent.*report · reviewer/);
+    assert.deepStrictEqual(bubbles(), ['my question']);
+    // what the user really types is still a bubble
+    feed({ t: 'e', e: { type: 'user', message: { content: [{ type: 'text', text: 'my question' }] } } });
+    feed({ t: 'e', e: { type: 'user', message: { content: [{ type: 'text', text: 'typed in the TUI' }] } } });
+    assert.deepStrictEqual(bubbles(), ['my question', 'typed in the TUI']);
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

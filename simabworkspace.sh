@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.27.1 2026-11-15  Chat: an agent's report and a skill's instructions are no longer shown
+#                       as if you had written them — they are folded into their Agent / Skill
+#                       card (click to read), like a command's output.
 #    1.27.0 2026-11-15  Sidebar: the server's load right now — CPU, RAM and disk meters above
 #                       the Claude usage (orange/red when high). Click: details and the
 #                       processes using the most CPU and memory.
@@ -213,7 +216,7 @@
 
 set -u -o pipefail
 
-VERSION="1.27.0"
+VERSION="1.27.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

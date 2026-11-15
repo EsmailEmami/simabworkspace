@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.21.1 2026-11-15  Windows: "VS Code, local folder" works (code.cmd started by its full
+#                       path); add project: Browse… (the system's folder dialog) and the full
+#                       path under the field; project menu: Open folder (Explorer / Finder)
 #    1.21.0 2026-11-15  Windows without WSL: install.ps1 installs Python + Git for Windows
 #                       (winget) and runs the app on Windows itself — terminals in the
 #                       Windows pseudo console (PowerShell locally), Mutagen/jq for Windows,
@@ -148,7 +151,7 @@
 
 set -u -o pipefail
 
-VERSION="1.21.0"
+VERSION="1.21.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -209,6 +209,51 @@ class StartMenuAndBrowser(WinOn):
             self.assertFalse(sw.autostart_enabled())
 
 
+class FoldersAndEditor(WinOn):
+    def app_with_project(self, local):
+        app = sw.App.__new__(sw.App)
+        app.web = False
+        app.store = mock.Mock(settings={"editorCmd": "code"})
+        app.activity = mock.Mock()
+        app._project = lambda name: {"name": name, "local": local, "localExists": True}
+        app.projects = lambda max_age=0: [{"name": "shop", "local": local, "localExists": True, "remote": "/srv/shop"}]
+        return app
+
+    def test_vscode_is_started_by_its_full_path(self):
+        # `code` on Windows is code.cmd: CreateProcess only finds it by the full path (WinError 2 otherwise)
+        app = self.app_with_project(str(self.root))
+        with mock.patch.object(sw, "which", return_value="C:\\VS Code\\bin\\code.cmd"), \
+                mock.patch.object(sw.subprocess, "Popen") as popen:
+            app.open_editor({"project": "shop", "where": "local"})
+        self.assertEqual(popen.call_args[0][0], ["C:\\VS Code\\bin\\code.cmd", str(self.root)])
+
+    def test_open_folder_in_explorer(self):
+        app = self.app_with_project("C:\\Users\\me\\shop")
+        with mock.patch.object(sw.os, "startfile", create=True) as sf:
+            self.assertEqual(app.open_folder("shop")["path"], "C:\\Users\\me\\shop")
+        sf.assert_called_once_with("C:\\Users\\me\\shop")
+        self.assertIn(("POST", "open-folder"), sw.WEB_BLOCKED)
+        self.assertIn(("POST", "pick-folder"), sw.WEB_BLOCKED)
+
+    def test_folder_dialog(self):
+        argv = sw.folder_dialog_argv("C:\\Users\\me")
+        self.assertEqual(argv[:5], ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command"])
+        self.assertIn("FolderBrowserDialog", argv[5])
+        with mock.patch.object(sw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "C:\\Users\\me\\work".encode(), b"")) as run:
+            self.assertEqual(sw.pick_folder_dialog("C:\\Users\\me"), "C:\\Users\\me\\work")
+        self.assertEqual(run.call_args[1]["env"]["SW_START"], "C:\\Users\\me")
+        with mock.patch.object(sw.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")):
+            self.assertEqual(sw.pick_folder_dialog("C:\\"), "")             # cancelled
+        with mock.patch.object(sw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"D:\\", b"")):
+            self.assertEqual(sw.pick_folder_dialog("C:\\"), "D:\\")       # a drive keeps its slash
+
+    def test_pick_starts_at_the_nearest_existing_folder(self):
+        app = self.app_with_project("")
+        with mock.patch.object(sw, "pick_folder_dialog", side_effect=lambda st: st) as d:
+            app.pick_folder(str(self.root / "not" / "yet"))
+        d.assert_called_once_with(str(self.root))
+
+
 class BashOnWindows(unittest.TestCase):
     """simabworkspace.sh in Git Bash: faked with a uname that says MINGW64 and a cygpath."""
     def setUp(self):

@@ -113,6 +113,30 @@ require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 
 const tests = {
+  'local paths: ~ shown as the real folder (Windows and Linux)'() {
+    const S = global.SW.S, old = S.home;
+    S.home = 'C:\\Users\\me';
+    assert.strictEqual(global.SW.fullLocal('~/shop'), 'C:\\Users\\me\\shop');
+    assert.strictEqual(global.SW.fullLocal('~'), 'C:\\Users\\me');
+    assert.strictEqual(global.SW.fullLocal('D:/work/x'), 'D:\\work\\x');
+    S.home = '/home/me';
+    assert.strictEqual(global.SW.fullLocal('~/a/b'), '/home/me/a/b');
+    S.home = old;
+  },
+
+  async 'project menu: Open folder opens the local copy'() {
+    await settle();
+    q('.act.more')[0].click();
+    const it = q('button').find((b) => b.textContent.trim().indexOf('Open folder') === 0);
+    assert.ok(it, 'Open folder in the menu');
+    if (!it.disabled) {
+      it.click();
+      await settle();
+      assert.ok(calls.some((c) => c.method === 'POST' && /^\/api\/open-folder\//.test(c.url)));
+    }
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
   async 'boots, shows projects and status, no Persian in the UI'() {
     await settle();
     assert.strictEqual(q('.proj').length, 2);

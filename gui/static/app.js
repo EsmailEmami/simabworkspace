@@ -1300,6 +1300,36 @@
     api('POST', 'editor', { project: p.name, where: where }).then(function () { toast('Opening VS Code…', 'ok'); }).catch(fail);
   }
 
+  function openFolder(p) {
+    api('POST', 'open-folder/' + encodeURIComponent(p.name)).then(function (d) { toast('Opened ' + d.path, 'ok'); }).catch(fail);
+  }
+
+  // where a local path really is (~ = the user folder), shown under the field
+  function fullLocal(v) {
+    v = (v || '').trim();
+    if (!v || !S.home) return v;
+    var sep = S.home.indexOf('\\') >= 0 ? '\\' : '/';
+    if (v === '~') return S.home;
+    if (/^~[\\/]/.test(v)) return S.home.replace(/[\\/]$/, '') + sep + v.slice(2).replace(/[\\/]/g, sep);
+    return sep === '\\' ? v.replace(/\//g, '\\') : v;
+  }
+
+  // a local folder field: Browse… (the system's folder dialog) and the full path under it
+  function localFolderField(label, input) {
+    var hint = h('div', { class: 'muted mono', style: 'font-size:11px;margin-top:4px;word-break:break-all' });
+    function upd() { var f = fullLocal(input.value); hint.textContent = f ? '→ ' + f : ''; }
+    input.addEventListener('input', upd);
+    input._upd = upd;
+    var browse = h('button', { class: 'btn', type: 'button', title: 'Choose the folder', style: 'flex:none', onclick: function () {
+      browse.disabled = true;
+      api('POST', 'pick-folder', { start: fullLocal(input.value) }).then(function (d) {
+        if (d.path) { input.value = d.path; delete input.dataset.auto; upd(); }
+      }).catch(fail).then(function () { browse.disabled = false; });
+    } }, 'Browse…');
+    upd();
+    return h('div', { class: 'field' }, h('label', null, label), h('div', { style: 'display:flex;gap:6px' }, input, browse), hint);
+  }
+
   function syncAction(p, action) {
     api('POST', 'sync/' + encodeURIComponent(p.name) + '/' + action).then(function () {
       toast({ flush: 'Syncing…', pause: 'Sync paused', resume: 'Sync resumed' }[action], 'ok');
@@ -1320,7 +1350,7 @@
   // In the web version the things that need your own computer stay visible but disabled,
   // so people know the installed app has them.
   var APP_ONLY = 'Only in the installed app (on your computer)';
-  var WEB_HIDDEN = ['Local terminal', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
+  var WEB_HIDDEN = ['Local terminal', 'Open folder', 'VS Code on server', 'VS Code, local folder', 'Port forwarding…', 'Check for updates', 'Quit'];
   function webItems(items) {
     if (!S.web) return items;
     return items.map(function (it) {
@@ -1351,6 +1381,7 @@
       { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
+      { label: 'Open folder', k: p.localExists ? '' : 'not synced', disabled: !p.localExists, action: function () { openFolder(p); } },
       '-',
       { label: 'Git…', action: function () { gitDialog(p); } },
       { label: 'Docker containers…', disabled: !r, k: dockerCount(p.name), action: function () { dockerDialog(p); } },
@@ -1882,7 +1913,7 @@
           title: f.project ? 'Already synced as ' + f.project : f.path,
           onclick: function () {
             pickedRemote = f.path;
-            if (!local.value || local.dataset.auto) { local.value = '~/' + f.name; local.dataset.auto = '1'; }
+            if (!local.value || local.dataset.auto) { local.value = '~/' + f.name; local.dataset.auto = '1'; if (local._upd) local._upd(); }
             renderFolders();
           } },
           h('span', { class: 'fname mono' }, f.name),
@@ -1904,11 +1935,11 @@
         loadFolders();
         return [h('div', { class: 'field' }, h('label', null, 'Folder on the server'), filter, list),
           h('div', { class: 'row' },
-            h('div', { class: 'field' }, h('label', null, 'Put it on this machine at'), local),
+            localFolderField('Put it on this machine at', local),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)), gitRow()];
       },
       upload: function () {
-        return [h('div', { class: 'field' }, h('label', null, 'Folder on this machine'), local),
+        return [localFolderField('Folder on this machine', local),
           h('div', { class: 'row' },
             h('div', { class: 'field' }, h('label', null, 'Folder on the server'), remote),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)),
@@ -2950,7 +2981,7 @@
     closeTab: closeTab, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
-    claudeInTerminal: claudeInTerminal
+    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal
   };
 
   // ------------------------------------------------------------------ boot
@@ -3012,6 +3043,7 @@
       S.projects = st.projects;
       S.projectsKey = JSON.stringify(st.projects);
       S.wsl = st.wsl;
+      S.home = st.home || '';
       S.lastTabs = st.lastTabs;
       S.version = st.version;
       renderProjects();

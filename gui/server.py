@@ -52,7 +52,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.21.0"
+VERSION = "1.21.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2908,6 +2908,66 @@ def make_windows_shortcut() -> str:
     return "Windows Start menu"
 
 
+def open_in_file_manager(path: str):
+    if IS_WIN:
+        os.startfile(path)                     # Explorer
+        return
+    if is_wsl():
+        win = subprocess.run(["wslpath", "-w", path], capture_output=True, text=True, timeout=5).stdout.strip() or path
+        argv = ["explorer.exe", win]
+    elif sys.platform == "darwin":
+        argv = ["open", path]
+    else:
+        argv = ["xdg-open", path]
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     cwd="/mnt/c" if argv[0] == "explorer.exe" and os.path.isdir("/mnt/c") else None, **detached_kwargs())
+
+
+FOLDER_DIALOG_PS = (
+    "Add-Type -AssemblyName System.Windows.Forms;"
+    "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
+    "$d.Description='Folder for the project on this computer';$d.ShowNewFolderButton=$true;"
+    "$d.SelectedPath=$env:SW_START;"
+    "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"
+    "if($d.ShowDialog($o) -eq 'OK'){[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Write($d.SelectedPath)}")
+
+
+def folder_dialog_argv(start: str):
+    """The native "choose a folder" dialog of this machine, or None."""
+    if IS_WIN or is_wsl():
+        return ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", FOLDER_DIALOG_PS]
+    if sys.platform == "darwin":
+        return ["osascript", "-e", 'POSIX path of (choose folder with prompt "Folder for the project")']
+    if shutil.which("zenity"):
+        return ["zenity", "--file-selection", "--directory", "--filename=" + start.rstrip("/") + "/"]
+    if shutil.which("kdialog"):
+        return ["kdialog", "--getexistingdirectory", start]
+    return None
+
+
+def pick_folder_dialog(start: str) -> str:
+    """The folder picked in the native dialog ("" = cancelled)."""
+    argv = folder_dialog_argv(start)
+    if not argv:
+        raise ApiError(400, "no folder dialog on this machine — type the path")
+    env = dict(os.environ, SW_START=start)
+    if is_wsl():
+        win = subprocess.run(["wslpath", "-w", start], capture_output=True, text=True, timeout=5).stdout.strip()
+        env["SW_START"] = win
+        env["WSLENV"] = (os.environ.get("WSLENV", "") + ":SW_START").lstrip(":")
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=600, env=env, stdin=subprocess.DEVNULL,
+                           cwd="/mnt/c" if is_wsl() and os.path.isdir("/mnt/c") else None)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ApiError(500, f"could not open the folder dialog: {e}")
+    path = r.stdout.decode("utf-8", "replace").strip()
+    if r.returncode != 0 or not path:
+        return ""
+    if is_wsl():
+        path = subprocess.run(["wslpath", "-u", path], capture_output=True, text=True, timeout=5).stdout.strip() or path
+    return path.rstrip("/") if len(path) > 1 and not re.fullmatch(r"[A-Za-z]:[\\/]", path) else path
+
+
 def desktop_quote(arg: str) -> str:
     """Quoting rules of .desktop Exec lines (double quotes only)."""
     if re.fullmatch(r"[A-Za-z0-9_./~-]+", arg):
@@ -3867,11 +3927,13 @@ class App:
         if not p:
             raise ApiError(404, "project not found")
         try:
-            editor = shlex.split(self.store.settings.get("editorCmd") or "code")
+            editor = [a.strip('"') for a in shlex.split(self.store.settings.get("editorCmd") or "code", posix=not IS_WIN)]
         except ValueError:
             raise ApiError(400, "invalid editor command")
-        if not editor or not which(editor[0]):
+        exe = which(editor[0]) if editor else None
+        if not exe:
             raise ApiError(400, f"{editor[0] if editor else 'code'} not found — set the editor command in Settings")
+        editor[0] = exe        # Windows: `code` is code.cmd — only found by its full path
         if where == "local":
             if not p.get("localExists"):
                 raise ApiError(400, "this project is not synced to this machine")
@@ -3930,7 +3992,29 @@ class App:
         return {"version": VERSION, "server": self.conf.to_dict(), "settings": self.store.settings,
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
                 "lastTabs": self.store.data.get("lastTabs") or [], "wsl": False if self.web else is_wsl(),
-                "platform": sys.platform, "web": self.web}
+                "platform": sys.platform, "web": self.web, "home": "" if self.web else os.path.expanduser("~")}
+
+    # the local folder of a project in Explorer / Finder / the file manager
+    def open_folder(self, name: str) -> dict:
+        p = self._project(name)
+        if not p.get("localExists"):
+            raise ApiError(400, "this project has no folder on this machine")
+        try:
+            open_in_file_manager(p["local"])
+        except OSError as e:
+            raise ApiError(500, f"could not open the folder: {e}")
+        return {"ok": True, "path": p["local"]}
+
+    def pick_folder(self, start: str = "") -> dict:
+        start = os.path.expanduser(start or "~")
+        for _ in range(64):                    # the nearest folder that exists
+            if os.path.isdir(start):
+                break
+            up = os.path.dirname(start.rstrip("/\\"))
+            start = "" if not up or up == start else up
+            if not start:
+                break
+        return {"path": pick_folder_dialog(start or os.path.expanduser("~"))}
 
 
 def daemon_running() -> bool:
@@ -4025,7 +4109,7 @@ def write_vscode_ssh_alias(conf: ServerConf, ssh_config: Path = None, chmod=True
 # web server's own disk: no local terminals, sync, VS Code, port forwarding or upkeep.
 WEB_COOKIE = "sw_web"
 WEB_KINDS = ("chat", "shell", "claude", "run", "docker")
-WEB_BLOCKED = {("POST", "editor"), ("POST", "sync"), ("POST", "git-sync"), ("GET", "connection"), ("POST", "connection"),
+WEB_BLOCKED = {("POST", "editor"), ("POST", "open-folder"), ("POST", "pick-folder"), ("POST", "sync"), ("POST", "git-sync"), ("GET", "connection"), ("POST", "connection"),
                ("POST", "ssh-key"), ("POST", "autostart"), ("POST", "sync-service"), ("POST", "shortcut"),
                ("GET", "update"), ("POST", "update"), ("GET", "prereqs"), ("POST", "prereqs"), ("POST", "move"),
                ("POST", "uninstall"), ("POST", "quit"), ("POST", "tunnels"), ("GET", "suggest"), ("POST", "add-project")}
@@ -4547,6 +4631,10 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": True}
         if route == ("POST", "editor"):
             return app.open_editor(self._body())
+        if route == ("POST", "open-folder") and len(parts) == 2:
+            return app.open_folder(parts[1])
+        if route == ("POST", "pick-folder"):
+            return app.pick_folder(str(self._body().get("start") or ""))
         if route == ("GET", "files") and len(parts) == 2:
             return {"files": app.project_files(parts[1])}
         if parts and parts[0] == "git" and len(parts) >= 3:

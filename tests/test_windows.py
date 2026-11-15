@@ -40,6 +40,7 @@ class ImportsAndPaths(WinOn):
         for mod in ("fcntl", "termios"):
             self.assertIsNone(re.search(r"^import %s$" % mod, src, re.M), mod)
             self.assertRegex(src, r"if not IS_WIN:\n    import fcntl\n    import termios")
+        src = src.replace(sw.CHAT_RELAY_PY, "")         # runs on the (Linux) server, not here
         bad = [l for l in src.splitlines() if re.search(r"signal\.SIG(KILL|HUP)\b", l) and "hasattr" not in l]
         self.assertEqual([l for l in bad if not l.strip().startswith("signal.signal(signal.SIGHUP")], [])
 

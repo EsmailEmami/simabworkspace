@@ -648,6 +648,8 @@
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
       case '_restart': this.system('— restarted —', 'hist'); break;
+      case '_reconnect': if (!this.replaying) this.system('Connection lost — Claude keeps working on the server. Reconnecting…', 'hist'); break;
+      case '_reconnected': if (!this.replaying) this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'hist'); break;
       case '_exit':
         this.alive = false;
         this.setBusy(false);

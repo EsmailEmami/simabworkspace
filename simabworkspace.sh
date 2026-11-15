@@ -40,6 +40,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.21.2 2026-11-15  Chat: Claude keeps working on the server when the connection drops;
+#                       the window reconnects by itself to the SAME Claude and shows what it
+#                       did meanwhile (no second Claude on the conversation). Closing the
+#                       tab stops it; one nobody uses is stopped after 30 idle minutes.
 #    1.21.1 2026-11-15  Windows: "VS Code, local folder" works (code.cmd started by its full
 #                       path); add project: Browse… (the system's folder dialog) and the full
 #                       path under the field; project menu: Open folder (Explorer / Finder)
@@ -151,7 +155,7 @@
 
 set -u -o pipefail
 
-VERSION="1.21.1"
+VERSION="1.21.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

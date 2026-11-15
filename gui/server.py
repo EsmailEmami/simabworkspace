@@ -52,7 +52,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.21.1"
+VERSION = "1.21.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1552,6 +1552,211 @@ def chat_remote_script(rpath: str, claude_cmd: str, args: list) -> str:
             f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote(inner)}')
 
 
+# Claude keeps running on the server when the connection drops. A small program
+# (the relay) starts it detached from SSH: Claude reads a FIFO and writes a log
+# file, so the work goes on; the next connection attaches to the same Claude and
+# reads the log from where it left off (no second Claude on the same conversation).
+#   ~/.cache/simabworkspace/chats/<key>/  in (FIFO) · out.log · err.log · pid · exit · seen
+# relay start KEY OFFSET SCRIPT   attach to the running Claude, or start SCRIPT
+# relay attach KEY OFFSET         attach only (reconnect); nothing running → exit
+# relay kill KEY                  stop it and remove its folder (the tab was closed)
+# A Claude nobody is attached to that has written nothing for 30 minutes is stopped.
+CHAT_RELAY_PY = r'''
+import os, sys, json, time, signal, shutil, subprocess, threading
+mode, key = sys.argv[1], sys.argv[2]
+base = os.path.expanduser("~/.cache/simabworkspace/chats")
+d = os.path.join(base, key)
+IDLE = 1800
+DM = []                                  # the daemon, when this relay started it (reaped here)
+def P(n):
+    return os.path.join(d, n)
+def pid_alive():
+    if DM and DM[0].poll() is not None:
+        return 0
+    try:
+        pid = int(open(P("pid")).read().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return 0
+def size(n):
+    try:
+        return os.path.getsize(P(n))
+    except OSError:
+        return 0
+def touch(n):
+    try:
+        with open(P(n), "a"):
+            os.utime(P(n), None)
+    except OSError:
+        pass
+def say(o):
+    sys.stdout.buffer.write((json.dumps(o) + "\n").encode())
+    sys.stdout.buffer.flush()
+def exit_code():
+    try:
+        return int(open(P("exit")).read().strip())
+    except (OSError, ValueError):
+        return -1
+
+if mode == "daemon":                     # owns Claude; runs detached from any SSH
+    fd = os.open(P("in"), os.O_RDWR)     # read-write: Claude never sees end-of-input
+    out, err = open(P("out.log"), "ab"), open(P("err.log"), "ab")
+    child = subprocess.Popen(["sh", "-c", sys.argv[3]], stdin=fd, stdout=out, stderr=err, start_new_session=True)
+    stopping = [0]
+    def term(*_):
+        stopping[0] = stopping[0] or time.time()
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    signal.signal(signal.SIGTERM, term)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    while True:
+        try:
+            code = child.wait(timeout=20)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.time()
+        def age(n):
+            try:
+                return now - os.path.getmtime(P(n))
+            except OSError:
+                return 1e9
+        if stopping[0] and now - stopping[0] > 10:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        elif not stopping[0] and age("seen") > IDLE and age("out.log") > IDLE:
+            term()
+    with open(P("exit.tmp"), "w") as f:
+        f.write(str(code))
+    os.replace(P("exit.tmp"), P("exit"))
+    sys.exit(0)
+
+if mode == "kill":
+    pid = pid_alive()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        end = time.time() + 15
+        while pid_alive() and time.time() < end:
+            time.sleep(0.2)
+    shutil.rmtree(d, ignore_errors=True)
+    sys.exit(0)
+
+os.makedirs(d, mode=0o700, exist_ok=True)
+off = int(sys.argv[3])
+pid = pid_alive()
+if pid:
+    state = "attached"
+elif mode == "attach":
+    if not (os.path.exists(P("exit")) and 0 <= off < size("out.log")):
+        say({"type": "_sw_relay", "state": "exit", "code": exit_code(), "off": off})
+        sys.exit(0)
+    state = "replay"                     # it ended while we were away: the rest of its output
+else:
+    try:                                 # old folders of finished conversations
+        for k in os.listdir(base):
+            o = os.path.join(base, k)
+            if k != key and time.time() - os.path.getmtime(o) > 3 * 86400 and not os.path.exists(os.path.join(o, "pid")):
+                shutil.rmtree(o, ignore_errors=True)
+    except OSError:
+        pass
+    for n in ("out.log", "err.log", "exit", "pid"):
+        try:
+            os.remove(P(n))
+        except OSError:
+            pass
+    if not os.path.exists(P("in")):
+        os.mkfifo(P("in"), 0o600)
+    touch("out.log")
+    touch("err.log")
+    touch("seen")
+    dm = subprocess.Popen([sys.executable, "-c", os.environ["SW_RELAY"], "daemon", key, sys.argv[4]],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          start_new_session=True, close_fds=True)
+    DM.append(dm)
+    with open(P("pid.tmp"), "w") as f:
+        f.write(str(dm.pid))
+    os.replace(P("pid.tmp"), P("pid"))
+    state, off = "started", 0
+if off < 0 or off > size("out.log"):
+    off = size("out.log")
+touch("seen")
+say({"type": "_sw_relay", "state": state, "off": off})
+
+def errors(pos):
+    try:
+        f = open(P("err.log"), "rb")
+        f.seek(pos)
+        while True:
+            b = f.read(65536)
+            if b:
+                sys.stderr.buffer.write(b)
+                sys.stderr.buffer.flush()
+            else:
+                time.sleep(0.3)
+    except (OSError, ValueError):
+        pass
+threading.Thread(target=errors, args=(0 if state == "started" else size("err.log"),), daemon=True).start()
+
+def inputs():
+    w = None
+    try:
+        for line in sys.stdin.buffer:
+            if line.strip() == b'{"type": "_sw_relay_kill"}':
+                p = pid_alive()
+                if p:
+                    os.kill(p, signal.SIGTERM)
+                continue
+            if w is None:
+                w = os.open(P("in"), os.O_WRONLY)
+            os.write(w, line)
+    except OSError:
+        pass
+    os._exit(0)                          # the connection is gone: Claude keeps working
+if state != "replay":
+    threading.Thread(target=inputs, daemon=True).start()
+
+f = open(P("out.log"), "rb")
+f.seek(off)
+beat = 0
+while True:
+    b = f.read(65536)
+    if b:
+        sys.stdout.buffer.write(b)
+        sys.stdout.buffer.flush()
+        continue
+    if not pid_alive():
+        time.sleep(0.2)
+        b = f.read()
+        if b:
+            sys.stdout.buffer.write(b)
+        say({"type": "_sw_relay", "state": "exit", "code": exit_code()})
+        sys.exit(0)
+    if time.time() - beat > 10:
+        touch("seen")
+        beat = time.time()
+    time.sleep(0.1)
+'''
+
+
+def chat_relay_command(mode: str, key: str, offset: int = 0, script: str = "") -> str:
+    """The remote command for the relay; without python3 on the server Claude runs directly (as before)."""
+    args = " ".join(shlex.quote(str(a)) for a in ([mode, key] + ([] if mode == "kill" else [offset]) + ([script] if mode == "start" else [])))
+    fallback = f"exec sh -c {shlex.quote(script)}" if mode == "start" else "exit 0"
+    return (f"if command -v python3 >/dev/null 2>&1; then SW_RELAY={shlex.quote(CHAT_RELAY_PY)}; export SW_RELAY; exec python3 -c \"$SW_RELAY\" {args}; "
+            f"else {fallback}; fi")
+
+
+RELAY_KEY_RE = re.compile(r"[0-9a-f]{16}")
+
+
 # Small Python programs run on the server (python3 is there) to read Claude's
 # own transcripts: list past conversations of a folder / load one for display.
 REMOTE_LIST_PY = r'''
@@ -1762,6 +1967,15 @@ class ChatSession:
         self.on_usage = None          # callback(rate_limit_info)
         self.on_cost = None           # callback(project, usd) — the cost of each answer
         self._cost_seen = 0.0
+        # the relay on the server (Claude survives a dropped connection); "" = run Claude directly
+        self.relay_key = built.get("relay") or ""
+        if self.relay_key:
+            self.spec["relay"] = self.relay_key
+        self.relay_off = -1 if built.get("relay_restored") else 0    # bytes of Claude's output read so far
+        self.relay_on = False         # this connection goes through the relay
+        self.relay_exit = None        # Claude's exit code, reported by the relay
+        self.reconnecting = 0         # attempts since the connection dropped
+        self.closed = False
         h = built.get("history")
         if isinstance(h, list):                        # old format: a plain list
             h = {"total": len(h), "start": 0, "entries": h}
@@ -1773,7 +1987,14 @@ class ChatSession:
 
     # process
     def start(self):
-        argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort)
+        self._connect("start")
+
+    def _connect(self, how="start"):
+        if self.relay_key:
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort,
+                                           relay=(how, self.relay_key, self.relay_off))
+        else:
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort)
         env = dict(os.environ, PATH=tool_path())
         try:
             proc = subprocess.Popen(argv, cwd=self.built["cwd"], env=env, stdin=subprocess.PIPE,
@@ -1781,11 +2002,15 @@ class ChatSession:
         except OSError as e:
             raise ApiError(500, f"could not start: {e}")
         with self.lock:
-            self.proc, self.exit_code, self.busy = proc, None, False
-            self.started = time.time()
-            self.runs += 1
-            self.pending.clear()
-            self._cost_seen = 0.0
+            again = how == "attach"
+            self.proc, self.exit_code = proc, None
+            self.relay_on, self.relay_exit = False, None
+            if not again:
+                self.busy = False
+                self.started = time.time()
+                self.runs += 1
+                self.pending.clear()
+                self._cost_seen = 0.0
         threading.Thread(target=self._read_out, args=(proc,), daemon=True).start()
         threading.Thread(target=self._read_err, args=(proc,), daemon=True).start()
         self._request({"subtype": "initialize", "hooks": None})
@@ -1812,6 +2037,18 @@ class ChatSession:
         self.my_requests[rid] = req.get("subtype")
         return self._write({"type": "control_request", "request_id": rid, "request": req})
 
+    def _relay_marker(self, ev: dict):
+        st = ev.get("state")
+        if isinstance(ev.get("off"), int):
+            self.relay_off = ev["off"]
+        if st == "exit":
+            self.relay_exit = ev.get("code") if isinstance(ev.get("code"), int) else -1
+            return
+        self.relay_on = True
+        if self.reconnecting:
+            self.reconnecting = 0
+            self._log({"type": "_reconnected", "running": st == "attached"})
+
     def _read_out(self, proc):
         for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").strip()
@@ -1820,8 +2057,15 @@ class ChatSession:
             try:
                 ev = json.loads(line)
             except ValueError:
+                if raw.endswith(b"\n"):
+                    self.relay_off += len(raw) if self.relay_off >= 0 else 0
                 self._log({"type": "_stderr", "text": line[:2000]})
                 continue
+            if isinstance(ev, dict) and ev.get("type") == "_sw_relay":
+                self._relay_marker(ev)
+                continue
+            if raw.endswith(b"\n") and self.relay_off >= 0:
+                self.relay_off += len(raw)        # only whole lines: a cut-off one is read again next time
             if isinstance(ev, dict):
                 self._handle_event(ev)
         code = proc.wait()
@@ -1833,12 +2077,36 @@ class ChatSession:
         with self.lock:
             if self.proc is not proc:
                 return
+            if self.relay_on and self.relay_exit is None and not self.closed:
+                # the connection dropped, Claude is still working on the server: attach again
+                self.reconnecting += 1
+                if self.reconnecting == 1:
+                    self._log({"type": "_reconnect", "code": code})
+                delay = min(30, [1, 2, 4, 8, 15][min(self.reconnecting - 1, 4)])
+                threading.Thread(target=self._reconnect_later, args=(proc, delay), daemon=True).start()
+                return
+            if self.relay_exit is not None:
+                code = self.relay_exit
+            self.reconnecting = 0
             self.exit_code = code
             self.busy = False
             self.pending.clear()
             self._log({"type": "_exit", "code": code})
         if self.on_change:
             self.on_change(self)
+
+    def _reconnect_later(self, proc, delay):
+        time.sleep(delay)
+        with self.lock:
+            if self.closed or self.proc is not proc:
+                return
+        try:
+            self._connect("attach")
+        except ApiError:
+            with self.lock:
+                if self.proc is proc:
+                    self.exit_code = -1
+            self._log({"type": "_exit", "code": -1})
 
     def _read_err(self, proc):
         for raw in proc.stderr:
@@ -1938,8 +2206,8 @@ class ChatSession:
                 content = [{"type": "text", "text": content}]
             if not isinstance(content, list) or not content:
                 return
-            if not self.alive:
-                self.start()
+            if not self.alive or self.proc.poll() is not None:
+                self._connect("start")          # the relay attaches if Claude still runs on the server
             self.busy = True
             self._broadcast({"t": "busy", "busy": True})
             if getattr(self, "log", None):
@@ -2030,19 +2298,50 @@ class ChatSession:
     def stop(self):
         self._request({"subtype": "interrupt"})
 
-    def kill(self, wait=False):
+    def _stop_remote(self, proc, key):
+        """Stop Claude on the server (the relay keeps it running otherwise)."""
+        if not key:
+            return
+        if proc and proc.poll() is None and self._write({"type": "_sw_relay_kill"}, proc):
+            time.sleep(0.3)
+
+        def kill_remote():
+            try:
+                argv = self.built["make_argv"](self.mode, self.model, "", self.effort, relay=("kill", key, 0))
+                subprocess.run(argv, cwd=self.built["cwd"], env=dict(os.environ, PATH=tool_path()),
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=40)
+            except (OSError, subprocess.SubprocessError, TypeError):
+                pass
+        threading.Thread(target=kill_remote, daemon=True).start()
+
+    def kill(self, wait=False, remote=True):
+        """Close the tab. remote=False (the app quits / restarts): Claude keeps running on the
+        server and the restored tab attaches to it again."""
         with self.lock:
             proc = self.proc
+            self.closed = True
             self._broadcast({"t": "gone"})
             for ws in list(self.subs):
                 ws.close()
             self.subs.clear()
+        if remote:
+            self._stop_remote(proc, self.relay_key)
         self._terminate(proc, wait)
+
+    def shutdown(self):
+        self.kill(remote=False)
 
     def restart(self, fresh=False):
         with self.lock:
             proc = self.proc
             self.proc = None
+            old = self.relay_key
+            if old:                                # a new Claude: a new relay folder
+                self.relay_key = secrets.token_hex(8)
+                self.spec["relay"] = self.relay_key
+                self.relay_off = 0
+            self.reconnecting = 0
+        self._stop_remote(proc, old)
         self._terminate(proc)
         if fresh:
             with self.lock:
@@ -2088,13 +2387,19 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     claude_cmd = s.get("claudeCmd") or "claude"
     multiplex = bool(s.get("sshMultiplex"))
 
-    def make_argv(mode_, model_, resume_, effort_=""):
-        return ssh_base(c, multiplex=multiplex) + ["-T", c.target,
-                                                   chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_))]
+    def make_argv(mode_, model_, resume_, effort_="", relay=None):
+        """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY)."""
+        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_))
+        if relay:
+            script = chat_relay_command(relay[0], relay[1], relay[2], script)
+        return ssh_base(c, multiplex=multiplex and not relay) + ["-T", c.target, script]
+
+    relay = spec.get("relay") if isinstance(spec.get("relay"), str) and RELAY_KEY_RE.fullmatch(spec.get("relay")) else ""
 
     title = spec.get("title") if isinstance(spec.get("title"), str) and spec.get("title").strip() else f"Claude · {pname or 'home'}"
     return {"make_argv": make_argv, "cwd": os.path.expanduser("~"), "title": title.strip()[:80],
             "resume": resume, "mode": mode, "model": model, "effort": effort, "conf": c, "rpath": rpath,
+            "relay": relay or secrets.token_hex(8), "relay_restored": bool(relay),
             "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new",
                      "slot": 0, **({"resume": resume} if resume else {})}}
 
@@ -3728,7 +4033,7 @@ class App:
 
     def shutdown_sessions(self):
         for s in list(self.sessions.values()):
-            s.kill()
+            getattr(s, "shutdown", s.kill)()
         self.sessions = {}
         for t in list(self.tunnels.values()):
             t.stop()

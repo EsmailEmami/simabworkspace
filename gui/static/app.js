@@ -1512,72 +1512,96 @@
         h('button', { class: 'btn primary', onclick: function () { md.close(); claudeTakeOver(project, x, title ? 'Claude · ' + title : ''); } }, 'Stop it there, continue here')] });
   }
 
+  // Claude sessions of one project (p), or of every project (p = null): what runs now — here,
+  // in VS Code or a terminal — and the earlier conversations.
   function claudeSessionsDialog(p) {
-    var past = null, timer = null;
+    var all = !p, past = null, timer = null;
     var runBox = h('div', { class: 'run-list' }, h('div', { class: 'muted' }, 'Looking on the server…'));
     var pastBox = h('div', { class: 'sess-list' }, h('div', { class: 'muted' }, 'Loading…'));
     var filter = h('input', { class: 'inp', placeholder: 'Filter conversations', dir: 'auto' });
+    var NOPROJ = 'No project (home folder)';
+    function pname(name) { return name || NOPROJ; }
     function titleOf(conv) {
       var c = (past || []).find(function (x) { return x.id === conv; });
       return c ? sessionTitle(c) : '';
     }
     function act(label, cls, fn, title) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: title || null, onclick: fn }, label); }
-    function renderRunning() {
-      var list = runningOf(p.name);
-      if (!list.length) { runBox.replaceChildren(h('div', { class: 'muted' }, 'No Claude is running in this project right now.')); return; }
-      runBox.replaceChildren.apply(runBox, list.map(function (x) {
-        var t = titleOf(x.sessionId) || x.name || x.sessionId.slice(0, 8);
-        var tab = x.tab && S.tabs.find(function (y) { return y.id === x.tab; });
-        var acts = [];
-        if (tab) acts.push(act('Show', 'primary', function () { md.close(); activate(tab); }));
-        else if (x.owner === 'simab') acts.push(act('Open', 'primary', function () { md.close(); openSession({ kind: 'chat', project: p.name, resume: x.sessionId, title: 'Claude · ' + t }); }, 'Open its chat here (the same Claude)'));
-        else {
-          acts.push(act('Watch', '', function () { md.close(); claudeWatch(p.name, x.sessionId, t); }, 'See it live here, read-only'));
-          acts.push(act('Continue here', 'primary', function () {
-            confirmDlg('Stop it in ' + ownerLabel(x) + ' and continue “' + t + '” here?', 'Continue here').then(function (ok) {
-              if (ok) { md.close(); claudeTakeOver(p.name, x, 'Claude · ' + t); }
-            });
-          }, 'Stops it there, then opens the conversation here'));
-        }
-        acts.push(act('Stop', 'danger', function () {
-          confirmDlg('Stop the Claude running “' + t + '” in ' + ownerLabel(x) + '? What it is doing now is cut off; the conversation is kept.', 'Stop', true).then(function (ok) {
-            if (ok) claudeStop(p.name, x).then(function () { toast('Stopped', 'ok'); }).catch(fail);
+    function row(proj, x) {
+      var t = titleOf(x.sessionId) || x.name || x.sessionId.slice(0, 8);
+      var tab = x.tab && S.tabs.find(function (y) { return y.id === x.tab; });
+      var acts = [];
+      if (tab) acts.push(act('Show', 'primary', function () { md.close(); activate(tab); }));
+      else if (x.owner === 'simab') acts.push(act('Open', 'primary', function () { md.close(); openSession({ kind: 'chat', project: proj, resume: x.sessionId, title: 'Claude · ' + t }); }, 'Open its chat here (the same Claude)'));
+      else {
+        acts.push(act('Watch', '', function () { md.close(); claudeWatch(proj, x.sessionId, t); }, 'See it live here, read-only'));
+        acts.push(act('Continue here', 'primary', function () {
+          confirmDlg('Stop it in ' + ownerLabel(x) + ' and continue “' + t + '” here?', 'Continue here').then(function (ok) {
+            if (ok) { md.close(); claudeTakeOver(proj, x, 'Claude · ' + t); }
           });
-        }));
-        return h('div', { class: 'run-row' },
-          h('i', { class: 'dot ' + (x.status === 'busy' ? 'busy' : 'ok'), title: x.status }),
-          h('div', { class: 'run-main' },
-            h('div', { class: 'st', dir: 'auto' }, t),
-            h('div', { class: 'sm' }, ownerLabel(x) + ' · ' + (x.status === 'busy' ? 'working' : x.status || 'running') +
-              (x.started ? ' · since ' + agoShort(x.started) : '') + (x.updated ? ' · last activity ' + agoShort(x.updated) + ' ago' : ''))),
-          h('div', { class: 'run-acts' }, acts));
+        }, 'Stops it there, then opens the conversation here'));
+      }
+      acts.push(act('Stop', 'danger', function () {
+        confirmDlg('Stop the Claude running “' + t + '” in ' + ownerLabel(x) + '? What it is doing now is cut off; the conversation is kept.', 'Stop', true).then(function (ok) {
+          if (ok) claudeStop(proj, x).then(function () { toast('Stopped', 'ok'); }).catch(fail);
+        });
       }));
+      return h('div', { class: 'run-row' },
+        h('i', { class: 'dot ' + (x.status === 'busy' ? 'busy' : 'ok'), title: x.status }),
+        h('div', { class: 'run-main' },
+          h('div', { class: 'st', dir: 'auto' }, t),
+          h('div', { class: 'sm' }, ownerLabel(x) + ' · ' + (x.status === 'busy' ? 'working' : x.status || 'running') +
+            (x.started ? ' · since ' + agoShort(x.started) : '') + (x.updated ? ' · last activity ' + agoShort(x.updated) + ' ago' : ''))),
+        h('div', { class: 'run-acts' }, acts));
+    }
+    function renderRunning() {
+      var names = all ? Object.keys(S.running || {}).sort(function (a, b) { return (a === '') - (b === '') || a.localeCompare(b); }) : [p.name];
+      var rows = [];
+      names.forEach(function (n) {
+        var list = runningOf(n);
+        if (!list.length) return;
+        if (all) rows.push(h('div', { class: 'run-proj', style: '--pc:' + (n ? projectColor(n) : 'var(--line2)') }, pname(n), h('span', { class: 'muted' }, ' · ' + list.length)));
+        list.forEach(function (x) { rows.push(row(n, x)); });
+      });
+      if (!rows.length) rows.push(h('div', { class: 'muted' }, all ? 'No Claude is running on the server right now.' : 'No Claude is running in this project right now.'));
+      runBox.replaceChildren.apply(runBox, rows);
     }
     function renderPast() {
       if (!past) return;
       var q = filter.value.trim().toLowerCase();
-      var shown = past.filter(function (c) { return !runningConv(p.name, c.id) && (!q || (c.title + ' ' + c.first + ' ' + c.last).toLowerCase().indexOf(q) >= 0); });
+      var shown = past.filter(function (c) { return !runningConv(c.proj, c.id) && (!q || (c.title + ' ' + c.first + ' ' + c.last + ' ' + (c.proj || '')).toLowerCase().indexOf(q) >= 0); });
       if (!shown.length) { pastBox.replaceChildren(h('div', { class: 'muted' }, past.length ? 'No match' : 'No conversations yet')); return; }
-      pastBox.replaceChildren.apply(pastBox, shown.map(function (c) {
+      pastBox.replaceChildren.apply(pastBox, shown.slice(0, all ? 60 : 40).map(function (c) {
         return h('div', { class: 'sess' },
-          h('button', { class: 'sess-main', onclick: function () { md.close(); openSession({ kind: 'chat', project: p.name, resume: c.id, title: 'Claude · ' + sessionTitle(c) }); } },
+          h('button', { class: 'sess-main', onclick: function () { md.close(); openSession({ kind: 'chat', project: c.proj, resume: c.id, title: 'Claude · ' + sessionTitle(c) }); } },
             h('div', { class: 'st', dir: 'auto' }, sessionTitle(c)),
-            h('div', { class: 'sm' }, window.SWChat.fmtTime(c.mtime) + ' · ' + plural(c.prompts, 'message'))));
+            h('div', { class: 'sm' }, (all ? pname(c.proj) + ' · ' : '') + window.SWChat.fmtTime(c.mtime) + ' · ' + plural(c.prompts, 'message'))));
       }));
     }
     filter.addEventListener('input', renderPast);
     var onRun = function () { renderRunning(); renderPast(); };
     window.addEventListener('sw-running', onRun);
-    var md = openModal({ title: 'Claude sessions — ' + p.name, body: [
+    var md = openModal({ title: all ? 'Claude sessions — all projects' : 'Claude sessions — ' + p.name, body: [
       h('div', { class: 'sec-h' }, 'Running now', h('span', { class: 'muted' }, ' · here, in VS Code or in a terminal')), runBox,
       h('div', { class: 'sec-h' }, 'Earlier conversations'), filter, h('div', { style: 'height:6px' }), pastBox],
-      foot: [h('button', { class: 'btn', onclick: function () { md.close(); openSession({ kind: 'chat', project: p.name }); } }, 'New chat'),
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); openSession(all ? { kind: 'chat' } : { kind: 'chat', project: p.name }); } }, all ? 'New chat (no project)' : 'New chat'),
         h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')],
       onclose: function () { clearInterval(timer); window.removeEventListener('sw-running', onRun); } });
-    api('GET', 'claude-sessions/' + encodeURIComponent(p.name)).then(function (d) { past = d.sessions; renderRunning(); renderPast(); })
-      .catch(function (e) { pastBox.replaceChildren(h('div', { class: 'muted' }, e.message)); });
+    // earlier conversations: of this project, or of every project with a server folder (and home)
+    var names = all ? S.projects.filter(hasRemote).map(function (x) { return x.name; }).concat(['']) : [p.name];
+    Promise.all(names.map(function (n) {
+      return api('GET', 'claude-sessions/' + encodeURIComponent(n)).then(function (d) {
+        return (d.sessions || []).map(function (c) { return Object.assign({ proj: n }, c); });
+      }).catch(function () { return []; });
+    })).then(function (lists) {
+      past = [].concat.apply([], lists).sort(function (a, b) { return b.mtime - a.mtime; });
+      renderRunning(); renderPast();
+    });
     refreshRunning(true).then(renderRunning);
     timer = setInterval(function () { refreshRunning(true); }, 3000);
+  }
+
+  function runningTotal() {
+    return Object.keys(S.running || {}).reduce(function (n, k) { return n + S.running[k].length; }, 0);
   }
 
   function notify(title, body) {
@@ -3263,6 +3287,8 @@
       if (gs && gs.repos === 1) items.push({ label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
     });
+    items.push({ label: 'Claude (no project, home folder)', grp: 'app', action: function () { openSession({ kind: 'chat' }); } });
+    items.push({ label: 'Claude sessions — all projects', grp: 'app', action: function () { claudeSessionsDialog(null); } });
     items.push({ label: 'Server terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'server' }); } });
     items.push({ label: 'Local terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'local' }); } });
     items.push({ label: 'Grid: all tabs side by side', grp: 'layout', action: gridAll });
@@ -3598,8 +3624,11 @@
     $('#server-stats').addEventListener('click', statsDialog);
     $('#btn-usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
+    var bc = $('#btn-claude');
+    if (bc) bc.addEventListener('click', function () { openSession({ kind: 'chat' }); });
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, webItems([
+        { label: 'Claude sessions — all projects…', k: runningTotal() ? runningTotal() + ' running' : '', action: function () { claudeSessionsDialog(null); } },
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },

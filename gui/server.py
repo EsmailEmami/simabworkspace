@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.28.0"
+VERSION = "1.29.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5029,9 +5029,7 @@ class App:
                 if not isinstance(x, dict):
                     continue
                 cwd = str(x.get("cwd") or "")
-                name = next((n for rp, n in roots if cwd == rp or cwd.startswith(rp.rstrip("/") + "/")), None)
-                if not name:
-                    continue
+                name = next((n for rp, n in roots if cwd == rp or cwd.startswith(rp.rstrip("/") + "/")), "")   # "" = no project
                 x["tab"] = here.get(x.get("sessionId")) or here.get("relay:" + str(x.get("relay") or "")) or ""
                 out.setdefault(name, []).append(x)
         cache["t"], cache["data"] = time.time(), out
@@ -5044,10 +5042,10 @@ class App:
         return None
 
     def claude_stop(self, project: str, pid, conv) -> dict:
-        p = self._project(project)
+        conf = self._project_conf(self._project(project)) if project else self.conf     # "" = no project
         if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(conv, str) or not UUID_RE.fullmatch(conv):
             raise ApiError(400, "which Claude session?")
-        r = remote_python(self._project_conf(p), CLAUDE_RUNNING_PY, ["stop", str(pid), conv],
+        r = remote_python(conf, CLAUDE_RUNNING_PY, ["stop", str(pid), conv],
                           multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30) or {}
         if r.get("error"):
             raise ApiError(409, str(r["error"]))

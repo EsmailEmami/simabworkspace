@@ -813,3 +813,6 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 .tool-card.synthetic .tname { color: var(--muted); }
 
 .starter-ta { height: auto; min-height: 180px; padding: 8px 10px; font: 13px/1.6 var(--ui); resize: vertical; unicode-bidi: plaintext; }
+
+.run-proj { font: 12px var(--mono); color: var(--text); margin: 8px 0 2px; padding-left: 8px; border-left: 2px solid color-mix(in srgb, var(--pc) 60%, transparent); }
+#btn-claude i { color: #d4976c; }

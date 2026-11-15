@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-claude', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -119,7 +119,7 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/server-stats')) res = Object.assign({ cpu: 92.4, cores: 8, load: [7.1, 5, 3], memTotal: 16e9, memUsed: 12.4e9, swapTotal: 0, swapUsed: 0,
     diskTotal: 500e9, diskUsed: 120e9, diskFree: 380e9, diskPath: '/home/esi' }, url.indexOf('top=1') > 0 ? {
     topCpu: [{ pid: 1, user: 'esi', cpu: 180.5, mem: 2, rss: 800e6, name: 'node' }], topMem: [{ pid: 2, user: 'esi', cpu: 3, mem: 30, rss: 4.8e9, name: 'postgres' }] } : {});
-  else if (url.startsWith('/api/claude-running/stop')) { fakeRunning.cheshmeh = fakeRunning.cheshmeh.filter((x) => x.pid !== body.pid); res = { ok: true, running: fakeRunning.cheshmeh }; }
+  else if (url.startsWith('/api/claude-running/stop')) { const k = body.project || ''; fakeRunning[k] = (fakeRunning[k] || []).filter((x) => x.pid !== body.pid); res = { ok: true, running: fakeRunning[k] }; }
   else if (url.startsWith('/api/claude-running')) res = { projects: fakeRunning, t: 0 };
   else if (url.startsWith('/api/claude-sessions/cheshmeh')) res = { sessions: [
     { id: CONV_VS, mtime: Date.now() / 1000, title: 'Fix the payment page', first: 'fix it', last: '', prompts: 4 },
@@ -828,6 +828,37 @@ const tests = {
     assert.match(modal.textContent, /postgres/);
     assert.match(modal.textContent, /4\.8 GB/);
     document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'all Claude sessions from the Menu; a Claude chat without a project from the sidebar'() {
+    const SW = global.SW;
+    fakeRunning = { cheshmeh: [{ pid: 7001, sessionId: CONV_VS, cwd: '/home/esi/cheshmeh', status: 'busy', owner: 'vscode', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 60, updated: Date.now() / 1000 }],
+      '': [{ pid: 7002, sessionId: '22222222-aaaa-bbbb-cccc-000000000009', cwd: '/home/esi', status: 'idle', owner: 'terminal', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 600, updated: Date.now() / 1000 - 30 }] };
+    await SW.refreshRunning(true); await settle();
+    document.body.querySelector('#btn-settings').click();
+    const item = q('button').find((b) => b.textContent.trim().indexOf('Claude sessions — all projects…') === 0);
+    assert.ok(item, 'in the Menu');
+    assert.match(item.textContent, /2 running/);
+    item.click(); await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /Claude sessions — all projects/);
+    assert.deepStrictEqual(q('.run-proj', modal).map((e) => e.textContent), ['cheshmeh · 1', 'No project (home folder) · 1']);
+    assert.strictEqual(q('.run-row', modal).length, 2);
+    // earlier conversations of every project, newest first, with the project's name
+    assert.ok(calls.some((c) => c.url === '/api/claude-sessions/cheshmeh') && calls.some((c) => c.url === '/api/claude-sessions/'));
+    assert.match(q('.sess-main', modal)[0].textContent, /Old work.*cheshmeh/);
+    // Stop in another project from here
+    q('button', q('.run-row', modal)[1]).find((b) => b.textContent === 'Stop').click(); await settle();
+    q('.btn.danger', q('.modal').pop()).pop().click(); await settle();
+    const st = calls.filter((c) => c.url === '/api/claude-running/stop').pop();
+    assert.deepStrictEqual([st.body.project, st.body.pid], ['', 7002]);
+    document.body.querySelector('#modal-root').replaceChildren();
+    // the sidebar's Claude button: a chat without a project
+    const n = calls.length;
+    document.body.querySelector('#btn-claude').click(); await settle();
+    const post = calls.slice(n).find((c) => c.url === '/api/sessions');
+    assert.deepStrictEqual([post.body.kind, post.body.project], ['chat', undefined]);
+    fakeRunning = { cheshmeh: [] };
   },
 
   async 'Alt+W closes the active tab; empty section is removed when closed'() {

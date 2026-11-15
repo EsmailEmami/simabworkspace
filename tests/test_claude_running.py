@@ -126,6 +126,10 @@ class RunningOnServer(base.TmpHome):
             r = app.claude_running(force=True)
             self.assertEqual({k: [x["sessionId"] for x in v] for k, v in r.items()},
                              {"shop-api": [CONV_A], "blog": [CONV_B]}, "the deepest project folder wins")
+            other = self.spawn(["sleep", "60"])
+            self.write(other.pid, CONV_C, self.home, "cli")                   # in the home folder: no project
+            self.assertEqual([x["sessionId"] for x in app.claude_running(force=True)[""]], [CONV_C])
+            self.assertEqual(app.claude_stop("", other.pid, CONV_C)["running"], [])      # stop works without a project
             self.assertEqual(r["shop-api"][0]["tab"], "tab1", "open here, found by its relay")
             self.assertEqual(r["blog"][0]["tab"], "")
             self.assertEqual(app.claude_running_one("blog", CONV_B)["pid"], term)

@@ -40,6 +40,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.29.0 2026-11-15  Menu → "Claude sessions — all projects": every Claude running on the
+#                       server, grouped by project (and "No project"), with Show / Open /
+#                       Watch / Continue here / Stop, and the latest conversations of all
+#                       projects. Sidebar: a "Claude" button opens a chat without a project
+#                       (in your home folder on the server).
 #    1.28.0 2026-11-15  Starter message per project (⋯ → Starter message…): every new Claude chat
 #                       of the project starts with it in the message box — you write your
 #                       request after it. Not used when you continue a conversation.
@@ -229,7 +234,7 @@
 
 set -u -o pipefail
 
-VERSION="1.28.0"
+VERSION="1.29.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

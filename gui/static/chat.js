@@ -1100,37 +1100,100 @@
     SW.notify(text, this.info.title);
   };
 
-  // Claude asks the user (AskUserQuestion): options as buttons + free answer
+  // Claude asks the user (AskUserQuestion), like Claude Code itself: one question at a time,
+  // a step bar on top (jump back and forth), a single choice moves on by itself, and with
+  // several questions a last "Submit" step lists every answer before it is sent.
   P.questionCard = function (rid, input) {
     var self = this;
     var qs = Array.isArray(input.questions) ? input.questions : [];
+    var many = qs.length > 1;
     var state = qs.map(function () { return { sel: [], other: '' }; });
-    var card = h('div', { class: 'perm-card q-card' }, h('div', { class: 'perm-title' }, 'Claude asks'));
+    var cur = 0;
+    var last = many ? qs.length : Math.max(0, qs.length - 1);   // index of the review step (many) or the only question
+    var stepsEl = many ? h('div', { class: 'q-steps' }) : null;
+    var review = many ? h('div', { class: 'q-block q-review hidden' }) : null;
+    var blocks = [];
+    var back = h('button', { class: 'btn sm q-back', onclick: function () { go(cur - 1); } }, '‹ Back');
+    var next = h('button', { class: 'btn primary sm q-next', onclick: function () { if (cur >= last) submit(); else go(cur + 1); } }, 'Next ›');
+    var card = h('div', { class: 'perm-card q-card', tabindex: '-1' },
+      h('div', { class: 'perm-title' }, 'Claude asks', many ? h('span', { class: 'q-count' }) : null), stepsEl);
+
+    function value(i) {
+      var vals = state[i].sel.slice();
+      if (state[i].other.trim()) vals.push(state[i].other.trim());
+      return vals.join(', ');
+    }
     function mark(qi) {
       Array.prototype.forEach.call(state[qi].optsEl.children, function (b) { b.classList.toggle('on', state[qi].sel.indexOf(b._label) >= 0); });
+    }
+    function paint() {
+      blocks.forEach(function (b, i) { b.classList.toggle('hidden', i !== cur); });
+      if (many) {
+        review.classList.toggle('hidden', cur !== qs.length);
+        Array.prototype.forEach.call(stepsEl.children, function (b, i) {
+          b.classList.toggle('on', i === cur);
+          b.classList.toggle('ok', i < qs.length && !!value(i));
+        });
+        var cnt = card.querySelector('.q-count');
+        if (cnt) cnt.textContent = cur < qs.length ? (cur + 1) + ' / ' + qs.length : 'review';
+        if (cur === qs.length) fillReview();
+      }
+      back.disabled = cur === 0;
+      back.classList.toggle('hidden', !many);
+      next.textContent = cur >= last ? 'Answer' : 'Next ›';
+    }
+    function fillReview() {
+      review.replaceChildren.apply(review, qs.map(function (q, i) {
+        var v = value(i);
+        return h('button', { class: 'q-row' + (v ? '' : ' missing'), dir: 'auto', onclick: function () { go(i); } },
+          h('span', { class: 'q-row-q', dir: 'auto' }, q.header || q.question),
+          h('b', { dir: 'auto' }, v || 'not answered'));
+      }));
+    }
+    function focusStep() {
+      if (self.replaying || S.active !== self) return;
+      var blk = cur < blocks.length ? blocks[cur] : null;
+      var el = blk ? (blk.querySelector('.q-opt.on') || blk.querySelector('.q-opt') || blk.querySelector('.q-other')) : next;
+      if (el) setTimeout(function () { el.focus(); }, 30);
+    }
+    function go(i) {
+      if (!self.perms[rid]) return;
+      cur = Math.max(0, Math.min(last, i));
+      paint();
+      focusStep();
     }
     function submit() {
       var answers = {};
       for (var i = 0; i < qs.length; i++) {
-        var vals = state[i].sel.slice();
-        if (state[i].other.trim()) vals.push(state[i].other.trim());
-        if (!vals.length) { toast('Answer every question (or Skip)', 'warn'); return; }
-        answers[qs[i].question] = vals.join(', ');
+        var v = value(i);
+        if (!v) { toast('Answer every question (or Skip)', 'warn'); go(i); return; }
+        answers[qs[i].question] = v;
       }
       self.answer(rid, true, false, '', { answers: answers });
     }
+    function done(qi) { if (qi >= last) submit(); else go(qi + 1); }   // one choice made: on to the next step
+
+    if (many) qs.forEach(function (q, qi) {
+      stepsEl.append(h('button', { class: 'q-step', dir: 'auto', title: q.question, onclick: function () { go(qi); } }, q.header || ('Q' + (qi + 1))));
+    });
+    if (many) stepsEl.append(h('button', { class: 'q-step q-step-end', onclick: function () { go(qs.length); } }, 'Submit'));
+
     qs.forEach(function (q, qi) {
       var opts = h('div', { class: 'q-opts' });
-      (q.options || []).forEach(function (o) {
+      (q.options || []).forEach(function (o, oi) {
         var b = h('button', { class: 'q-opt', dir: 'auto', onclick: function () {
           var st = state[qi];
           if (q.multiSelect) {
             var k = st.sel.indexOf(o.label);
             if (k >= 0) st.sel.splice(k, 1); else st.sel.push(o.label);
-          } else { st.sel = [o.label]; st.other = ''; other.value = ''; }
+            mark(qi);
+            paint();
+            return;
+          }
+          st.sel = [o.label]; st.other = ''; other.value = '';
           mark(qi);
-          if (!q.multiSelect && qs.length === 1) submit();          // one simple question: answer on click
-        } }, h('b', { dir: 'auto' }, o.label), o.description ? h('span', { class: 'qd', dir: 'auto' }, o.description) : null);
+          done(qi);
+        } }, h('b', { dir: 'auto' }, oi < 9 ? h('span', { class: 'q-num' }, (oi + 1) + '') : null, o.label), o.description ? h('span', { class: 'qd', dir: 'auto' }, o.description) : null);
         b._label = o.label;
         opts.append(b);
       });
@@ -1139,21 +1202,43 @@
         state[qi].other = other.value;
         if (other.value && !q.multiSelect) { state[qi].sel = []; mark(qi); }
       });
-      other.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); submit(); } });
+      other.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' && !ev.isComposing) { ev.preventDefault(); ev.stopPropagation(); if (value(qi)) done(qi); else submit(); }
+      });
       state[qi].optsEl = opts;
-      card.append(h('div', { class: 'q-block', dir: 'auto' },
+      var blk = h('div', { class: 'q-block', dir: 'auto' },
         q.header ? h('span', { class: 'q-head' }, q.header) : null,
         h('div', { class: 'q-text', dir: 'auto' }, q.question),
         q.multiSelect ? h('div', { class: 'q-hint' }, 'choose one or more') : null,
-        opts, other));
+        opts, other);
+      blocks.push(blk);
+      card.append(blk);
     });
-    card.append(h('div', { class: 'perm-actions' },
-      h('button', { class: 'btn primary sm', onclick: submit }, 'Answer'),
+    if (review) card.append(review);
+    card.append(h('div', { class: 'perm-actions' }, back, next,
       h('button', { class: 'btn sm', onclick: function () { self.answer(rid, false, false, 'The user declined to answer these questions.'); } }, 'Skip')));
+
+    // keys like Claude Code: ←/→ (or Tab) between steps, 1–9 picks an option
+    card.addEventListener('keydown', function (ev) {
+      if (!self.perms[rid] || ev.isComposing || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      var inInput = ev.target && ev.target.tagName === 'INPUT';
+      if (inInput) return;
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        if (!many) return;
+        ev.preventDefault();
+        go(cur + (ev.key === 'ArrowRight' ? 1 : -1));
+        return;
+      }
+      if (/^[1-9]$/.test(ev.key) && cur < blocks.length) {
+        var b = state[cur].optsEl.children[+ev.key - 1];
+        if (b) { ev.preventDefault(); b.click(); }
+      }
+    });
+
     this.perms[rid] = card;
+    paint();
     this.add(card);
-    var first = card.querySelector('.q-opt');
-    if (first && !this.replaying && S.active === this) setTimeout(function () { first.focus(); }, 50);
+    focusStep();
   };
 
   // plan mode finished: approve (and how to continue) or keep planning with feedback
@@ -1189,7 +1274,11 @@
     var a = card.querySelector('.perm-actions');
     if (a) a.replaceChildren(h('span', { class: 'perm-done', dir: 'auto' }, text));
     Array.prototype.forEach.call(card.querySelectorAll('.deny-msg, .q-other, textarea'), function (x) { x.remove(); });
-    Array.prototype.forEach.call(card.querySelectorAll('.q-opt'), function (x) { x.disabled = true; });
+    Array.prototype.forEach.call(card.querySelectorAll('.q-opt, .q-step, .q-row'), function (x) { x.disabled = true; });
+    if (card.classList.contains('q-card')) {         // in the history: every question at once, no step bar
+      Array.prototype.forEach.call(card.querySelectorAll('.q-steps, .q-review, .q-count'), function (x) { x.remove(); });
+      Array.prototype.forEach.call(card.querySelectorAll('.q-block'), function (x) { x.classList.remove('hidden'); });
+    }
     delete this.perms[rid];
     if (this.pendingPerm === rid) this.pendingPerm = null;
     if (!Object.keys(this.perms).length) this.el.classList.remove('bell');          // answered (here or elsewhere)

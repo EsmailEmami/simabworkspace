@@ -114,6 +114,63 @@ const tests = {
     assert.deepStrictEqual(sent, { t: 'perm', id: 'q1', allow: true, always: false, message: '', input: { answers: { 'کدام؟': 'دوم' } } });
   },
 
+  'several questions: one step at a time, back and forth, then review and submit'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q2', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+      input: { questions: [
+        { question: 'رنگ؟', header: 'Colour', options: [{ label: 'سبز' }, { label: 'آبی' }] },
+        { question: 'Features?', header: 'Feat', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] }] } } } });
+    const card = byClass(tab.msgs, 'q-card')[0];
+    const blocks = byClass(card, 'q-block').filter((b) => !b.classList.contains('q-review'));
+    const shown = () => blocks.map((b, i) => b.classList.contains('hidden') ? null : i).filter((x) => x !== null);
+    const steps = byClass(card, 'q-step');
+    assert.strictEqual(steps.length, 3, 'a step per question + Submit');
+    assert.deepStrictEqual(shown(), [0], 'only the first question is shown');
+    assert.ok(card.querySelector('.q-back').disabled);
+    const sentBefore = ws.sent.length;
+    byClass(blocks[0], 'q-opt')[1].click();                 // single choice: on to the next step
+    assert.deepStrictEqual(shown(), [1]);
+    assert.ok(steps[0].classList.contains('ok') && steps[1].classList.contains('on'));
+    card.querySelector('.q-back').click();                   // back: the choice is kept
+    assert.deepStrictEqual(shown(), [0]);
+    assert.ok(byClass(blocks[0], 'q-opt')[1].classList.contains('on'));
+    card.dispatch('keydown', { key: 'ArrowRight' });         // keys move between steps too
+    assert.deepStrictEqual(shown(), [1]);
+    byClass(blocks[1], 'q-opt')[0].click();                  // multi: stays on the step
+    byClass(blocks[1], 'q-opt')[1].click();
+    assert.deepStrictEqual(shown(), [1]);
+    card.querySelector('.q-next').click();
+    assert.deepStrictEqual(shown(), [], 'review step');
+    const rows = byClass(card, 'q-row');
+    assert.strictEqual(rows.length, 2);
+    assert.match(rows[0].textContent, /آبی/);
+    assert.match(rows[1].textContent, /A, B/);
+    assert.strictEqual(ws.sent.length, sentBefore, 'nothing sent before the last step');
+    rows[0].click();                                          // jump back from the review
+    assert.deepStrictEqual(shown(), [0]);
+    steps[2].click();
+    card.querySelector('.q-next').click();                    // "Answer"
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1].input, { answers: { 'رنگ؟': 'آبی', 'Features?': 'A, B' } });
+    feed({ t: 'e', e: { type: '_perm_done', request_id: 'q2', allow: true, answers: { 'رنگ؟': 'آبی', 'Features?': 'A, B' } } });
+    assert.deepStrictEqual(shown(), [0, 1], 'answered: every question visible in the history');
+    assert.strictEqual(byClass(card, 'q-steps').length, 0);
+  },
+
+  'several questions: submitting with one unanswered goes to it'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q3', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+      input: { questions: [{ question: 'one', options: [{ label: 'x' }] }, { question: 'two', options: [{ label: 'y' }] }] } } } });
+    const card = byClass(tab.msgs, 'q-card')[0];
+    const n = ws.sent.length;
+    byClass(card, 'q-step')[2].click();
+    assert.ok(byClass(card, 'q-row')[0].classList.contains('missing'));
+    card.querySelector('.q-next').click();
+    assert.strictEqual(ws.sent.length, n, 'not sent');
+    assert.ok(!byClass(card, 'q-block')[0].classList.contains('hidden'), 'back at the unanswered question');
+    card.dispatch('keydown', { key: '1' });                    // number keys pick an option
+    assert.ok(!byClass(card, 'q-block')[1].classList.contains('hidden'));
+  },
+
   'plan card: approve with auto-edit'() {
     const { tab, feed, ws } = newTab();
     feed({ t: 'e', e: { type: 'control_request', request_id: 'p1', request: { subtype: 'can_use_tool', tool_name: 'ExitPlanMode', input: { plan: '## برنامه\n- یک' } } } });

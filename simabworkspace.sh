@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.30.0 2026-11-15  Claude's questions step by step, like Claude Code: one question at a
+#                       time with a step bar on top, Back / Next (and ←/→, 1–9 keys), a choice
+#                       moves on by itself, and a last step lists every answer before sending.
 #    1.29.1 2026-11-15  Stuck chat after a reopen: when Claude was waiting for an answer to a
 #                       question / permission, the reopened window now gets that question again
 #                       (before, Claude waited for ever and new messages only queued up). And
@@ -239,7 +242,7 @@
 
 set -u -o pipefail
 
-VERSION="1.29.1"
+VERSION="1.30.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

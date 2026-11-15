@@ -40,6 +40,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.27.2 2026-11-15  Chat: the "— resumed —" line (and restarted / reconnected / compacted)
+#                       no longer shows as a big empty box — a CSS class clash with the
+#                       History list.
 #    1.27.1 2026-11-15  Chat: an agent's report and a skill's instructions are no longer shown
 #                       as if you had written them — they are folded into their Agent / Skill
 #                       card (click to read), like a command's output.
@@ -216,7 +219,7 @@
 
 set -u -o pipefail
 
-VERSION="1.27.1"
+VERSION="1.27.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

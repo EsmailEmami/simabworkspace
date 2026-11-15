@@ -692,10 +692,10 @@
       case '_history':
         if (e.entries && e.entries.length) {
           this.histStart = e.start || 0;
-          this.topEl = this.system('', 'hist top');
+          this.topEl = this.system('', 'mark top');
           this.setTopLabel();
           e.entries.forEach(function (x) { if (!x.isMeta) self.onEvent(x); });
-          this.system('— resumed —', 'hist');
+          this.system('— resumed —', 'mark');
         }
         break;
       case 'stream_event': this.onStream(e); break;
@@ -708,7 +708,7 @@
           if (Array.isArray(e.slash_commands) && !this.commands.length) this.commands = e.slash_commands.map(function (n) { return { name: n }; });
           if (e.model) this.modelName = e.model;
         } else if (e.subtype === 'compact_boundary') {
-          this.system('— conversation compacted —', 'hist');
+          this.system('— conversation compacted —', 'mark');
         }
         break;
       case 'control_request': this.onPermission(e); break;
@@ -725,9 +725,9 @@
       case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; if (!this.replaying) this.system('effort: ' + e.effort); break;
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
-      case '_restart': this.system('— restarted —', 'hist'); break;
-      case '_reconnect': if (!this.replaying) this.system('Connection lost — Claude keeps working on the server. Reconnecting…', 'hist'); break;
-      case '_reconnected': if (!this.replaying) this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'hist'); break;
+      case '_restart': this.system('— restarted —', 'mark'); break;
+      case '_reconnect': if (!this.replaying) this.system('Connection lost — Claude keeps working on the server. Reconnecting…', 'mark'); break;
+      case '_reconnected': if (!this.replaying) this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'mark'); break;
       case '_exit':
         this.alive = false;
         this.setBusy(false);

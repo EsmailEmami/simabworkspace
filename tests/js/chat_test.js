@@ -487,6 +487,16 @@ const tests = {
     assert.deepStrictEqual(bubbles(), ['my question', 'typed in the TUI']);
   },
 
+  'the "resumed" line is a thin line, not the History list box (class clash)'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [{ type: '_history', start: 0, total: 1, entries: [{ type: 'user', message: { content: 'hi' } }] }] });
+    const lines = byClass(tab.msgs, 'sysline');
+    assert.ok(lines.some((l) => l.textContent === '— resumed —'));
+    lines.forEach((l) => assert.ok(!l.classList.contains('hist'), 'never the class of the History dialog list'));
+    const css = fs.readFileSync(path.join(ROOT, 'gui/static/app.css'), 'utf8');
+    assert.ok(/\.hist\s*\{[^}]*min-height/.test(css), 'that class is the big History list');
+  },
+
   'a message sent while Claude works is queued, then picked up'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

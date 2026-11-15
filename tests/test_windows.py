@@ -279,6 +279,11 @@ class Installer(unittest.TestCase):
         self.assertIn("shortcut", ps)
         self.assertIn("System32\\bash.exe (that is WSL)", ps)
         self.assertEqual(ps.count("{"), ps.count("}"))
+        # finding Python: the registry first; the exit code is read right after the call, never
+        # through a pipeline (that left winget's exit code and rejected the new Python)
+        self.assertIn("Software\\Python\\PythonCore", ps)
+        self.assertNotIn("Select-Object -First 1)", ps)
+        self.assertRegex(ps, r"\$out = @\(& \$exe @pre -c .*\)\n\s+\$code = \$LASTEXITCODE")
         self.assertEqual(ps.count("("), ps.count(")"))
 
 

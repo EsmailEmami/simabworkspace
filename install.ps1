@@ -22,21 +22,48 @@ function Install-SimabWorkspace {
     $env:Path = (@($m, $u) | Where-Object { $_ }) -join ';'
   }
 
+  # Runs one python.exe and returns its full path if it is a real Python 3.8+ (else $null).
+  # The exit code is read right after the call (a pipeline like `| Select-Object -First 1`
+  # can leave $LASTEXITCODE of an earlier program, e.g. winget's, and reject a good Python).
+  function Test-Python($exe, $pre) {
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
+    $out = @(& $exe @pre -c 'import sys; print(sys.executable) if sys.version_info >= (3, 8) else sys.exit(3)' 2>$null)
+    $code = $LASTEXITCODE
+    if ($code -ne 0 -or $out.Count -eq 0) { return $null }
+    $p = ([string]$out[0]).Trim()
+    if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+    return $null
+  }
+
   function Find-Python {
-    # python.exe of a real Python 3 (the "python3" of the Microsoft Store is only a placeholder)
+    # 1. where Python installers register themselves (works even when python is not on PATH —
+    #    the python.org / winget installer does not add it to PATH by default)
     $cands = @()
-    foreach ($c in 'py', 'python', 'python3') {
-      $cmd = Get-Command $c -ErrorAction SilentlyContinue
-      if ($cmd) { $cands += $cmd.Source }
+    foreach ($root in 'HKCU:\Software\Python\PythonCore', 'HKLM:\Software\Python\PythonCore', 'HKLM:\Software\WOW6432Node\Python\PythonCore') {
+      foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue | Sort-Object PSChildName -Descending)) {
+        $ip = Get-ItemProperty (Join-Path $k.PSPath 'InstallPath') -ErrorAction SilentlyContinue
+        if ($ip) {
+          if ($ip.ExecutablePath) { $cands += $ip.ExecutablePath }
+          if ($ip.'(default)') { $cands += (Join-Path $ip.'(default)' 'python.exe') }
+        }
+      }
     }
+    # 2. the usual folders
     foreach ($d in (Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe", "$env:ProgramFiles\Python3*\python.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)) {
       $cands += $d.FullName
     }
     foreach ($c in $cands) {
-      $args3 = @()
-      if ((Split-Path $c -Leaf) -ieq 'py.exe') { $args3 = @('-3') }
-      $exe = (& $c @args3 -c "import sys; print(sys.executable if sys.version_info >= (3, 8) else '')" 2>$null | Select-Object -First 1)
-      if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path $exe)) { return $exe.Trim() }
+      $r = Test-Python $c @()
+      if ($r) { return $r }
+    }
+    # 3. on PATH: the py launcher, then python (the Microsoft Store placeholder fails the test)
+    foreach ($n in 'py', 'python', 'python3') {
+      $cmd = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if (-not $cmd) { continue }
+      $pre = @()
+      if ($n -eq 'py') { $pre = @('-3') }
+      $r = Test-Python $cmd.Source $pre
+      if ($r) { return $r }
     }
     return $null
   }
@@ -59,6 +86,8 @@ function Install-SimabWorkspace {
     }
     Say "Installing $what (winget)…"
     & winget install --id $id -e --source winget --accept-package-agreements --accept-source-agreements
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { Say "  (winget exit code $code — if it says 'already installed', that is fine)" }
     Update-PathFromRegistry
     return $true
   }
@@ -70,7 +99,13 @@ function Install-SimabWorkspace {
   if (-not $py) {
     if (-not (Install-WithWinget 'Python.Python.3.12' 'Python 3')) { Say 'https://www.python.org/downloads/windows/'; return }
     $py = Find-Python
-    if (-not $py) { Say '✗ Python was installed but cannot be found yet. Open a new PowerShell and run the command again.'; return }
+    if (-not $py) {
+      Say '✗ Python was installed but cannot be found yet. Open a NEW PowerShell window and run the command again.'
+      Say '  If it still fails, send this line:'
+      Say ("  py: " + [bool](Get-Command py -ErrorAction SilentlyContinue) + " · python: " + ((Get-Command python -ErrorAction SilentlyContinue).Source) +
+           " · folders: " + ((Get-ChildItem "$env:LOCALAPPDATA\Programs\Python", "$env:ProgramFiles\Python3*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) -join ', '))
+      return
+    }
   }
   Say "✓ Python: $py"
   $bash = Find-GitBash

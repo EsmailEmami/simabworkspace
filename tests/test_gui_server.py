@@ -604,7 +604,7 @@ class ChatProtocol(unittest.TestCase):
     def make(self, resume=""):
         argvs = []
 
-        def make_argv(mode, model, resume_):
+        def make_argv(mode, model, resume_, effort=""):
             argvs.append((mode, model, resume_))
             return [sys.executable, "-c", FAKE_CLAUDE]
         built = {"make_argv": make_argv, "cwd": "/tmp", "title": "Claude · p", "resume": resume, "mode": "default",
@@ -652,11 +652,14 @@ class ChatProtocol(unittest.TestCase):
         s.handle({"t": "mode", "mode": "plan"})
         s.handle({"t": "mode", "mode": "bypassPermissions"})     # not offered → ignored
         s.handle({"t": "model", "model": "opus"})
+        s.handle({"t": "effort", "effort": "high"})
+        s.handle({"t": "effort", "effort": "ultra"})               # unknown → ignored
         s.handle({"t": "interrupt"})
-        self.assertTrue(wait_for(lambda: self.types(s).count("seen_control") == 3))
+        self.assertTrue(wait_for(lambda: self.types(s).count("seen_control") == 4))
         seen = [e["subtype"] for e in s.events if e.get("type") == "seen_control"]
-        self.assertEqual(seen, ["set_permission_mode", "set_model", "interrupt"])
-        self.assertEqual(s.mode, "plan")
+        self.assertEqual(seen, ["set_permission_mode", "set_model", "apply_flag_settings", "interrupt"])
+        self.assertEqual((s.mode, s.effort), ("plan", "high"))
+        self.assertEqual(s.state()["effort"], "high")
 
     def test_question_answers_and_plan_mode(self):
         s, _, _ = self.make()
@@ -874,7 +877,18 @@ class ChatHelpers(TmpHome):
         self.assertIn("--permission-prompt-tool=stdio", a)
         self.assertEqual(a[a.index("--permission-mode") + 1], "auto")
         self.assertEqual(a[a.index("--resume") + 1], "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(sw.chat_args("bypassPermissions")[-1], "default")
+        self.assertEqual(a[a.index("--model") + 1], "opus")
+        self.assertEqual(a[a.index("--effort") + 1], "medium")
+        b = sw.chat_args("bypassPermissions")
+        self.assertEqual(b[b.index("--permission-mode") + 1], "default")
+        # no vague "default model": empty / "default" → Opus 5.5; effort medium unless chosen
+        for m in ("", "default", None):
+            c = sw.chat_args("default", m)
+            self.assertEqual(c[c.index("--model") + 1], "opus")
+        c = sw.chat_args("default", "sonnet", "", "high")
+        self.assertEqual((c[c.index("--model") + 1], c[c.index("--effort") + 1]), ("sonnet", "high"))
+        c = sw.chat_args("default", "sonnet", "", "ultra")
+        self.assertEqual(c[c.index("--effort") + 1], "medium")
         script = sw.chat_remote_script("/home/esi/my proj", "claude", a)
         self.assertTrue(script.startswith("cd '/home/esi/my proj' || exit 97"))
         self.assertEqual(subprocess.run(["bash", "-n", "-c", script]).returncode, 0)
@@ -907,7 +921,11 @@ class ChatHelpers(TmpHome):
         projects = sw.merge_projects(SESSIONS, [], {})
         conf = sw.ServerConf("esi", "1.2.3.4", "225", "")
         b = sw.build_chat({"kind": "chat", "project": "cheshmeh"}, conf, self.store, projects)
+        self.assertEqual((b["model"], b["effort"]), ("opus", "medium"))
         argv = b["make_argv"]("default", "", "")
+        self.assertIn("--effort medium", argv[-1])
+        self.store.set_chat_prefs("cheshmeh", effort="xhigh")
+        self.assertEqual(sw.build_chat({"kind": "chat", "project": "cheshmeh"}, conf, self.store, projects)["effort"], "xhigh")
         self.assertIn("-T", argv)
         self.assertIn("esi@203.0.113.10", argv)
         self.assertIn("cd /home/esi/cheshmeh", argv[-1])

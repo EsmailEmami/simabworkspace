@@ -44,6 +44,8 @@
 #                       (winget) and runs the app on Windows itself — terminals in the
 #                       Windows pseudo console (PowerShell locally), Mutagen/jq for Windows,
 #                       Start menu entry, `simabworkspace` in PowerShell/cmd/Git Bash
+#                       Chat: the model list shows real models (Opus 5.5 is the default,
+#                       no vague "default model"); thinking effort picker (default medium)
 #    1.20.0 2026-11-14  Web version: `simabworkspace web` serves the workspace to a browser
 #                       (tablet…) over HTTPS; sign in with an SSH user and password of an
 #                       allowed server (checked, never stored); one workspace per user;

@@ -39,6 +39,21 @@ function newTab() {
 const byClass = (el, c) => el.querySelectorAll('.' + c);
 
 const tests = {
+  'model: Opus 5.5 by default, no vague "default model"; effort medium'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 's', events: [], state: { alive: true, busy: false, model: '', effort: 'medium' } });
+    assert.strictEqual(tab.modelSel.value, 'opus');
+    assert.strictEqual(tab.effortSel.value, 'medium');
+    tab.applyInit({ models: [{ value: 'default', displayName: 'Default (recommended)' }, { value: 'opus', displayName: 'Opus 5.5' }, { value: 'sonnet', displayName: 'Sonnet 5.5' }] });
+    const opts = tab.modelSel.querySelectorAll('option').map(o => o.value);
+    assert.deepStrictEqual(opts, ['opus', 'sonnet']);
+    assert.strictEqual(tab.modelSel.value, 'opus');
+    tab.effortSel.value = 'high';
+    tab.effortSel.listeners.change.forEach(f => f({}));
+    assert.deepStrictEqual(ws.sent[ws.sent.length - 1], { t: 'effort', effort: 'high' });
+    feed({ t: 'e', e: { type: '_effort', effort: 'xhigh' } });
+    assert.strictEqual(tab.effortSel.value, 'xhigh');
+  },
   'reply of a real stream is shown once'() {
     const { tab, feed } = newTab();
     const stream = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/chat_stream_fa.json'), 'utf8'));

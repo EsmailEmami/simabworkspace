@@ -326,7 +326,8 @@ DEFAULT_SETTINGS = {
     "persianView": "auto",       # auto | off — readable Persian pane next to the terminal
     "composer": "claude",        # always | claude | never — Persian input box under the terminal
     "chatMode": "default",       # Claude chat: default (ask) | acceptEdits | plan | auto
-    "chatModel": "",             # empty = Claude's default
+    "chatModel": "opus",         # Opus 5.5 (the latest Opus)
+    "chatEffort": "medium",      # thinking effort: low, medium, high, xhigh, max
     "copyOnSelect": True,
     "bellNotify": True,
     "confirmClose": True,
@@ -342,6 +343,7 @@ SETTING_CHOICES = {
     "persianView": ("auto", "off"),
     "composer": ("always", "claude", "never"),
     "chatMode": ("default", "acceptEdits", "plan", "auto"),
+    "chatEffort": ("low", "medium", "high", "xhigh", "max"),
 }
 SETTING_RANGES = {"fontSize": (9, 32), "scrollback": (1000, 100000), "port": (0, 65535)}
 WHERE = ("local", "server")
@@ -518,7 +520,7 @@ class Store:
         return out
 
     # last Claude mode/model chosen in a chat: per project, and as the general default
-    def set_chat_prefs(self, project: str, mode=None, model=None):
+    def set_chat_prefs(self, project: str, mode=None, model=None, effort=None):
         with self.lock:
             pp = self.data["projects"].setdefault(project or "", {})
             if mode in CHAT_MODES:
@@ -527,6 +529,9 @@ class Store:
             if model is not None and re.fullmatch(r"[A-Za-z0-9.\[\]_-]{0,60}", model):
                 pp["chatModel"] = model
                 self.data["settings"]["chatModel"] = model
+            if effort in CHAT_EFFORTS:
+                pp["chatEffort"] = effort
+                self.data["settings"]["chatEffort"] = effort
             self.save()
 
     # project colour (tabs of the project are marked with it); "" = automatic
@@ -1517,12 +1522,25 @@ def claude_project_dir(remote_path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", remote_path)
 
 
-def chat_args(mode: str, model: str = "", resume: str = "") -> list:
+DEFAULT_CHAT_MODEL = "opus"           # the latest Opus (Opus 5.5) — "default" told you nothing
+CHAT_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_CHAT_EFFORT = "medium"
+
+
+def chat_model(model) -> str:
+    """'' or 'default' (older versions) → the default model."""
+    return model if isinstance(model, str) and model and model != "default" else DEFAULT_CHAT_MODEL
+
+
+def chat_effort(effort) -> str:
+    return effort if effort in CHAT_EFFORTS else DEFAULT_CHAT_EFFORT
+
+
+def chat_args(mode: str, model: str = "", resume: str = "", effort: str = "") -> list:
     a = ["--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
          "--permission-prompt-tool=stdio", "--include-partial-messages", "--replay-user-messages",
          "--setting-sources=user,project,local", "--permission-mode", mode if mode in CHAT_MODES else "default"]
-    if model:
-        a += ["--model", model]
+    a += ["--model", chat_model(model), "--effort", chat_effort(effort)]
     if resume:
         a += ["--resume", resume]
     return a
@@ -1734,7 +1752,8 @@ class ChatSession:
         self.on_change = on_change
         self.session_id = built.get("resume") or ""
         self.mode = built.get("mode") or "default"
-        self.model = built.get("model") or ""
+        self.model = chat_model(built.get("model"))
+        self.effort = chat_effort(built.get("effort"))
         self.busy = False
         self.init = None              # answer to our "initialize" request
         self.pending = {}             # permission requests waiting for the user
@@ -1754,7 +1773,7 @@ class ChatSession:
 
     # process
     def start(self):
-        argv = self.built["make_argv"](self.mode, self.model, self.session_id)
+        argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort)
         env = dict(os.environ, PATH=tool_path())
         try:
             proc = subprocess.Popen(argv, cwd=self.built["cwd"], env=env, stdin=subprocess.PIPE,
@@ -1899,7 +1918,7 @@ class ChatSession:
 
     def state(self) -> dict:
         return {"busy": self.busy, "alive": self.alive, "code": self.exit_code, "mode": self.mode,
-                "model": self.model, "sessionId": self.session_id, "init": self.init}
+                "model": self.model, "effort": self.effort, "sessionId": self.session_id, "init": self.init}
 
     # websocket
     def attach(self, ws: WebSocket):
@@ -1945,11 +1964,17 @@ class ChatSession:
             self._request({"subtype": "set_permission_mode", "mode": self.mode})
             self._log({"type": "_mode", "mode": self.mode})
         elif t == "model" and isinstance(m.get("model"), str) and re.fullmatch(r"[A-Za-z0-9.\[\]_-]{0,60}", m["model"]):
-            self.model = m["model"]
+            self.model = chat_model(m["model"])
             if getattr(self, "remember", None):
                 self.remember(self.spec.get("project"), model=self.model)
-            self._request({"subtype": "set_model", "model": self.model or "default"})
+            self._request({"subtype": "set_model", "model": self.model})
             self._log({"type": "_model", "model": self.model})
+        elif t == "effort" and m.get("effort") in CHAT_EFFORTS:
+            self.effort = m["effort"]
+            if getattr(self, "remember", None):
+                self.remember(self.spec.get("project"), effort=self.effort)
+            self._request({"subtype": "apply_flag_settings", "settings": {"effortLevel": self.effort}})
+            self._log({"type": "_effort", "effort": self.effort})
 
     def answer_permission(self, rid, allow: bool, always: bool, message: str, new_input=None, permissions=None):
         """allow/deny a tool. new_input: answers to AskUserQuestion (questions + answers);
@@ -2058,17 +2083,18 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         raise ApiError(400, "invalid conversation id")
     pp = store.data["projects"].get(pname or "", {})
     mode = spec.get("mode") if spec.get("mode") in CHAT_MODES else (pp.get("chatMode") or s.get("chatMode", "default"))
-    model = pp["chatModel"] if "chatModel" in pp else s.get("chatModel", "")
+    model = chat_model(pp["chatModel"] if "chatModel" in pp else s.get("chatModel", ""))
+    effort = chat_effort(pp["chatEffort"] if "chatEffort" in pp else s.get("chatEffort", ""))
     claude_cmd = s.get("claudeCmd") or "claude"
     multiplex = bool(s.get("sshMultiplex"))
 
-    def make_argv(mode_, model_, resume_):
+    def make_argv(mode_, model_, resume_, effort_=""):
         return ssh_base(c, multiplex=multiplex) + ["-T", c.target,
-                                                   chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_))]
+                                                   chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_))]
 
     title = spec.get("title") if isinstance(spec.get("title"), str) and spec.get("title").strip() else f"Claude · {pname or 'home'}"
     return {"make_argv": make_argv, "cwd": os.path.expanduser("~"), "title": title.strip()[:80],
-            "resume": resume, "mode": mode, "model": model, "conf": c, "rpath": rpath,
+            "resume": resume, "mode": mode, "model": model, "effort": effort, "conf": c, "rpath": rpath,
             "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new",
                      "slot": 0, **({"resume": resume} if resume else {})}}
 

@@ -11,7 +11,13 @@
     ['plan', 'plan', 'Reads and plans only; changes nothing'],
     ['auto', 'auto', 'Does low-risk things itself, asks for the rest']
   ];
-  var MODELS = [['', 'default model'], ['opus', 'opus'], ['sonnet', 'sonnet'], ['haiku', 'haiku']];
+  // until Claude sends its own list: the current models (no vague "default")
+  var MODELS = [['opus', 'Opus 5.5'], ['fable', 'Fable 5.2'], ['sonnet', 'Sonnet 5.5'], ['haiku', 'Haiku 5.5']];
+  var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  function modelLabel(sel, v) {
+    var o = Array.prototype.filter.call(sel.options || [], function (x) { return x.value === v; })[0];
+    return o ? o.textContent : v;
+  }
   var TOOL_FA = {};   // tool names are shown as-is (Bash, Read, Edit…)
 
   // ------------------------------------------------------------------ markdown (DOM, no innerHTML)
@@ -272,6 +278,9 @@
       MODES.map(function (m) { return h('option', { value: m[0], title: m[2] }, m[1]); }));
     this.modelSel = h('select', { class: 'mini-sel model', title: 'Model', onchange: function () { self.send({ t: 'model', model: self.modelSel.value }); } },
       MODELS.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
+    this.effortSel = h('select', { class: 'mini-sel effort', title: 'Thinking effort', onchange: function () { self.send({ t: 'effort', effort: self.effortSel.value }); } },
+      EFFORTS.map(function (e) { return h('option', { value: e }, e); }));
+    this.effortSel.value = 'medium';
     this.sendBtn = h('button', { class: 'send', title: 'Send (Enter)', onclick: function () { self.submit(); } }, '↑');
     this.stopBtn = h('button', { class: 'stopbtn hidden', title: 'Stop (Esc)', onclick: function () { self.interrupt(); } }, '■');
     this.stDot = h('i', { class: 'dot' });
@@ -287,7 +296,7 @@
     var composer = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.attachEl,
       h('div', { class: 'cbox' }, this.ta,
         h('div', { class: 'cbar' },
-          this.modeSel, this.modelSel,
+          this.modeSel, this.modelSel, this.effortSel,
           h('label', { class: 'clip', title: 'Attach image' }, '+', h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'hidden', onchange: function (e) { self.addFiles(e.target.files); e.target.value = ''; } })),
           h('span', { class: 'grow' }),
           h('button', { class: 'link cb-hist', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, h('span', { class: 'lbl' }, 'history'), h('span', { class: 'ico' }, '⟲')),
@@ -454,10 +463,12 @@
     this.alive = st.alive;
     this.exitCode = st.code;
     this.setMode(st.mode);
-    this.model = st.model || '';
-    this.modelSel.value = this.model;
+    this.model = st.model || 'opus';
+    this.effort = st.effort || 'medium';
+    this.effortSel.value = this.effort;
     this.setBusy(st.busy);
     if (st.init) this.applyInit(st.init);
+    this.setModelValue(this.model);
     this.applyInfo();
   };
 
@@ -465,14 +476,22 @@
     var self = this;
     if (Array.isArray(init.commands)) this.commands = init.commands.map(function (c) { return typeof c === 'string' ? { name: c } : c; });
     if (Array.isArray(init.models) && init.models.length) {
-      var cur = this.modelSel.value;
-      this.modelSel.replaceChildren.apply(this.modelSel, [h('option', { value: '' }, 'default model')].concat(init.models.filter(function (m) { return m.value && m.value !== 'default'; }).map(function (m) {
-        return h('option', { value: m.value, title: m.description || '' }, m.displayName || m.value);
-      })));
-      this.modelSel.value = cur;
-      if (this.modelSel.value !== cur) { this.modelSel.append(h('option', { value: cur }, cur)); this.modelSel.value = cur; }
+      var cur = this.model || this.modelSel.value || 'opus';
+      var list = init.models.filter(function (m) { return m.value && m.value !== 'default'; });
+      if (list.length) {
+        this.modelSel.replaceChildren.apply(this.modelSel, list.map(function (m) {
+          return h('option', { value: m.value, title: m.description || '' }, m.displayName || m.value);
+        }));
+      }
+      this.setModelValue(cur);
     }
     void self;
+  };
+
+  P.setModelValue = function (v) {
+    v = v && v !== 'default' ? v : 'opus';
+    this.modelSel.value = v;
+    if (this.modelSel.value !== v) { this.modelSel.append(h('option', { value: v }, v)); this.modelSel.value = v; }
   };
 
   P.setMode = function (mode) {
@@ -624,7 +643,8 @@
         break;
       case '_init': this.applyInit(e.info || {}); break;
       case '_mode': this.setMode(e.mode); break;
-      case '_model': this.model = e.model; this.modelSel.value = e.model; if (!this.replaying) this.system('model: ' + (e.model || 'default')); break;
+      case '_model': this.model = e.model || 'opus'; this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
+      case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; if (!this.replaying) this.system('effort: ' + e.effort); break;
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
       case '_restart': this.system('— restarted —', 'hist'); break;

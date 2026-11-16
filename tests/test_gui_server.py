@@ -1572,6 +1572,54 @@ wait_sync() {{ echo "WAIT $*"; return 0; }}
             self.assertNotIn("terminate", r.stdout)
             self.assertTrue(os.path.isdir(old_l))
 
+    def run_ignore(self, args, ignores=("node_modules",), create_fails=False):
+        sess = json.dumps([{"name": "shop", "alpha": {"path": "/l/shop"}, "beta": {"host": "h", "user": "esi", "port": 225, "path": "/r/shop"},
+                            "configuration": {"ignores": list(ignores)}}])
+        prog = f"""
+IS_WSL=0; SSH_USER=esi; SSH_HOST=h; SSH_PORT=225; DEFAULT_IGNORES=node_modules,dist
+title() {{ :; }}; info() {{ echo "INFO $*"; }}; ok() {{ echo "OK $*"; }}; warn() {{ echo "WARN $*"; }}; err() {{ echo "ERR $*"; }}
+daemon_running() {{ return 0; }}; daemon_start() {{ :; }}
+ask() {{ printf '%s' "$2"; }}; confirm() {{ return 1; }}
+sessions_json() {{ printf '%s' '{sess}'; }}
+session_git() {{ echo off; }}
+mutagen() {{ echo "MUTAGEN $*" >&2; }}
+N=0; create_session() {{ N=$((N+1)); echo "CREATE name=$1 local=$2 url=$3 ignores=[$4] git=$5" >&2; {"[ $N -gt 1 ]" if create_fails else "true"}; }}
+wait_sync() {{ echo "WAIT $*"; return 0; }}
+""" + self.funcs("ignore_set", "sanitize_name") + "\nignore_set " + " ".join(shlex.quote(a) for a in args)
+        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True)
+        r.stdout += r.stderr
+        return r
+
+    def test_ignore_recreates_the_session_with_the_new_list(self):
+        r = self.run_ignore(["shop", " node_modules, *.log,,/dist ,node_modules"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WAIT shop flush", r.stdout)
+        self.assertIn("MUTAGEN sync terminate shop", r.stdout)
+        self.assertIn("CREATE name=shop local=/l/shop url=esi@h:225:/r/shop ignores=[node_modules,*.log,/dist] git=off", r.stdout)
+
+    def test_ignore_defaults_empty_and_no_change(self):
+        r = self.run_ignore(["shop", "--default"], ignores=())
+        self.assertIn("ignores=[node_modules,dist] git=off", r.stdout)
+        r = self.run_ignore(["shop", ""])
+        self.assertIn("ignores=[] git=off", r.stdout)
+        r = self.run_ignore(["shop", "node_modules"])
+        self.assertIn("No change", r.stdout)
+        self.assertNotIn("terminate", r.stdout)
+
+    def test_ignore_restores_the_old_list_when_mutagen_refuses(self):
+        r = self.run_ignore(["shop", "bad["], create_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CREATE name=shop local=/l/shop url=esi@h:225:/r/shop ignores=[node_modules] git=off", r.stdout)
+        self.assertIn("Restoring", r.stdout)
+
+    def test_create_session_ignores_flag(self):
+        prog = 'LABEL=x; mutagen() { printf "<%s>" "$@"; echo; }\n' + self.funcs("create_session") + \
+               '\ncreate_session n /l u "a,b" on; create_session n /l u "" off'
+        out = subprocess.run(["bash", "-c", "set -u\n" + prog], capture_output=True, text=True).stdout.splitlines()
+        self.assertIn("<--ignore><a,b>", out[0])
+        self.assertNotIn("--ignore>", out[1])
+        self.assertIn("<--ignore-vcs>", out[1])
+
     def test_window_calls_never_start_the_wizard(self):
         with tempfile.TemporaryDirectory() as home:
             env = {"HOME": home, "PATH": "/usr/bin:/bin", "SW_NONINTERACTIVE": "1", "XDG_CONFIG_HOME": os.path.join(home, ".config")}
@@ -1646,9 +1694,33 @@ class SyncDetailsAndConflicts(TmpHome):
     def test_details(self):
         with mock.patch.object(sw, "mutagen_sessions", return_value=self.sess):
             d = self.app.sync_details("shop")
+        self.assertEqual(d["ignores"], ["node_modules"])
+        self.assertIn("node_modules", d["defaultIgnores"])
+        self.assertIn(".venv", d["defaultIgnores"])
         self.assertEqual((d["local"], d["remote"], d["git"], d["cycles"]), (self.local, "/srv/shop", False, 7))
         self.assertEqual(d["conflicts"], [{"path": "src/a.go", "local": [{"path": "src/a.go", "was": "file", "now": "file"}],
                                            "server": [{"path": "src/a.go", "was": "file", "now": "deleted"}]}])
+
+    def test_set_ignores_runs_the_script(self):
+        seen = []
+        with mock.patch.object(sw, "mutagen_sessions", return_value=self.sess), \
+                mock.patch.object(self.app, "run_script", side_effect=lambda a, **k: (seen.append(a), (0, "ok"))[1]):
+            d = self.app.set_ignores("shop", [" node_modules ", "*.log", "", "node_modules", "/dist"])
+            self.assertEqual(d["ignores"], ["node_modules", "*.log", "/dist"])
+            self.assertEqual(seen[-1], ["ignore", "shop", "node_modules,*.log,/dist"])
+            self.app.set_ignores("shop", [])
+            self.assertEqual(seen[-1], ["ignore", "shop", ""])
+            for bad in ("x", ["a,b"], ["a\nb"], [3]):
+                with self.assertRaises(sw.ApiError):
+                    self.app.set_ignores("shop", bad)
+            with self.assertRaises(sw.ApiError) as cm:
+                self.app.set_ignores("nope", ["x"])
+            self.assertEqual(cm.exception.status, 404)
+        self.assertEqual(len(seen), 2)
+        with mock.patch.object(sw, "mutagen_sessions", return_value=self.sess), \
+                mock.patch.object(self.app, "run_script", return_value=(1, "ERR Could not recreate the sync")):
+            with self.assertRaises(sw.ApiError):
+                self.app.set_ignores("shop", ["["])
 
     def test_resolve_keeps_the_chosen_side(self):
         calls = []
@@ -1839,7 +1911,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.31.1"', text)
+        self.assertIn('VERSION="1.32.0"', text)
 
 
 if __name__ == "__main__":

@@ -87,9 +87,10 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/prereqs/')) res = { ok: true };
   else if (url.startsWith('/api/move/')) res = { ok: true };
   else if (url === '/api/sync/cheshmeh/details') res = { name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
-    server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], git: true, progress: null,
+    server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
   else if (url === '/api/sync/cheshmeh/resolve') res = { ok: true };
+  else if (url === '/api/sync/cheshmeh/ignores') res = { ok: true, ignores: body.ignores };
   else if (url === '/api/server-folders') res = { folders: [{ path: '/home/esi/shop', name: 'shop', git: 'repo', mtime: 1, project: '' }, { path: '/home/esi/cheshmeh', name: 'cheshmeh', git: 'repos inside', mtime: 2, project: 'cheshmeh' }] };
   else if (url === '/api/add-project') res = { ok: true, project: 'shop' };
   else if (url.startsWith('/api/update') && method === 'GET') res = { current: '9', latest: '10.0.0', available: true, notes: '## Changes\n- faster', url: 'https://x' };
@@ -584,6 +585,36 @@ const tests = {
     await settle();
     const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/resolve').pop();
     assert.deepStrictEqual(post.body, { path: 'web/app.ts', keep: 'server' });
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'not synced: edit the list, add the defaults, save'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
+    await settle();
+    const modal = q('.modal').pop();
+    const ta = q('textarea', modal)[0];
+    assert.strictEqual(ta.value, 'node_modules');
+    ta.value = 'node_modules\n  *.log , /tmp\n';
+    q('button', modal).find((b) => b.textContent === 'Add defaults').click();
+    assert.strictEqual(ta.value, 'node_modules\n*.log\n/tmp\ndist');
+    q('.btn.primary', modal).pop().click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop();
+    assert.deepStrictEqual(post.body, { ignores: ['node_modules', '*.log', '/tmp', 'dist'] });
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'sync details: Edit… opens the not-synced list'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync details') === 0).click();
+    await settle();
+    q('.ign-edit', q('.modal').pop())[0].click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.match(modal.textContent, /Not synced — cheshmeh/);
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

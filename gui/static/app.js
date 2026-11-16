@@ -1773,6 +1773,7 @@
           if (ok) api('POST', 'git-sync/' + encodeURIComponent(p.name), { on: on }).then(function () { toast('Updating sync settings — this takes a moment', 'ok'); setTimeout(refreshProjects, 4000); }).catch(fail);
         });
       } } : null,
+      sync ? { label: 'Not synced…', action: function () { ignoresDialog(p); } } : null,
       sync ? { label: 'Move folders…', action: function () { moveDialog(p); } } : null,
       sync ? { label: 'Stop syncing…', action: function () {
         confirmDlg('Stop syncing “' + p.name + '”? Files stay on both sides; they just stop syncing. It stays in the list as a server project.', 'Stop syncing', true).then(function (ok) {
@@ -2844,6 +2845,41 @@
     }).catch(fail);
   }
 
+  // ------------------------------------------------------------------ not synced (ignores)
+  function ignoresDialog(p) {
+    var ta = h('textarea', { class: 'inp mono', rows: 10, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
+    var errBox = h('div', { class: 'add-err' });
+    var defaults = [];
+    var save = h('button', { class: 'btn primary', disabled: true, onclick: function () {
+      var list = ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean);
+      save.disabled = true; save.textContent = 'Saving…'; errBox.textContent = '';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: list }).then(function () {
+        md.close();
+        toast(p.name + ': not synced — ' + (list.join(', ') || 'nothing'), 'ok', { timeout: 6000 });
+        refreshProjects();
+      }).catch(function (e) { save.disabled = false; save.textContent = 'Save'; errBox.textContent = e.message; });
+    } }, 'Save');
+    var addDef = h('button', { class: 'btn', disabled: true, onclick: function () {
+      var have = ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean);
+      defaults.forEach(function (x) { if (have.indexOf(x) < 0) have.push(x); });
+      ta.value = have.join('\n');
+    } }, 'Add defaults');
+    var md = openModal({ title: 'Not synced — ' + p.name,
+      body: [h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' },
+        'Folders and files never copied between this machine and the server. One per line: ',
+        h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ', h('span', { class: 'mono' }, '/dist'), ' only at the top, ',
+        h('span', { class: 'mono' }, '*.log'), ' by name.'),
+        ta,
+        h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Saving restarts this project’s sync. Copies made before stay on both sides — delete them where they are not needed.'),
+        errBox],
+      foot: [addDef, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), save] });
+    api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
+      ta.value = (d.ignores || []).join('\n');
+      defaults = d.defaultIgnores || [];
+      save.disabled = false; addDef.disabled = !defaults.length;
+    }).catch(function (e) { errBox.textContent = e.message; });
+  }
+
   // ------------------------------------------------------------------ sync details + conflicts
   function syncDetails(p) {
     var body = h('div', null, h('div', { class: 'muted' }, 'Loading…'));
@@ -2870,7 +2906,9 @@
             kv('this machine', d.local), kv('server', d.server + ':' + d.remote),
             kv('.git folders', d.git ? 'synced' : 'not synced'),
             kv('sync cycles', String(d.cycles)),
-            kv('not synced', (d.ignores || []).join(', ') || '—'),
+            h('div', { class: 'kv' }, h('span', { class: 'k' }, 'not synced'),
+              h('span', { class: 'v mono' }, (d.ignores || []).join(', ') || '—', ' ',
+                h('a', { href: '#', class: 'ign-edit', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Edit…'))),
             d.error ? kv('last error', d.error, 'err') : null)];
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
           h('span', null, d.progress.percent + '% · ' + d.progress.files + '/' + d.progress.totalFiles + ' files')));

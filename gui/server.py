@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.31.1"
+VERSION = "1.32.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -634,6 +634,22 @@ def sync_state(status: str, paused: bool):
         if (status or "").startswith(prefix):
             return cls, label
     return "unknown", status or "unknown"
+
+
+FALLBACK_IGNORES = ["node_modules", ".angular", "dist", "tmp", "docker/data", ".dart_tool", "build", ".next", ".nuxt",
+                    ".cache", "__pycache__", ".venv", ".gradle"]
+
+
+def default_ignores() -> list:
+    """The script's DEFAULT_IGNORES (what new projects never sync)."""
+    for f in (HERE.parent / "simabworkspace.sh", installed_script()):
+        try:
+            m = re.search(r'^DEFAULT_IGNORES="([^"]*)"', Path(f).read_text(), re.M) if f else None
+        except OSError:
+            m = None
+        if m:
+            return [x for x in m.group(1).split(",") if x]
+    return list(FALLBACK_IGNORES)
 
 
 def mutagen_sessions(timeout=8) -> list:
@@ -4641,6 +4657,31 @@ class App:
         self.activity.add("move", name, "moved folders" + (" → " + local if local else "") + (" | server → " + remote if remote else ""))
         return {"ok": True, "output": out[-1500:]}
 
+    def set_ignores(self, name: str, ignores) -> dict:
+        """What is never synced for a project (Mutagen ignore patterns); the sync is recreated."""
+        p = next((x for x in self.projects(max_age=5) if x["name"] == name), None)
+        if not p or p.get("source") != "mutagen":
+            raise ApiError(404, "this project is not synced")
+        if not isinstance(ignores, list) or len(ignores) > 200:
+            raise ApiError(400, "bad list")
+        out, seen = [], set()
+        for x in ignores:
+            if not isinstance(x, str):
+                raise ApiError(400, "bad list")
+            x = x.strip()
+            if not x or x in seen:
+                continue
+            if len(x) > 300 or "," in x or any(ord(c) < 32 for c in x):
+                raise ApiError(400, f"not a valid pattern: {x[:60]}")
+            seen.add(x)
+            out.append(x)
+        code, text = self.run_script(["ignore", name, ",".join(out)], timeout=900)
+        self.invalidate()
+        if code != 0:
+            raise ApiError(400, self.script_error(text, "could not change what is not synced"))
+        self.activity.add("sync-ignores", name, "not synced: " + (", ".join(out) or "nothing"))
+        return {"ok": True, "ignores": out}
+
     def uninstall(self) -> dict:
         def run():
             time.sleep(0.5)
@@ -4854,7 +4895,7 @@ class App:
         return {"name": name, "state": cls, "label": label, "status": x.get("status") or "", "paused": bool(x.get("paused")),
                 "local": loc["path"], "remote": rem["path"], "server": f"{rem['user'] or self.conf.user}@{rem['host']}",
                 "error": x.get("lastError") or "", "cycles": int(x.get("successfulCycles") or 0),
-                "ignores": cfg.get("ignores") or [], "git": str(cfg.get("ignoreVCSMode") or "default") not in ("ignore", "1"),
+                "ignores": cfg.get("ignores") or [], "defaultIgnores": default_ignores(), "git": str(cfg.get("ignoreVCSMode") or "default") not in ("ignore", "1"),
                 "mode": cfg.get("synchronizationMode") or "", "progress": sync_progress(x), "conflicts": conflicts}
 
     def resolve_conflict(self, name: str, path: str, keep: str) -> dict:
@@ -6212,6 +6253,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.git_sync(parts[1], self._body().get("on") is True)
         if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "details":
             return app.sync_details(parts[1])
+        if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "ignores":
+            return app.set_ignores(parts[1], self._body().get("ignores"))
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "resolve":
             b = self._body()
             return app.resolve_conflict(parts[1], b.get("path") or "", b.get("keep") or "")

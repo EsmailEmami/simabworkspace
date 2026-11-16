@@ -23,6 +23,7 @@
 #    simabworkspace move    NAME [--local PATH] [--remote PATH] [--yes] [--no-wait]
 #                                   change the local and/or server folder of a project
 #    simabworkspace git     NAME [on|off]  sync the project's .git folders or not
+#    simabworkspace ignore  NAME [LIST|--default]  what is never synced (comma list, e.g. node_modules,dist)
 #    simabworkspace pause-all | resume-all
 #    simabworkspace disconnect      pause everything and stop the sync daemon
 #    simabworkspace reconnect       start the daemon and resume everything
@@ -40,6 +41,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.32.0 2026-11-16  Not synced, per project: Sync details → Edit… sets the folders and files
+#                       that are never copied between this machine and the server
+#                       (node_modules, dist…); `simabworkspace ignore NAME LIST` does the same.
+#                       An empty list stays empty (moving or git on/off keeps it).
 #    1.31.1 2026-11-15  Tablet: the sidebar edge and the bars between sections can be dragged
 #                       with a finger (pointer events, wider grip on touch screens).
 #    1.31.0 2026-11-15  Rename a project in the list (⋯ → Rename…; its real name stays).
@@ -250,7 +255,7 @@
 
 set -u -o pipefail
 
-VERSION="1.31.1"
+VERSION="1.32.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1226,15 +1231,17 @@ project_action() {
 # create_session <name> <local path> <remote URL user@host:port:path> <ignores csv> [git on|off]
 #   git on  (default): .git folders are synced too
 #   git off          : .git / .svn / .hg are skipped (--ignore-vcs)
+#   ignores ""       : nothing is ignored
 create_session() {
-  local vcs="--no-ignore-vcs"
+  local vcs="--no-ignore-vcs" ign=()
   [ "${5:-on}" = "off" ] && vcs="--ignore-vcs"
+  [ -n "$4" ] && ign=(--ignore "$4")
   mutagen sync create \
     --name "$1" \
     --label "$LABEL" \
     --sync-mode two-way-safe \
     "$vcs" \
-    --ignore "$4" \
+    ${ign[@]+"${ign[@]}"} \
     "$2" "$3"
 }
 
@@ -1311,7 +1318,6 @@ move_project() {
   r_host=$(printf '%s' "$s" | jq -r ".$rside.host // empty"); r_host="${r_host:-$SSH_HOST}"
   r_port=$(printf '%s' "$s" | jq -r ".$rside.port // 0")
   ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
-  [ -z "$ignores" ] && ignores="$DEFAULT_IGNORES"
   local git; git=$(session_git "$s")
   if [ "$r_host" != "$SSH_HOST" ] || [ "$r_user" != "$SSH_USER" ]; then
     err "'$name' syncs with $r_user@$r_host, not with your configured server ($SSH_USER@$SSH_HOST)."
@@ -1467,7 +1473,6 @@ git_toggle() {
   r_host=$(printf '%s' "$s" | jq -r ".$rside.host // empty"); r_host="${r_host:-$SSH_HOST}"
   r_port=$(printf '%s' "$s" | jq -r ".$rside.port // 0"); [ "$r_port" = "0" ] && r_port="$SSH_PORT"
   ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
-  [ -z "$ignores" ] && ignores="$DEFAULT_IGNORES"
   url="$r_user@$r_host:$r_port:$rpath"
   new_name=$(sanitize_name "$name")
   case "$name" in sync_*) new_name=$(sanitize_name "$(basename "$rpath")") ;; esac
@@ -1491,6 +1496,56 @@ git_toggle() {
   fi
   ok "'$new_name': git sync $want"
   wait_sync "$new_name" && ok "In sync."
+}
+
+# ignore_set [name] [list|--default] — what is never synced for a project (comma list of
+# Mutagen ignore patterns: "node_modules" anywhere, "/dist" only at the top, "*.log"…).
+# Mutagen cannot change this on a live session, so it is recreated with the same name,
+# folders and git setting. Files already copied stay where they are.
+ignore_set() {
+  title "Not synced"
+  daemon_running || daemon_start
+  local name="${1:-}" want="${2-__ask__}"
+  [ -z "$name" ] && { name=$(pick_project "Project") || return 1; }
+  local s
+  s=$(sessions_json | jq -c --arg n "$name" 'first(.[] | select((.name // .identifier) == $n)) // empty')
+  [ -z "$s" ] && { err "No such project: $name"; return 1; }
+
+  local lside=alpha rside=beta
+  if [ -n "$(printf '%s' "$s" | jq -r '.alpha.host // empty')" ] && [ -z "$(printf '%s' "$s" | jq -r '.beta.host // empty')" ]; then
+    lside=beta; rside=alpha
+  fi
+  local cur git lpath rpath r_user r_host r_port url new_name
+  cur=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
+  git=$(session_git "$s")
+  lpath=$(printf '%s' "$s" | jq -r ".$lside.path // empty")
+  rpath=$(printf '%s' "$s" | jq -r ".$rside.path // empty")
+  r_user=$(printf '%s' "$s" | jq -r ".$rside.user // empty"); r_user="${r_user:-$SSH_USER}"
+  r_host=$(printf '%s' "$s" | jq -r ".$rside.host // empty"); r_host="${r_host:-$SSH_HOST}"
+  r_port=$(printf '%s' "$s" | jq -r ".$rside.port // 0"); [ "$r_port" = "0" ] && r_port="$SSH_PORT"
+  url="$r_user@$r_host:$r_port:$rpath"
+  new_name=$(sanitize_name "$name")
+  case "$name" in sync_*) new_name=$(sanitize_name "$(basename "$rpath")") ;; esac
+
+  info "'$name' — not synced now: ${cur:-(nothing)}"
+  if [ "$want" = "__ask__" ]; then
+    want=$(ask "New list (comma separated, - for the defaults)" "${cur:-$DEFAULT_IGNORES}")
+  fi
+  case "$want" in --default|-) want="$DEFAULT_IGNORES" ;; esac
+  # tidy: split on commas/new lines, trim, drop empty and repeated entries, keep the order
+  want=$(printf '%s' "$want" | tr '\n' ',' | awk -v RS=',' '{ gsub(/^[ \t\r]+|[ \t\r]+$/, ""); if ($0 != "" && !seen[$0]++) printf "%s%s", (n++ ? "," : ""), $0 }')
+  [ "$want" = "$cur" ] && { ok "No change."; return 0; }
+
+  info "Syncing pending changes first…"
+  wait_sync "$name" flush || { confirm "Continue anyway?" n || return 1; }
+  mutagen sync terminate "$name" >/dev/null || { err "Could not stop the old sync."; return 1; }
+  if ! create_session "$new_name" "$lpath" "$url" "$want" "$git" >/dev/null; then
+    err "Could not recreate the sync (check the list). Restoring the old one."
+    create_session "$new_name" "$lpath" "$url" "$cur" "$git" >/dev/null
+    return 1
+  fi
+  ok "'$new_name': not synced: ${want:-(nothing)}"
+  info "Copies made before stay on both sides — delete them by hand where they are not needed."
 }
 
 all_action() {
@@ -1819,6 +1874,7 @@ main() {
     pause|resume|flush|remove|info|monitor) project_action "$cmd" "${2:-}" ;;
     move)        shift; move_project "$@" ;;
     git)         git_toggle "${2:-}" "${3:-}" ;;
+    ignore)      shift; ignore_set "$@" ;;
     pause-all)   all_action pause ;;
     resume-all)  all_action resume ;;
     disconnect)  disconnect_all ;;

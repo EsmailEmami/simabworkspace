@@ -1335,6 +1335,7 @@
       L.groups.forEach(function (x) { x.el.classList.toggle('focused', x === g && L.groups.length > 1); });
     }
     S.active = tab;
+    if (window.sideFilesPanel) window.sideFilesPanel.onActivate(tab);
     $('#empty').classList.add('hidden');
     g.renderEmpty();
     tab.el.classList.remove('activity', 'bell', 'done');
@@ -1440,7 +1441,7 @@
       if (open) { activate(open); return Promise.resolve(open); }
     }
     if (spec.kind === 'files') {
-      var fx = S.tabs.find(function (t) { return t.isFiles && !t.gone && t.info.spec.project === spec.project; });
+      var fx = S.tabs.find(function (t) { return t.isFiles && !t.gone && (t.info.spec.project || '') === (spec.project || ''); });
       if (fx) { activate(fx); return Promise.resolve(fx); }
     }
     if (spec.kind === 'run') {
@@ -3729,7 +3730,8 @@
       rz.classList.add('drag');
       return {
         move: function (e) {
-          w = Math.max(170, Math.min(480, e.clientX));
+          var side = $('#sidebar'), left = side ? side.getBoundingClientRect().left : 0;
+          w = Math.max(170, Math.min(480, e.clientX - left));
           document.documentElement.style.setProperty('--side', w + 'px');
         },
         up: function () {
@@ -3773,6 +3775,9 @@
     setTimeout(fitAll, 120);
   }
   function toggleWorkMode() { setWorkMode(!document.body.classList.contains('work-mode')); }
+
+  function serverTerminal() { return openSession({ kind: 'shell', where: 'server', title: 'Server terminal' }); }
+  function serverFiles() { return openSession({ kind: 'files', title: 'Files · server' }); }
 
   function quitApp() {
     confirmDlg('Quit? Every terminal, Claude chat and running command is stopped. (Closing the window instead keeps them running.)', 'Quit', true).then(function (ok) {
@@ -3839,9 +3844,9 @@
   window.SW = {
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
     closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
-    confirmDlg: confirmDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
+    confirmDlg: confirmDlg, promptDlg: promptDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
-    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal,
+    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
@@ -3857,6 +3862,10 @@
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     var bc = $('#btn-claude');
     if (bc) bc.addEventListener('click', function () { openSession({ kind: 'chat' }); });
+    var bt = $('#btn-terminal');
+    if (bt) bt.addEventListener('click', serverTerminal);
+    var bf = $('#btn-files');
+    if (bf) bf.addEventListener('click', serverFiles);
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, webItems([
         { label: 'Claude sessions — all projects…', k: runningTotal() ? runningTotal() + ' running' : '', action: function () { claudeSessionsDialog(null); } },
@@ -3875,6 +3884,7 @@
     $('#btn-hide-side').addEventListener('click', function () { if (compact()) closeDrawer(); else setWorkMode(true); });
     if (COMPACT.addEventListener) COMPACT.addEventListener('change', applyCompact);
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
+    if (window.SideFilesPanel) window.sideFilesPanel = new window.SideFilesPanel();
     $('#st-ssh').addEventListener('click', function () { refreshStatus(true); });
     $('#proj-filter').addEventListener('input', function (e) { S.filter = e.target.value; renderProjects(); });
     // an extra window starts with the sidebar hidden: it is for the tabs

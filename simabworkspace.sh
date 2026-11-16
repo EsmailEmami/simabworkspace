@@ -41,6 +41,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.34.0 2026-11-16  Rail (activity bar) on the left beside the projects; Files panel in the
+#                       sidebar shows the active project's files; drag files from your OS into a
+#                       folder to upload them; create, rename, copy/cut/paste, delete and edit
+#                       files from the Files panel or the Rail → Files button (server home).
 #    1.33.1 2026-11-16  Stars: drag starred entries up and down (Ctrl+Shift+P and the ⋯ menu) to
 #                       put them in your own order — mouse: the row, finger: the ⠿ grip.
 #    1.33.0 2026-11-16  Stars: ☆ next to a command in Ctrl+Shift+P or an entry of a project's ⋯
@@ -262,7 +266,7 @@
 
 set -u -o pipefail
 
-VERSION="1.33.1"
+VERSION="1.34.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

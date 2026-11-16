@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.33.1"
+VERSION = "1.34.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2267,12 +2267,13 @@ print(json.dumps({"off": off + end, "size": size, "entries": out}))
 '''
 
 
-def remote_python(conf: ServerConf, code: str, args: list, multiplex=True, timeout=30):
+def remote_python(conf: ServerConf, code: str, args: list, multiplex=True, timeout=30, stdin: bytes = None):
     cmd = "python3 -c " + shlex.quote(code) + " " + " ".join(shlex.quote(a) for a in args)
     try:
         with tempfile.TemporaryFile() as errf:
             r = subprocess.run(ssh_base(conf, multiplex=multiplex) + ["-T", "-o", "BatchMode=yes", conf.target, cmd],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf, timeout=timeout)
+                               input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=errf, timeout=timeout)
             errf.seek(0)
             err = errf.read().decode("utf-8", "replace").strip()
     except (OSError, subprocess.SubprocessError) as e:
@@ -3475,9 +3476,154 @@ def fs_all(root, limit=30000):
     return out[:limit]
 
 
+def fs_target(root, rel):
+    """For changes: the real folder it is in (inside root), the last name kept as it is — so a symbolic
+    link is renamed / removed itself, never what it points to."""
+    root = os.path.realpath(os.path.expanduser(root or "~"))
+    rel = (rel or "").strip("/")
+    if not rel or rel.startswith("-") or ".." in rel.split("/") or "\0" in rel:
+        raise FsError("bad path")
+    parent = os.path.realpath(os.path.join(root, os.path.dirname(rel))) if "/" in rel else root
+    if parent != root and not parent.startswith(root.rstrip(os.sep) + os.sep):
+        raise FsError("this path is outside the folder")
+    return root, os.path.join(parent, os.path.basename(rel))
+
+
+def fs_name_ok(name):
+    if not name or name in (".", "..") or "/" in name or "\0" in name or len(name) > 255:
+        raise FsError("bad name")
+    return name
+
+
+def fs_free(folder, name):
+    """name, or "name copy", "name copy 2"... when it is taken in folder."""
+    if not os.path.lexists(os.path.join(folder, name)):
+        return name
+    stem, ext = os.path.splitext(name)
+    if name.startswith(".") and stem == name:
+        ext = ""
+    for i in range(1, 1000):
+        cand = stem + " copy" + ("" if i == 1 else " " + str(i)) + ext
+        if not os.path.lexists(os.path.join(folder, cand)):
+            return cand
+    raise FsError("too many copies")
+
+
+def fs_rel(root, full):
+    return os.path.relpath(full, root).replace(os.sep, "/")
+
+
+def fs_change(root, op, rel, arg="", text=None):
+    """mkdir / newfile / rename (arg = new name) / copy, move (arg = target folder) / delete / write
+    (text; arg = the mtime it was read at, "" = overwrite). Answers {"path": the new or changed path}."""
+    import shutil
+    if op == "mkdir" or op == "newfile":
+        root, full = fs_target(root, rel)
+        if os.path.lexists(full):
+            raise FsError("“" + os.path.basename(full) + "” already exists")
+        fs_name_ok(os.path.basename(full))
+        if not os.path.isdir(os.path.dirname(full)):
+            raise FsError("the folder does not exist")
+        if op == "mkdir":
+            os.mkdir(full)
+        else:
+            open(full, "x").close()
+        return {"path": fs_rel(root, full)}
+    if op == "rename":
+        root, full = fs_target(root, rel)
+        if not os.path.lexists(full):
+            raise FsError("it is not there any more")
+        new = os.path.join(os.path.dirname(full), fs_name_ok(arg))
+        if new == full:
+            return {"path": fs_rel(root, full)}
+        if os.path.lexists(new):
+            raise FsError("“" + arg + "” already exists")
+        os.rename(full, new)
+        return {"path": fs_rel(root, new)}
+    if op in ("copy", "move"):
+        root, src = fs_target(root, rel)
+        if not os.path.lexists(src):
+            raise FsError("it is not there any more")
+        root, dst_dir = fs_resolve(root, arg)
+        if not os.path.isdir(dst_dir):
+            raise FsError("not a folder")
+        if os.path.isdir(src) and not os.path.islink(src) and (dst_dir + os.sep).startswith(src.rstrip(os.sep) + os.sep):
+            raise FsError("a folder cannot go inside itself")
+        if op == "move" and os.path.dirname(src) == dst_dir:
+            return {"path": fs_rel(root, src)}
+        dst = os.path.join(dst_dir, fs_free(dst_dir, os.path.basename(src)))
+        if op == "move":
+            shutil.move(src, dst)
+        elif os.path.isdir(src) and not os.path.islink(src):
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+        return {"path": fs_rel(root, dst)}
+    if op == "delete":
+        root, full = fs_target(root, rel)
+        if not os.path.lexists(full):
+            return {"path": fs_rel(root, full)}
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full)
+        else:
+            os.unlink(full)
+        return {"path": fs_rel(root, full)}
+    if op == "write":
+        root, full = fs_target(root, rel)
+        if os.path.isdir(full):
+            raise FsError("not a file")
+        if arg and os.path.exists(full) and str(int(os.path.getmtime(full))) != str(arg):
+            raise FsError("changed: the file was changed on the server since you opened it")
+        data = (text or "").encode("utf-8")
+        if len(data) > FS_MAX_TEXT * 5:
+            raise FsError("too big to save from here")
+        tmp = full + ".sw-save"
+        mode = os.stat(full).st_mode & 0o7777 if os.path.exists(full) else None
+        with open(tmp, "wb") as f:
+            f.write(data)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, full)
+        return {"path": fs_rel(root, full), "mtime": int(os.path.getmtime(full)), "size": len(data)}
+    raise FsError("bad request")
+
+
+FS_CHANGES = ("mkdir", "newfile", "rename", "copy", "move", "delete", "write")
+
+
 def fs_main(argv):
     try:
         op, root, rel = argv[0], argv[1], argv[2] if len(argv) > 2 else ""
+        if op in FS_CHANGES:
+            text = sys.stdin.buffer.read().decode("utf-8") if op == "write" else None
+            print(json.dumps(fs_change(root, op, rel, argv[3] if len(argv) > 3 else "", text)))
+            return
+        if op == "upload":
+            # argv: upload root folder name  — raw bytes on stdin
+            folder = argv[3] if len(argv) > 3 else ""
+            name = argv[4] if len(argv) > 4 else "upload"
+            fs_name_ok(name)
+            root_real = os.path.realpath(os.path.expanduser(root or "~"))
+            if not os.path.isdir(root_real):
+                raise FsError("the project folder does not exist")
+            folder = (folder or "").strip("/")
+            if folder and (".." in folder.split("/") or folder.startswith("-") or "\0" in folder):
+                raise FsError("bad path")
+            dest_dir = os.path.join(root_real, folder) if folder else root_real
+            dest_dir = os.path.realpath(dest_dir)
+            if dest_dir != root_real and not dest_dir.startswith(root_real.rstrip(os.sep) + os.sep):
+                raise FsError("this path is outside the project")
+            if not os.path.isdir(dest_dir):
+                raise FsError("folder not found")
+            data = sys.stdin.buffer.read()
+            final_name = fs_free(dest_dir, name)
+            dest = os.path.join(dest_dir, final_name)
+            tmp = dest + ".sw-up"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, dest)
+            print(json.dumps({"path": fs_rel(root_real, dest), "size": len(data)}))
+            return
         if op not in ("list", "read", "all"):
             raise FsError("bad request")
         if op == "all":
@@ -3495,6 +3641,109 @@ if __name__ == "__main__":
 '''
 
 _FS = {}
+
+# The server's own files (the Files tab without a project): the SSH user's home folder.
+SERVER_FILES = {"name": "", "remote": "~", "local": "", "localExists": False, "endpoint": {}}
+
+
+def fs_project(app, name: str) -> dict:
+    return dict(SERVER_FILES) if name in ("", "~") else app._project(name)
+
+
+def fs_change_call(app, project: dict, op: str, body: dict) -> dict:
+    """Create, rename, copy, move, delete or save, in a project's folder or the server's home."""
+    path, arg = body.get("path"), body.get("to", body.get("name", body.get("mtime", "")))
+    ns = fs_local()
+    if op not in ns["FS_CHANGES"]:
+        raise ApiError(404, "not found")
+    if not isinstance(path, str) or not git_path_ok(path.strip("/")):
+        raise ApiError(400, "bad path")
+    arg = "" if arg is None else str(arg)
+    if op in ("copy", "move") and not fs_path_ok(arg):
+        raise ApiError(400, "bad target folder")
+    if op == "write" and body.get("force"):
+        arg = ""
+    text = body.get("text") if op == "write" else None
+    if op == "write" and not isinstance(text, str):
+        raise ApiError(400, "no text")
+    where = "server" if app.web else body.get("where")
+    if where not in WHERE:
+        where = "local" if project.get("localExists") else "server"
+    if where == "local" and not project.get("localExists"):
+        where = "server"
+    if where == "server" and not (project.get("remote") and app.conf.configured):
+        raise ApiError(400, "this project has no folder to change")
+    if where == "local":
+        try:
+            res = ns["fs_change"](project["local"], op, path, arg, text)
+        except ns["FsError"] as e:
+            raise ApiError(409 if str(e).startswith("changed:") else 400, str(e).replace("changed: ", ""))
+        except OSError as e:
+            raise ApiError(400, e.strerror or str(e))
+    else:
+        conf = app._project_conf(project) if project.get("name") else app.conf
+        res = remote_python(conf, FS_PY, [op, project["remote"], path, arg],
+                            multiplex=bool(app.store.settings.get("sshMultiplex")),
+                            timeout=120, stdin=text.encode("utf-8") if op == "write" else None)
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer from the server")
+        if res.get("error"):
+            e = str(res["error"])
+            raise ApiError(409 if e.startswith("changed:") else 400, e.replace("changed: ", ""))
+    res["where"] = where
+    name = project.get("name") or "server"
+    app.activity.add("files", project.get("name") or "", f"{op} {path}" + (f" → {arg}" if op in ("rename", "copy", "move") else ""))
+    log_line(f"files: {name}: {op} {path}")
+    return res
+
+
+def fs_upload_call(app, project: dict, query: dict, data: bytes) -> dict:
+    """Upload raw bytes to a project folder (or server home). Finds a free name if the file exists."""
+    folder = (query.get("path") or [""])[0].strip("/")
+    name = (query.get("name") or [""])[0]
+    ns = fs_local()
+    try:
+        ns["fs_name_ok"](name)
+    except ns["FsError"] as e:
+        raise ApiError(400, str(e))
+    if folder and not git_path_ok(folder):
+        raise ApiError(400, "bad path")
+    if not data:
+        raise ApiError(400, "no data")
+    if len(data) > 50_000_000:
+        raise ApiError(413, "file too large (max 50 MB)")
+    where = "server" if app.web else ("local" if project.get("localExists") else "server")
+    if where == "server" and not (project.get("remote") and app.conf.configured):
+        raise ApiError(400, "this project has no folder")
+    if where == "local":
+        import os as _os
+        root = _os.path.realpath(_os.path.expanduser(project["local"]))
+        dest_dir = _os.path.join(root, folder) if folder else root
+        dest_dir = _os.path.realpath(dest_dir)
+        if dest_dir != root and not dest_dir.startswith(root.rstrip(_os.sep) + _os.sep):
+            raise ApiError(400, "path outside project")
+        if not _os.path.isdir(dest_dir):
+            raise ApiError(400, "folder not found")
+        final_name = ns["fs_free"](dest_dir, name)
+        dest = _os.path.join(dest_dir, final_name)
+        tmp = dest + ".sw-up"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        _os.replace(tmp, dest)
+        rel = _os.path.relpath(dest, root).replace(_os.sep, "/")
+        app.activity.add("files", project.get("name") or "", f"upload {rel}")
+        return {"path": rel, "size": len(data)}
+    else:
+        conf = app._project_conf(project) if project.get("name") else app.conf
+        res = remote_python(conf, FS_PY, ["upload", project["remote"], folder, name],
+                            multiplex=bool(app.store.settings.get("sshMultiplex")),
+                            timeout=120, stdin=data)
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer from the server")
+        if res.get("error"):
+            raise ApiError(400, str(res["error"]))
+        app.activity.add("files", project.get("name") or "", f"upload {res.get('path', name)}")
+        return res
 
 
 # ----------------------------------------------------------------------------- prune (not-synced copies)
@@ -3713,7 +3962,7 @@ def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
         except OSError as e:
             raise ApiError(400, e.strerror or str(e))
     else:
-        conf = app._project_conf(project)
+        conf = app._project_conf(project) if project.get("name") else app.conf
         res = remote_python(conf, FS_PY, [op, project["remote"], path],
                             multiplex=bool(app.store.settings.get("sshMultiplex")), timeout=40)
         if not isinstance(res, dict):
@@ -4611,11 +4860,16 @@ class App:
             self._remember()
             return c.info()
         if body.get("kind") == "files":
-            p = self._project(body.get("project") or "")
-            if not (p.get("remote") or (p.get("localExists") and not self.web)):
-                raise ApiError(400, "this project has no folder to show")
             title = body.get("title") if isinstance(body.get("title"), str) and body.get("title").strip() else ""
-            s = FilesSession(sid, p["name"], title[:80])
+            if not body.get("project"):                 # the server's own files (home folder)
+                if not self.conf.configured:
+                    raise ApiError(400, "the server is not configured")
+                s = FilesSession(sid, "", title[:80] or "Files · server")
+            else:
+                p = self._project(body.get("project") or "")
+                if not (p.get("remote") or (p.get("localExists") and not self.web)):
+                    raise ApiError(400, "this project has no folder to show")
+                s = FilesSession(sid, p["name"], title[:80])
             with self.lock:
                 self.sessions[sid] = s
             self._remember()
@@ -6387,8 +6641,17 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "pick-folder"):
             return app.pick_folder(str(self._body().get("start") or ""))
         if route == ("GET", "fs") and len(parts) == 3:
-            p = app._project(parts[1])
+            p = fs_project(app, parts[1])
             return fs_call(app, p, parts[2], (query.get("path") or [""])[0], (query.get("where") or [None])[0])
+        if route == ("POST", "fs") and len(parts) == 3 and parts[2] == "upload":
+            p = fs_project(app, parts[1])
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 50_000_000:
+                raise ApiError(413, "file too large (max 50 MB)")
+            data = self.rfile.read(n) if n else b""
+            return fs_upload_call(app, p, query, data)
+        if route == ("POST", "fs") and len(parts) == 3:
+            return fs_change_call(app, fs_project(app, parts[1]), parts[2], self._body())
         if route == ("GET", "files") and len(parts) == 2:
             return {"files": app.project_files(parts[1])}
         if parts and parts[0] == "git" and len(parts) >= 3:

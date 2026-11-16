@@ -68,7 +68,6 @@ textarea.inp { height: auto; padding: 7px 9px; resize: vertical; }
 #proj-filter { margin: 4px 10px 8px; height: 26px; padding: 0 8px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); outline: none; font-size: 12px; }
 #proj-filter:focus { border-color: var(--line2); }
 #projects { flex: 1; overflow-y: auto; padding: 0 6px 10px; }
-.side-foot { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-top: 1px solid var(--line); }
 #resizer { width: 3px; margin-left: -2px; cursor: col-resize; flex: none; z-index: 5; position: relative; touch-action: none; }
 #resizer:hover, #resizer.drag { background: var(--accent); }
 
@@ -424,7 +423,6 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .thumb img, .uthumbs img { cursor: zoom-in; }
 .uthumbs { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-top: 4px; }
 .uthumbs img { width: 90px; height: 70px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line2); }
-.side-foot > span { display: flex; gap: 2px; }
 
 /* history */
 .hist { flex: 1; overflow-y: auto; min-height: 50vh; max-height: 66vh; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
@@ -567,13 +565,50 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .tavail .pchip { height: 24px; }
 .tavail .pchip b { font-weight: 600; color: var(--text); margin-right: 2px; }
 
-/* sidebar footer: labelled buttons */
-.side-foot { gap: 2px; padding: 6px 6px; }
-.fbtn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 0; border: 0; border-radius: 6px;
-  background: transparent; color: var(--muted); font-size: 10.5px; }
-.fbtn i { font-style: normal; font-size: 14px; line-height: 16px; }
-.fbtn:hover { background: var(--bg3); color: var(--text); }
+/* the rail (left edge, beside the projects): the workspace in use on top — click to switch — then the tools, Menu at the bottom */
+.rail { width: 54px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 0;
+  background: var(--bg); border-right: 1px solid var(--line); min-height: 0; }
+.rail-fill { flex: 1; }
+.rbtn { width: 46px; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 0 5px; border: 0; border-radius: 7px;
+  background: none; color: var(--muted); font: 10px/1.2 var(--ui); cursor: pointer; }
+.rbtn:hover { background: var(--bg3); color: var(--text); }
+.rbtn i { font-style: normal; font-size: 15px; line-height: 18px; }
+.rbtn#btn-claude i { color: #d97757; }
+.rail-ws { position: relative; width: 38px; height: 38px; margin: 0 0 10px; border: 0; border-radius: 10px; background: var(--accent); color: #0d1117;
+  font: 600 16px/38px var(--ui); cursor: pointer; padding: 0; }
+.rail-ws::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -6px; border-bottom: 1px solid var(--line2); }
+.rail-ws:hover { filter: brightness(1.12); }
+.rail-ws.off { background: var(--bg3); color: var(--muted); }
+.rail-ws .ws-live { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); border: 2px solid var(--bg); }
+.rail-ws .ws-live.on { background: var(--ok); }
+body.work-mode .rail { display: none; }
+/* phones: the rail is the drawer's bottom row while the drawer is open */
+body.compact .rail { display: none; }
+body.compact.side-open .rail { display: flex; position: fixed; z-index: 46; left: 0; bottom: 0; width: min(330px, 88vw); height: auto; flex-direction: row;
+  justify-content: space-around; padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); border-right: 0; border-top: 1px solid var(--line); background: var(--bg2); }
+body.compact.side-open .rail-fill { display: none; }
+body.compact.side-open .rail-ws { margin: 0; width: 34px; height: 34px; line-height: 34px; align-self: center; }
+body.compact.side-open .rail-ws::after { display: none; }
+body.compact.side-open #sidebar { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
 .act .gb.dk { margin-left: 4px; }
+
+/* sidebar Files panel */
+.side-files { display: flex; flex-direction: column; border-top: 1px solid var(--line); min-height: 80px; max-height: 40vh; overflow: hidden; flex: none; }
+.side-files.hidden { display: none; }
+.side-sec-head { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px; cursor: default; user-select: none; flex: none; }
+.side-sec-title { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); flex: none; }
+.side-sec-proj { font-size: 11px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; padding-left: 4px; }
+.side-sec-close { opacity: .5; }
+.side-sec-close:hover { opacity: 1; }
+.side-files-tree { flex: 1; overflow-y: auto; padding: 2px 0 6px; }
+.side-files-tree.drop-over { background: var(--bg3); outline: 1px solid var(--accent); outline-offset: -1px; }
+.sf-row { display: flex; align-items: center; gap: 3px; padding: 2px 8px 2px 0; cursor: pointer; white-space: nowrap; overflow: hidden; font-size: 12px; color: var(--text); min-height: 20px; }
+.sf-row:hover { background: var(--bg3); }
+.sf-row.drop-over { background: rgba(99,153,215,.18); outline: 1px solid var(--accent); }
+.sf-icon { flex: none; width: 14px; font-style: normal; font-size: 9px; color: var(--muted); text-align: center; }
+.sf-name { flex: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sf-gc { flex: none; font-size: 10px; }
+.sf-note { font-size: 11px; color: var(--muted); padding: 4px 10px; }
 
 /* web version: sign-in page */
 body.web #st-sync { display: none; }
@@ -593,7 +628,7 @@ body.web #st-sync { display: none; }
   .cmd { padding: 6px 4px; }
   .icon-btn { min-width: 32px; min-height: 32px; }
   .btn.sm { height: 30px; }
-  .fbtn { padding: 8px 0; }
+  .rbtn { padding: 8px 0; }
   .q-step { min-height: 32px; padding: 6px 12px; }
   /* a finger needs more than 3 px: an invisible wider grip round the sidebar edge and split bars */
   #resizer::before, .gutter.h::before { content: ''; position: absolute; top: 0; bottom: 0; left: -10px; right: -10px; }
@@ -760,6 +795,7 @@ body.compact .files-back { display: inline-grid; }
 body.compact .ft-row { height: 34px; font-size: 13.5px; }
 body.compact .files-filter { height: 32px; }
 @media (pointer: coarse) { .ft-row { height: 34px; } .files-vhead .btn.sm { height: 32px; } .files-bar .icon-btn { width: 32px; height: 32px; } }
+.files-edit { flex: 1; width: 100%; border: 0; outline: none; background: var(--bg); color: var(--text); font: 13px/1.5 var(--mono); padding: 12px 16px; resize: none; tab-size: 4; }
 
 /* chat: the message box hides while you work elsewhere (the live status line stays) */
 .pane.chat.away .chat-composer .cbox, .pane.chat.away .chat-composer .attach, .pane.chat.away .chat-composer .slash { display: none; }

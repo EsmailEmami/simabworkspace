@@ -859,3 +859,15 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 .ign-side .sec { margin-top: 10px; }
 .ign-list { max-height: 150px; overflow: auto; font-size: 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
 .ign-list > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* stars: starred commands / menu entries come first */
+.star { flex: none; width: 18px; text-align: center; color: var(--faint); cursor: pointer; font-size: 13px; line-height: 1; opacity: 0; }
+.star.none { cursor: default; }
+.star:not(.none)::before { content: '☆'; }
+.star.on::before { content: '★'; }
+.menu button:hover .star, .palette .res:hover .star, .palette .res.sel .star, .star.on, body.touch .star { opacity: 1; }
+.star.on { color: var(--warn); }
+.star:not(.none):hover { color: var(--warn); }
+body.touch .star { opacity: .55; width: 28px; font-size: 16px; }
+body.touch .star.on { opacity: 1; }
+.menu .star { margin-right: -4px; }
+.palette .res.last-star { border-bottom: 1px solid var(--line2); border-radius: 6px 6px 0 0; margin-bottom: 3px; }

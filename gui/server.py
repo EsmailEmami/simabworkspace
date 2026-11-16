@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.32.0"
+VERSION = "1.33.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -338,6 +338,7 @@ DEFAULT_SETTINGS = {
     "gitAutoFetch": True,        # …and `git fetch` every few minutes so "behind" is current
     "dockerWatch": True,         # check the projects' docker containers; tell me when one crashes
     "port": 0,                   # remembered so the window keeps the same address
+    "starred": [],               # starred commands (Ctrl+Shift+P) and project ⋯ menu entries, shown first
 }
 
 SETTING_CHOICES = {
@@ -461,7 +462,11 @@ class Store:
                 if k not in DEFAULT_SETTINGS:
                     continue
                 d = DEFAULT_SETTINGS[k]
-                if isinstance(d, bool):
+                if isinstance(d, list):
+                    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                        raise ApiError(400, f"invalid value for {k}")
+                    v = list(dict.fromkeys(x.strip()[:200] for x in v if x.strip()))[:300]
+                elif isinstance(d, bool):
                     if not isinstance(v, bool):
                         raise ApiError(400, f"invalid value for {k}")
                 elif isinstance(d, int):

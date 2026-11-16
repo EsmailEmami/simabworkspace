@@ -61,6 +61,16 @@ class StoreTests(TmpHome):
         self.assertEqual(sw.Store(self.store.path).settings["composer"], "always")
         self.assertEqual(oct(self.store.path.stat().st_mode & 0o777), "0o600")
 
+    def test_starred_setting(self):
+        self.assertEqual(self.store.settings["starred"], [])
+        s = self.store.update_settings({"starred": [" menu:Git… ", "cmd:shop: files", "menu:Git…", "", "x" * 300]})
+        self.assertEqual(s["starred"], ["menu:Git…", "cmd:shop: files", "x" * 200])
+        for bad in ("menu:Git…", [1], {"a": 1}):
+            with self.assertRaises(sw.ApiError):
+                self.store.update_settings({"starred": bad})
+        self.assertEqual(sw.Store(self.store.path).settings["starred"][:2], ["menu:Git…", "cmd:shop: files"])
+        self.assertEqual(sw.DEFAULT_SETTINGS["starred"], [])                      # the default is never changed in place
+
     def test_commands_roundtrip_and_validation(self):
         out = self.store.set_commands("cheshmeh", [
             {"name": "وب", "cmd": "npm run start-local-server", "where": "local", "url": "http://localhost:4200"},
@@ -1994,7 +2004,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.32.0"', text)
+        self.assertIn('VERSION="1.33.0"', text)
 
 
 if __name__ == "__main__":

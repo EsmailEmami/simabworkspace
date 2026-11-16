@@ -290,17 +290,40 @@
   // ------------------------------------------------------------------ menus
   var menuEl = null;
   function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
-  function showMenu(x, y, items) {
+  // ---- stars: starred commands / menu entries come first (kept in the settings, all devices)
+  function starredList() { return (S.settings && S.settings.starred) || []; }
+  function isStarred(key) { return starredList().indexOf(key) >= 0; }
+  function toggleStar(key) {
+    var list = starredList().slice(), i = list.indexOf(key);
+    if (i >= 0) list.splice(i, 1); else list.push(key);
+    S.settings.starred = list;
+    api('POST', 'settings', { starred: list }).then(function (d) { if (d && d.settings) S.settings.starred = d.settings.starred; }).catch(fail);
+  }
+  function starBtn(key, after) {
+    var on = isStarred(key);
+    return h('span', { class: 'star' + (on ? ' on' : ''), title: on ? 'Unstar' : 'Star — show first',
+      onmousedown: function (e) { e.stopPropagation(); },
+      'aria-label': on ? 'Unstar' : 'Star',
+      onclick: function (e) { e.stopPropagation(); e.preventDefault(); toggleStar(key); after(); } });   // ☆/★ drawn by CSS
+  }
+  function starKey(prefix, it) { return prefix + ':' + (it.id || it.label); }
+  function starrable(it) { return it && it !== '-' && !it.header && it.label && it.action; }
+
+  function showMenu(x, y, items, opts) {
     closeMenu();
     var el = h('div', { class: 'menu' });
     var last = null;
+    var star = opts && opts.star, orig = items;
+    var top = star ? items.filter(function (it) { return starrable(it) && isStarred(starKey(star, it)); }) : [];
+    if (top.length) items = [{ header: 'Starred' }].concat(top, ['-'], items.filter(function (it) { return top.indexOf(it) < 0; }));
     items.forEach(function (it) {
       if (!it) return;
       if (it === '-') { if (last && last !== '-') el.append(h('hr')); last = '-'; return; }
       last = it;
       if (it.header) { el.append(h('div', { class: 'mh' }, it.header)); return; }
       el.append(h('button', { disabled: !!it.disabled, onclick: function () { closeMenu(); it.action(); } },
-        it.label, it.k ? h('span', { class: 'k' }, it.k) : null));
+        it.label, it.k || (star && starrable(it)) ? h('span', { class: 'k' }, it.k || '') : null,
+        star && starrable(it) ? starBtn(starKey(star, it), function () { showMenu(x, y, orig, opts); }) : null));
     });
     if (el.lastChild && el.lastChild.tagName === 'HR') el.lastChild.remove();
     $('#menu-root').append(el);
@@ -309,7 +332,7 @@
     el.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + 'px';
     menuEl = el;
   }
-  function menuAt(btn, items) { var r = btn.getBoundingClientRect(); showMenu(r.left, r.bottom + 4, items); }
+  function menuAt(btn, items, opts) { var r = btn.getBoundingClientRect(); showMenu(r.left, r.bottom + 4, items, opts); }
   document.addEventListener('mousedown', function (e) { if (menuEl && !menuEl.contains(e.target)) closeMenu(); }, true);
   window.addEventListener('blur', closeMenu);
 
@@ -1764,9 +1787,9 @@
       { label: 'Run commands…', action: function () { editCommands(p); } },
       sync ? { header: 'Sync · ' + (p.sync ? p.sync.label : '') } : null,
       sync ? { label: 'Sync now', action: function () { syncAction(p, 'flush'); } } : null,
-      sync ? (p.sync && p.sync.paused ? { label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
-      sync ? { label: 'Sync details' + (p.sync && p.sync.conflicts ? ' · ' + plural(p.sync.conflicts, 'conflict') : '') + '…', action: function () { syncDetails(p); } } : null,
-      sync ? { label: p.sync && p.sync.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', action: function () {
+      sync ? (p.sync && p.sync.paused ? { id: 'Pause / resume sync', label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { id: 'Pause / resume sync', label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
+      sync ? { id: 'Sync details…', label: 'Sync details' + (p.sync && p.sync.conflicts ? ' · ' + plural(p.sync.conflicts, 'conflict') : '') + '…', action: function () { syncDetails(p); } } : null,
+      sync ? { id: '.git sync', label: p.sync && p.sync.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', action: function () {
         var on = !(p.sync && p.sync.git !== false);
         confirmDlg(on ? 'Sync the .git folders of “' + p.name + '” too? Git then works the same on both sides. (Do not run git on both sides at the same moment.)'
           : 'Stop syncing the .git folders of “' + p.name + '”? Each side then keeps its own git history.', on ? 'Sync .git' : 'Stop', !on).then(function (ok) {
@@ -1786,7 +1809,7 @@
           if (ok) api('DELETE', 'manual/' + encodeURIComponent(p.name)).then(refreshProjects).catch(fail);
         });
       } } : null
-    ]));
+    ]), { star: 'menu' });
   }
 
 
@@ -3399,7 +3422,7 @@
         items.push({ label: n + ': port forwarding', grp: n, action: function () { tunnelsDialog(p); } });
       }
       projectTunnels(n).forEach(function (t) {
-        items.push({ label: n + ': ' + (t.on ? 'disconnect ' : 'connect ') + t.name + ' (localhost:' + t.localPort + ')', grp: n, action: function () { toggleTunnel(t); } });
+        items.push({ id: n + ': tunnel ' + t.name, label: n + ': ' + (t.on ? 'disconnect ' : 'connect ') + t.name + ' (localhost:' + t.localPort + ')', grp: n, action: function () { toggleTunnel(t); } });
       });
       if (p.localExists) {
         items.push({ label: n + ': local terminal', grp: n, action: function () { openSession({ kind: 'shell', where: 'local', project: n }); } });
@@ -3407,12 +3430,12 @@
       }
       p.commands.forEach(function (c) {
         var running = !!runningCmd(n, c.id);
-        items.push({ label: n + ': ' + (running ? 'stop ' : 'run ') + c.name, grp: n, action: function () { runCommand(p, c); } });
+        items.push({ id: n + ': command ' + c.id, label: n + ': ' + (running ? 'stop ' : 'run ') + c.name, grp: n, action: function () { runCommand(p, c); } });
       });
       if (hasRemote(p) || p.localExists) items.push({ label: n + ': files', grp: n, action: function () { openFiles(p); } });
       items.push({ label: n + ': git — changes, commit, pull, push', grp: n, action: function () { gitDialog(p); } });
       var gs = S.git[n];
-      if (gs && gs.repos === 1) items.push({ label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
+      if (gs && gs.repos === 1) items.push({ id: n + ': switch branch', label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
     });
     items.push({ label: 'Claude (no project, home folder)', grp: 'app', action: function () { openSession({ kind: 'chat' }); } });
@@ -3446,14 +3469,19 @@
     var overlay = h('div', { class: 'overlay' }, h('div', { class: 'modal palette' }, inp, res));
     function render() {
       var q = inp.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-      shown = all.filter(function (it) {
+      var hits = all.filter(function (it) {
         var hay = (it.label + ' ' + it.grp).toLowerCase();
         return q.every(function (w) { return hay.indexOf(w) >= 0; });
-      }).slice(0, 80);
+      });
+      // starred first (in their usual order), then the rest
+      var top = hits.filter(function (it) { return it.grp !== 'tab' && isStarred(starKey('cmd', it)); });
+      shown = top.concat(hits.filter(function (it) { return top.indexOf(it) < 0; })).slice(0, 80);
       sel = Math.min(sel, Math.max(0, shown.length - 1));
       res.replaceChildren.apply(res, shown.map(function (it, i) {
-        return h('div', { class: 'res' + (i === sel ? ' sel' : ''), onmousemove: function () { if (sel !== i) { sel = i; mark(); } }, onclick: function () { run(i); } },
-          it.label, h('span', { class: 'grp' }, it.grp));
+        return h('div', { class: 'res' + (i === sel ? ' sel' : '') + (i === top.length - 1 && i < shown.length - 1 ? ' last-star' : ''),
+          onmousemove: function () { if (sel !== i) { sel = i; mark(); } }, onclick: function () { run(i); } },
+          it.label, h('span', { class: 'grp' }, it.grp),
+          it.grp !== 'tab' ? starBtn(starKey('cmd', it), function () { render(); setTimeout(function () { inp.focus(); }, 0); }) : h('span', { class: 'star none' }));
       }));
       if (!shown.length) res.append(h('div', { class: 'muted', style: 'padding:10px' }, 'Nothing found'));
     }

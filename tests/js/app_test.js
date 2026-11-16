@@ -590,6 +590,55 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  async 'stars: a starred project-menu entry comes first, in every project'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const menuButtons = () => q('button', document.body.querySelector('#menu-root'));
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    const docker = menuButtons().find((b) => b.textContent.indexOf('Docker containers…') === 0);
+    q('.star', docker)[0].click();
+    let post = calls.filter((c) => c.url === '/api/settings').pop();
+    assert.deepStrictEqual(post.body, { starred: ['menu:Docker containers…'] });
+    // the menu is shown again with it on top, under "Starred", and not twice
+    const menu = document.body.querySelector('#menu-root');
+    assert.strictEqual(q('.mh', menu)[0].textContent, 'Starred');
+    assert.strictEqual(menuButtons()[0].textContent.indexOf('Docker containers…'), 0);
+    assert.strictEqual(menuButtons().filter((b) => b.textContent.indexOf('Docker containers…') === 0).length, 1);
+    assert.ok(q('.star', menuButtons()[0])[0].classList.contains('on'));
+    // the label changes (pause ↔ resume) but the star stays: stable id
+    q('.star', menuButtons().find((b) => /^(Pause|Resume) sync/.test(b.textContent)))[0].click();
+    post = calls.filter((c) => c.url === '/api/settings').pop();
+    assert.deepStrictEqual(post.body, { starred: ['menu:Docker containers…', 'menu:Pause / resume sync'] });
+    // unstar
+    q('.star', menuButtons()[0])[0].click();
+    post = calls.filter((c) => c.url === '/api/settings').pop();
+    assert.deepStrictEqual(post.body, { starred: ['menu:Pause / resume sync'] });
+    document.body.querySelector('#menu-root').replaceChildren();
+  },
+
+  async 'stars: starred commands come first in Ctrl+Shift+P, also when filtering'() {
+    for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });   // earlier tests' dialogs
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.getElementById('btn-palette').click();
+    let pal = q('.modal').pop();
+    const files = q('.res', pal).find((r) => r.textContent.indexOf('cheshmeh: files') === 0);
+    const n = calls.length;
+    q('.star', files)[0].click();
+    assert.ok(!calls.slice(n).some((c) => c.url === '/api/sessions'));          // starring does not run it
+    assert.ok(q('.modal').pop() === pal);                                         // palette stays open
+    assert.strictEqual(q('.res', pal)[0].textContent.indexOf('cheshmeh: files'), 0);
+    assert.ok(q('.res', pal)[0].classList.contains('last-star'));
+    const tabRow = q('.res', pal).find((r) => /tab$/.test(r.textContent));
+    if (tabRow) assert.ok(q('.star', tabRow)[0].classList.contains('none'));    // open tabs: no star
+    const inp = q('input', pal)[0];
+    inp.value = 'cheshmeh'; inp.dispatch('input');
+    assert.strictEqual(q('.res', pal)[0].textContent.indexOf('cheshmeh: files'), 0);
+    const lastStars = () => calls.filter((c) => c.url === '/api/settings').pop().body.starred;
+    assert.ok(lastStars().indexOf('cmd:cheshmeh: files') >= 0);
+    q('.star', q('.res', pal)[0])[0].click();                                      // unstar
+    assert.ok(lastStars().indexOf('cmd:cheshmeh: files') < 0);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
   async 'not synced: edit the list, add the defaults, save'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();

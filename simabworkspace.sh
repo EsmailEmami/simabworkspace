@@ -41,6 +41,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.33.0 2026-11-16  Stars: ☆ next to a command in Ctrl+Shift+P or an entry of a project's ⋯
+#                       menu puts it first (menu stars count for every project); kept in the
+#                       settings, so every device sees them.
 #    1.32.0 2026-11-16  Not synced, per project: Sync details → Edit… sets the folders and files
 #                       that are never copied between this machine and the server
 #                       (node_modules, dist…); `simabworkspace ignore NAME LIST` does the same.
@@ -257,7 +260,7 @@
 
 set -u -o pipefail
 
-VERSION="1.32.0"
+VERSION="1.33.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

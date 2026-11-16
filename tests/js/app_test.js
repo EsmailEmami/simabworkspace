@@ -615,6 +615,73 @@ const tests = {
     document.body.querySelector('#menu-root').replaceChildren();
   },
 
+  async 'stars: drag starred menu entries to reorder (mouse: the row, finger: the grip)'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const root = document.body.querySelector('#menu-root');
+    const buttons = () => q('button', root);
+    const lastStars = () => calls.filter((c) => c.url === '/api/settings').pop().body.starred;
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    for (const label of ['Git…', 'Files']) q('.star', buttons().find((b) => b.textContent.indexOf(label) === 0))[0].click();
+    // menu:Pause / resume sync (earlier test), Git…, Files — in the order they were starred
+    let top = q('.starred', root);
+    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    assert.strictEqual(q('.grip', top[0]).length, 1);
+    top.forEach((b, i) => { b.getBoundingClientRect = () => ({ top: i * 30, bottom: i * 30 + 30, height: 30, left: 0, right: 200, width: 200 }); });
+    const ev = (type, y, id, kind) => dispatchEvent({ type, clientY: y, pointerId: id, pointerType: kind, preventDefault() {} });
+    // a finger on the row itself does not drag (the menu scrolls)
+    top[2].dispatch('pointerdown', { button: 0, pointerId: 3, pointerType: 'touch', clientY: 75, target: top[2] });
+    ev('pointermove', 5, 3, 'touch'); ev('pointerup', 5, 3, 'touch');
+    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    // the mouse drags "Files" above "Pause / resume sync"
+    top[2].dispatch('pointerdown', { button: 0, pointerId: 1, pointerType: 'mouse', clientY: 75, target: top[2] });
+    ev('pointermove', 73, 1, 'mouse');                               // under 5 px: not a drag yet
+    assert.ok(!top[2].classList.contains('dragging'));
+    ev('pointermove', 5, 1, 'mouse');
+    assert.ok(top[2].classList.contains('dragging'));
+    ev('pointerup', 5, 1, 'mouse');
+    assert.deepStrictEqual(lastStars(), ['menu:Files', 'menu:Pause / resume sync', 'menu:Git…']);
+    top = q('.starred', root);
+    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Files', 'menu:Pause / resume sync', 'menu:Git…']);
+    // the click that ends a drag does not run the entry
+    const n = calls.length;
+    top[0].click();
+    assert.ok(!calls.slice(n).some((c) => c.url.indexOf('/api/fs/') === 0));
+    assert.ok(root.children.length > 0, 'menu still open');
+    // a finger drags by the grip
+    top.forEach((b, i) => { b.getBoundingClientRect = () => ({ top: i * 30, bottom: i * 30 + 30, height: 30, left: 0, right: 200, width: 200 }); });
+    const grip = q('.grip', top[0])[0];
+    top[0].dispatch('pointerdown', { button: 0, pointerId: 4, pointerType: 'touch', clientY: 10, target: grip });
+    ev('pointermove', 80, 4, 'touch'); ev('pointerup', 80, 4, 'touch');
+    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    root.replaceChildren();
+    await new Promise((r) => setTimeout(r, 450));
+  },
+
+  async 'stars: a dragged order in Ctrl+Shift+P is kept, other stars keep their places'() {
+    for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.getElementById('btn-palette').click();
+    const pal = q('.modal').pop();
+    const lastStars = () => calls.filter((c) => c.url === '/api/settings').pop().body.starred;
+    const row = (label) => q('.res', pal).find((r) => r.textContent.indexOf(label) === 0);
+    q('.star', row('cheshmeh: files'))[0].click();
+    q('.star', row('cheshmeh: server terminal'))[0].click();
+    let top = q('.starred', pal);
+    assert.deepStrictEqual(top.map((r) => r.getAttribute('data-star')), ['cmd:cheshmeh: files', 'cmd:cheshmeh: server terminal']);
+    top.forEach((b, i) => { b.getBoundingClientRect = () => ({ top: i * 30, bottom: i * 30 + 30, height: 30, left: 0, right: 200, width: 200 }); });
+    top[1].dispatch('pointerdown', { button: 0, pointerId: 9, pointerType: 'mouse', clientY: 45, target: top[1] });
+    dispatchEvent({ type: 'pointermove', clientY: 3, pointerId: 9, preventDefault() {} });
+    dispatchEvent({ type: 'pointerup', clientY: 3, pointerId: 9 });
+    // menu stars stay where they were in the list, only the two commands swapped
+    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files', 'cmd:cheshmeh: server terminal', 'cmd:cheshmeh: files']);
+    assert.strictEqual(q('.res', pal)[0].textContent.indexOf('cheshmeh: server terminal'), 0);
+    q('.star', row('cheshmeh: server terminal'))[0].click();                // unstar both again
+    q('.star', row('cheshmeh: files'))[0].click();
+    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 450));                            // clicks right after a drag are ignored
+  },
+
   async 'stars: starred commands come first in Ctrl+Shift+P, also when filtering'() {
     for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });   // earlier tests' dialogs
     document.body.querySelector('#modal-root').replaceChildren();

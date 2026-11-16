@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.33.1 2026-11-16  Stars: drag starred entries up and down (Ctrl+Shift+P and the ⋯ menu) to
+#                       put them in your own order — mouse: the row, finger: the ⠿ grip.
 #    1.33.0 2026-11-16  Stars: ☆ next to a command in Ctrl+Shift+P or an entry of a project's ⋯
 #                       menu puts it first (menu stars count for every project); kept in the
 #                       settings, so every device sees them.
@@ -260,7 +262,7 @@
 
 set -u -o pipefail
 
-VERSION="1.33.0"
+VERSION="1.33.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

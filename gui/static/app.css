@@ -871,3 +871,11 @@ body.touch .star { opacity: .55; width: 28px; font-size: 16px; }
 body.touch .star.on { opacity: 1; }
 .menu .star { margin-right: -4px; }
 .palette .res.last-star { border-bottom: 1px solid var(--line2); border-radius: 6px 6px 0 0; margin-bottom: 3px; }
+/* reorder starred entries by dragging (mouse: the row, touch: the grip) */
+.grip { flex: none; width: 12px; margin: 0 -2px 0 -4px; color: var(--faint); cursor: grab; opacity: .5; touch-action: none; }
+.grip::before { content: '⠿'; }
+.starred:hover .grip, body.touch .grip { opacity: 1; }
+body.touch .grip { width: 26px; font-size: 16px; text-align: center; }
+.starred.dragging { background: #2a3344 !important; opacity: .85; }
+body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: none; }
+.starred { user-select: none; }

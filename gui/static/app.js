@@ -308,22 +308,87 @@
   }
   function starKey(prefix, it) { return prefix + ':' + (it.id || it.label); }
   function starrable(it) { return it && it !== '-' && !it.header && it.label && it.action; }
+  // starred entries in the order of the star list (the user's own order, changed by dragging)
+  function starSort(prefix, arr) {
+    var l = starredList();
+    return arr.slice().sort(function (a, b) { return l.indexOf(starKey(prefix, a)) - l.indexOf(starKey(prefix, b)); });
+  }
+  // new order of the shown starred keys; the other keys keep their places in the list
+  function setStarOrder(keys) {
+    var list = starredList().slice(), slots = [];
+    list.forEach(function (k, i) { if (keys.indexOf(k) >= 0) slots.push(i); });
+    if (slots.length !== keys.length) return;
+    var before = list.join('\n');
+    slots.forEach(function (pos, j) { list[pos] = keys[j]; });
+    if (list.join('\n') === before) return;
+    S.settings.starred = list;
+    api('POST', 'settings', { starred: list }).then(function (d) { if (d && d.settings) S.settings.starred = d.settings.starred; }).catch(fail);
+  }
+  // drag a starred row up / down among the starred rows of box (attribute data-star = key).
+  // Mouse: the whole row; finger / pen: the ⠿ grip only (the list still scrolls).
+  var starDragEnd = 0;
+  function justDragged() { return Date.now() - starDragEnd < 400; }
+  function dragStar(row, box, done) {
+    row.addEventListener('pointerdown', function (e) {
+      if (e.button) return;
+      var grip = !!(e.target && e.target.classList && e.target.classList.contains('grip'));
+      if (e.pointerType && e.pointerType !== 'mouse' && !grip) return;
+      if (grip && e.preventDefault) e.preventDefault();
+      var sy = e.clientY, moved = false;
+      function rows() { return Array.prototype.filter.call(box.children, function (c) { return c.classList.contains('starred'); }); }
+      function move(ev) {
+        if (ev.pointerId !== e.pointerId) return;
+        if (!moved) {
+          if (Math.abs(ev.clientY - sy) < 5) return;
+          moved = true; row.classList.add('dragging'); document.body.classList.add('star-drag');
+        }
+        if (ev.preventDefault) ev.preventDefault();
+        var rs = rows();
+        for (var i = 0; i < rs.length; i++) {
+          if (rs[i] === row) continue;
+          var b = rs[i].getBoundingClientRect();
+          if (ev.clientY >= b.top && ev.clientY < b.bottom) {
+            box.insertBefore(row, ev.clientY < b.top + b.height / 2 ? rs[i] : rs[i].nextSibling);
+            break;
+          }
+        }
+      }
+      function up(ev) {
+        if (ev.pointerId !== e.pointerId) return;
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+        if (!moved) return;
+        row.classList.remove('dragging'); document.body.classList.remove('star-drag');
+        starDragEnd = Date.now();
+        done(rows().map(function (r) { return r.getAttribute('data-star'); }));
+      }
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
 
   function showMenu(x, y, items, opts) {
     closeMenu();
     var el = h('div', { class: 'menu' });
     var last = null;
     var star = opts && opts.star, orig = items;
-    var top = star ? items.filter(function (it) { return starrable(it) && isStarred(starKey(star, it)); }) : [];
+    var top = star ? starSort(star, items.filter(function (it) { return starrable(it) && isStarred(starKey(star, it)); })) : [];
     if (top.length) items = [{ header: 'Starred' }].concat(top, ['-'], items.filter(function (it) { return top.indexOf(it) < 0; }));
     items.forEach(function (it) {
       if (!it) return;
       if (it === '-') { if (last && last !== '-') el.append(h('hr')); last = '-'; return; }
       last = it;
       if (it.header) { el.append(h('div', { class: 'mh' }, it.header)); return; }
-      el.append(h('button', { disabled: !!it.disabled, onclick: function () { closeMenu(); it.action(); } },
+      var onTop = top.indexOf(it) >= 0;                // in the Starred block (moved there, not repeated below)
+      var b = h('button', { disabled: !!it.disabled, class: onTop ? 'starred' : null, 'data-star': onTop ? starKey(star, it) : null,
+          onclick: function () { if (justDragged()) return; closeMenu(); it.action(); } },
+        onTop && top.length > 1 ? h('span', { class: 'grip', title: 'Drag to reorder' }) : null,
         it.label, it.k || (star && starrable(it)) ? h('span', { class: 'k' }, it.k || '') : null,
-        star && starrable(it) ? starBtn(starKey(star, it), function () { showMenu(x, y, orig, opts); }) : null));
+        star && starrable(it) ? starBtn(starKey(star, it), function () { showMenu(x, y, orig, opts); }) : null);
+      if (onTop && top.length > 1) dragStar(b, el, function (keys) { setStarOrder(keys); showMenu(x, y, orig, opts); });
+      el.append(b);
     });
     if (el.lastChild && el.lastChild.tagName === 'HR') el.lastChild.remove();
     $('#menu-root').append(el);
@@ -3474,14 +3539,21 @@
         return q.every(function (w) { return hay.indexOf(w) >= 0; });
       });
       // starred first (in their usual order), then the rest
-      var top = hits.filter(function (it) { return it.grp !== 'tab' && isStarred(starKey('cmd', it)); });
+      var top = starSort('cmd', hits.filter(function (it) { return it.grp !== 'tab' && isStarred(starKey('cmd', it)); }));
       shown = top.concat(hits.filter(function (it) { return top.indexOf(it) < 0; })).slice(0, 80);
       sel = Math.min(sel, Math.max(0, shown.length - 1));
+      var drag = top.length > 1;
       res.replaceChildren.apply(res, shown.map(function (it, i) {
-        return h('div', { class: 'res' + (i === sel ? ' sel' : '') + (i === top.length - 1 && i < shown.length - 1 ? ' last-star' : ''),
-          onmousemove: function () { if (sel !== i) { sel = i; mark(); } }, onclick: function () { run(i); } },
+        var onTop = i < top.length;
+        var row = h('div', { class: 'res' + (i === sel ? ' sel' : '') + (onTop ? ' starred' : '') + (i === top.length - 1 && i < shown.length - 1 ? ' last-star' : ''),
+          'data-star': onTop ? starKey('cmd', it) : null,
+          onmousemove: function () { if (sel !== i && !document.body.classList.contains('star-drag')) { sel = i; mark(); } },
+          onclick: function () { if (!justDragged()) run(i); } },
+          onTop && drag ? h('span', { class: 'grip', title: 'Drag to reorder' }) : null,
           it.label, h('span', { class: 'grp' }, it.grp),
           it.grp !== 'tab' ? starBtn(starKey('cmd', it), function () { render(); setTimeout(function () { inp.focus(); }, 0); }) : h('span', { class: 'star none' }));
+        if (onTop && drag) dragStar(row, res, function (keys) { setStarOrder(keys); render(); setTimeout(function () { inp.focus(); }, 0); });
+        return row;
       }));
       if (!shown.length) res.append(h('div', { class: 'muted', style: 'padding:10px' }, 'Nothing found'));
     }

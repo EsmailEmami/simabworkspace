@@ -3884,7 +3884,7 @@
     $('#btn-hide-side').addEventListener('click', function () { if (compact()) closeDrawer(); else setWorkMode(true); });
     if (COMPACT.addEventListener) COMPACT.addEventListener('change', applyCompact);
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
-    if (window.SideFilesPanel) window.sideFilesPanel = new window.SideFilesPanel();
+    if (window.SideFilesPanel) { window.sideFilesPanel = new window.SideFilesPanel(); if (S.active) window.sideFilesPanel.onActivate(S.active); }
     $('#st-ssh').addEventListener('click', function () { refreshStatus(true); });
     $('#proj-filter').addEventListener('input', function (e) { S.filter = e.target.value; renderProjects(); });
     // an extra window starts with the sidebar hidden: it is for the tabs

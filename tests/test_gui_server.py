@@ -1677,6 +1677,50 @@ class WindowMaintenance(TmpHome):
             self.assertTrue(wait_for(lambda: ["uninstall", "--yes"] in seen, 3))
 
 
+class PruneScript(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        for d in ("a/node_modules/x", "node_modules", ".git/node_modules", "dist", "web/dist", "logs", "out"):
+            os.makedirs(os.path.join(self.root, d))
+        for f in ("a/node_modules/x/i.js", "x.log", "logs/y.log", "web/dist/z", "out/keep"):
+            Path(self.root, f).write_text("abc")
+        os.symlink(os.path.join(self.root, "out"), os.path.join(self.root, "web", "lnk"))
+        self.ns = {"__name__": "t"}
+        exec(sw.PRUNE_PY, self.ns)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def paths(self, pats):
+        return [x["path"] for x in self.ns["prune_find"](self.root, pats)["items"]]
+
+    def test_patterns(self):
+        self.assertEqual(self.paths(["node_modules"]), ["a/node_modules", "node_modules"])     # .git never
+        self.assertEqual(self.paths(["/dist"]), ["dist"])
+        self.assertEqual(self.paths(["web/dist"]), ["web/dist"])
+        self.assertEqual(self.paths(["*.log"]), ["logs/y.log", "x.log"])
+        self.assertEqual(self.paths(["log*/"]), ["logs"])
+        self.assertEqual(self.paths(["**/i.js"]), ["a/node_modules/x/i.js"])
+        self.assertEqual(self.paths(["!x.log", "", "# c"]), [])
+        f = self.ns["prune_find"](self.root, ["*.log"])
+        self.assertEqual(f["total"], 6)
+        self.assertEqual(self.ns["prune_find"](self.root + "/nope", ["x"])["items"], [])
+
+    def test_delete_only_listed_and_matching_never_follows_links(self):
+        r = self.ns["prune_delete"](self.root, ["node_modules", "lnk"], ["a/node_modules", "web/lnk", ".git/node_modules", "out", "../x"])
+        self.assertEqual(r, {"deleted": 2, "errors": []})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "a", "node_modules")))
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "node_modules")))           # not in the confirmed list
+        self.assertTrue(os.path.isdir(os.path.join(self.root, ".git", "node_modules")))
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "web", "lnk")))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "out", "keep")))           # link target kept
+
+    def test_runs_as_python_c(self):
+        r = subprocess.run([sys.executable, "-c", sw.PRUNE_PY, "find", self.root, '["*.log"]'], capture_output=True, text=True)
+        self.assertEqual([x["path"] for x in json.loads(r.stdout)["items"]], ["logs/y.log", "x.log"])
+
+
 class SyncDetailsAndConflicts(TmpHome):
     def setUp(self):
         super().setUp()
@@ -1721,6 +1765,45 @@ class SyncDetailsAndConflicts(TmpHome):
                 mock.patch.object(self.app, "run_script", return_value=(1, "ERR Could not recreate the sync")):
             with self.assertRaises(sw.ApiError):
                 self.app.set_ignores("shop", ["["])
+
+    def test_preview_and_delete_only_what_is_new_and_ticked(self):
+        for d in ("node_modules/x", "web/dist", "dist", ".git/node_modules"):
+            os.makedirs(os.path.join(self.local, d))
+        Path(self.local, "node_modules", "x", "i.js").write_text("12345")
+        Path(self.local, "dist", "a.js").write_text("1")
+        Path(self.local, "web", "dist", "b.js").write_text("1")
+        sess = [dict(self.sess[0], status="watching")]
+        seen, remote = [], []
+
+        def fake_remote(conf, code, args, multiplex=True, timeout=30):
+            remote.append(args)
+            return {"items": [{"path": "dist", "dir": True, "size": 9}], "total": 9, "truncated": False} if args[0] == "find" \
+                else {"deleted": 1, "errors": []}
+        with mock.patch.object(sw, "mutagen_sessions", return_value=sess), mock.patch.object(sw, "remote_python", side_effect=fake_remote), \
+                mock.patch.object(self.app, "run_script", side_effect=lambda a, **k: (seen.append(a), (0, "ok"))[1]):
+            pv = self.app.ignores_preview("shop", ["node_modules", "/dist"])
+            self.assertEqual(pv["added"], ["/dist"])                      # node_modules was ignored already
+            self.assertEqual([x["path"] for x in pv["local"]["items"]], ["dist"])   # web/dist: not at the top
+            self.assertEqual(pv["server"]["total"], 9)
+            self.assertEqual(remote[-1][:2], ["find", "/srv/shop"])
+            self.assertEqual(json.loads(remote[-1][2]), ["/dist"])
+            r = self.app.set_ignores("shop", ["node_modules", "/dist"], {"local": ["dist", "web/dist", "node_modules"]})
+            self.assertEqual(seen[-1], ["ignore", "shop", "node_modules,/dist"])
+            self.assertEqual(r["deleted"], {"local": {"deleted": 1, "errors": []}})
+            self.assertFalse(os.path.exists(os.path.join(self.local, "dist")))
+            self.assertTrue(os.path.isfile(os.path.join(self.local, "web", "dist", "b.js")))
+            self.assertTrue(os.path.isfile(os.path.join(self.local, "node_modules", "x", "i.js")))  # not new: never deleted
+            self.assertEqual(len([a for a in remote if a[0] == "delete"]), 0)                       # server not ticked
+            self.app.set_ignores("shop", ["node_modules", "/dist", "*.js"], {"server": ["dist"]})
+            self.assertEqual(remote[-1][0], "delete")
+            self.assertEqual(json.loads(remote[-1][2]), ["/dist", "*.js"])
+            self.assertEqual(json.loads(remote[-1][3]), ["dist"])
+        with mock.patch.object(sw, "mutagen_sessions", return_value=sess), \
+                mock.patch.object(self.app, "run_script", return_value=(1, "ERR no")), mock.patch.object(sw, "remote_python") as rp:
+            with self.assertRaises(sw.ApiError):
+                self.app.set_ignores("shop", ["node_modules", "*.go"], {"local": ["src/a.go"], "server": ["x"]})
+            rp.assert_not_called()
+        self.assertTrue(os.path.isfile(os.path.join(self.local, "src", "a.go")))   # sync not changed → nothing deleted
 
     def test_resolve_keeps_the_chosen_side(self):
         calls = []

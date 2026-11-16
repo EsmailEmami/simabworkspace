@@ -2849,32 +2849,83 @@
   function ignoresDialog(p) {
     var ta = h('textarea', { class: 'inp mono', rows: 10, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
     var errBox = h('div', { class: 'add-err' });
-    var defaults = [];
-    var save = h('button', { class: 'btn primary', disabled: true, onclick: function () {
-      var list = ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean);
-      save.disabled = true; save.textContent = 'Saving…'; errBox.textContent = '';
-      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: list }).then(function () {
+    var defaults = [], current = [], step = 1, found = null, boxes = {};
+    function listOf() { return ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean); }
+    function size(b) { var u = ['B', 'KB', 'MB', 'GB'], i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return (i ? b.toFixed(1) : b) + ' ' + u[i]; }
+    function busy(on, label) { save.disabled = on; save.textContent = label; }
+    function send(list) {
+      var del = {};
+      ['server', 'local'].forEach(function (w) { if (boxes[w] && boxes[w].checked) del[w] = found[w].items.map(function (x) { return x.path; }); });
+      busy(true, 'Saving…'); errBox.textContent = '';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: list, delete: del }).then(function (r) {
         md.close();
-        toast(p.name + ': not synced — ' + (list.join(', ') || 'nothing'), 'ok', { timeout: 6000 });
+        var bits = [], errs = [];
+        Object.keys(r.deleted || {}).forEach(function (w) {
+          var d = r.deleted[w];
+          bits.push('deleted ' + d.deleted + (w === 'server' ? ' on the server' : ' on this machine'));
+          errs = errs.concat(d.errors || []);
+        });
+        toast(p.name + ': not synced — ' + (list.join(', ') || 'nothing') + (bits.length ? ' · ' + bits.join(', ') : ''), errs.length ? 'err' : 'ok', { timeout: 8000 });
+        if (errs.length) toast('Could not delete: ' + errs.slice(0, 3).join('; '), 'err', { timeout: 10000 });
         refreshProjects();
-      }).catch(function (e) { save.disabled = false; save.textContent = 'Save'; errBox.textContent = e.message; });
-    } }, 'Save');
-    var addDef = h('button', { class: 'btn', disabled: true, onclick: function () {
-      var have = ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean);
-      defaults.forEach(function (x) { if (have.indexOf(x) < 0) have.push(x); });
-      ta.value = have.join('\n');
-    } }, 'Add defaults');
-    var md = openModal({ title: 'Not synced — ' + p.name,
-      body: [h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' },
+      }).catch(function (e) { busy(false, step === 2 ? label2() : 'Save'); errBox.textContent = e.message; });
+    }
+    function label2() { return (boxes.server && boxes.server.checked) || (boxes.local && boxes.local.checked) ? 'Save and delete' : 'Save'; }
+    function side(w, title) {
+      var f = found[w] || { items: [] };
+      if (f.error) return h('div', { class: 'ign-side' }, h('div', { class: 'sec' }, title), h('div', { class: 'add-err' }, f.error));
+      if (!f.items.length) return h('div', { class: 'ign-side' }, h('div', { class: 'sec' }, title), h('div', { class: 'muted' }, 'Nothing there'));
+      var cb = boxes[w] = h('input', { type: 'checkbox', onchange: function () { save.textContent = label2(); save.className = 'btn primary' + (label2() === 'Save' ? '' : ' danger'); } });
+      return h('div', { class: 'ign-side' },
+        h('div', { class: 'sec' }, title + ' — ' + f.items.length + (f.truncated ? '+' : '') + ' found · ' + size(f.total)),
+        h('div', { class: 'ign-list mono' }, f.items.slice(0, 30).map(function (x) {
+          return h('div', null, x.path + (x.dir ? '/' : ''), h('span', { class: 'muted' }, '  ' + size(x.size)));
+        }), f.items.length > 30 ? h('div', { class: 'muted' }, '… and ' + (f.items.length - 30) + ' more') : null),
+        h('label', { class: 'check', style: 'margin:8px 0 0' }, cb, 'Delete them ' + (w === 'server' ? 'on the server' : 'on this machine')));
+    }
+    var body = h('div');
+    var first = [h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' },
         'Folders and files never copied between this machine and the server. One per line: ',
         h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ', h('span', { class: 'mono' }, '/dist'), ' only at the top, ',
         h('span', { class: 'mono' }, '*.log'), ' by name.'),
-        ta,
-        h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Saving restarts this project’s sync. Copies made before stay on both sides — delete them where they are not needed.'),
-        errBox],
-      foot: [addDef, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), save] });
+      ta,
+      h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Saving restarts this project’s sync. Copies made before stay unless you delete them in the next step.')];
+    body.replaceChildren.apply(body, first.concat([errBox]));
+    var save = h('button', { class: 'btn primary', disabled: true, onclick: function () {
+      var list = listOf();
+      if (step === 2) return send(list);
+      var added = list.filter(function (x) { return current.indexOf(x) < 0; });
+      if (!added.length) return send(list);
+      busy(true, 'Looking…'); errBox.textContent = '';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores/preview', { ignores: list }).then(function (r) {
+        found = r; boxes = {};
+        var any = ['server', 'local'].some(function (w) { return r[w] && (r[w].items.length || r[w].error); });
+        if (!any) return send(list);
+        step = 2;
+        back.classList.remove('hidden'); addDef.classList.add('hidden');
+        body.replaceChildren(
+          h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:6px' }, 'Copies of the new entries (' + r.added.join(', ') + ') that are already there:'),
+          side('server', 'On the server'), side('local', 'On this machine'),
+          h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Deleting is for good. Leave a side unticked if something there still needs them (docker, a build). The sync is changed first, so a deletion is never copied to the other side.'),
+          errBox);
+        busy(false, 'Save');
+      }).catch(function (e) { busy(false, 'Save'); errBox.textContent = e.message; });
+    } }, 'Save');
+    var addDef = h('button', { class: 'btn', disabled: true, onclick: function () {
+      var have = listOf();
+      defaults.forEach(function (x) { if (have.indexOf(x) < 0) have.push(x); });
+      ta.value = have.join('\n');
+    } }, 'Add defaults');
+    var back = h('button', { class: 'btn hidden', onclick: function () {
+      step = 1; boxes = {}; back.classList.add('hidden'); addDef.classList.remove('hidden');
+      save.className = 'btn primary'; busy(false, 'Save'); errBox.textContent = '';
+      body.replaceChildren.apply(body, first.concat([errBox]));
+    } }, 'Back');
+    var md = openModal({ title: 'Not synced — ' + p.name, body: body,
+      foot: [addDef, back, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), save] });
     api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
-      ta.value = (d.ignores || []).join('\n');
+      current = d.ignores || [];
+      ta.value = current.join('\n');
       defaults = d.defaultIgnores || [];
       save.disabled = false; addDef.disabled = !defaults.length;
     }).catch(function (e) { errBox.textContent = e.message; });

@@ -855,3 +855,7 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 .cstatus .stuck { margin-left: 8px; display: inline-flex; gap: 8px; }
 .cstatus .stuck .link { border: 1px solid #5c4a2a; border-radius: 5px; padding: 0 7px; color: var(--warn); background: #17140e; font-size: 11px; }
 .cstatus .stuck .link:hover { border-color: var(--warn); }
+.ign-side { margin-bottom: 6px; }
+.ign-side .sec { margin-top: 10px; }
+.ign-list { max-height: 150px; overflow: auto; font-size: 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.ign-list > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

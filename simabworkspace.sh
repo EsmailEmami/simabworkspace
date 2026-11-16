@@ -45,6 +45,8 @@
 #                       that are never copied between this machine and the server
 #                       (node_modules, dist…); `simabworkspace ignore NAME LIST` does the same.
 #                       An empty list stays empty (moving or git on/off keeps it).
+#                       Copies already there of newly added entries are listed per side
+#                       (server / this machine, with sizes) and can be deleted there.
 #    1.31.1 2026-11-15  Tablet: the sidebar edge and the bars between sections can be dragged
 #                       with a finger (pointer events, wider grip on touch screens).
 #    1.31.0 2026-11-15  Rename a project in the list (⋯ → Rename…; its real name stays).

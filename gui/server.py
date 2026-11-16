@@ -3492,6 +3492,186 @@ if __name__ == "__main__":
 _FS = {}
 
 
+# ----------------------------------------------------------------------------- prune (not-synced copies)
+# Finds / deletes what a list of Mutagen ignore patterns names inside a project folder — for
+# copies made before a pattern was added. Same script both ways: exec'd here for this machine,
+# `python3 -c` over SSH for the server. Patterns: no "/" → any level (by name); "/x" or "a/b"
+# → from the top; "dir/" folders only; * ? [..] inside a name, ** across folders; "!x" skipped.
+# .git is never entered or touched; links are removed, never followed.
+PRUNE_PY = r"""
+import sys, os, re, json, shutil, stat
+
+MAX_ITEMS, MAX_SCAN = 500, 400000
+
+
+def prune_rx(glob):
+    out, i = "", 0
+    while i < len(glob):
+        c = glob[i]
+        if glob.startswith("**/", i):
+            out += "(?:.*/)?"; i += 3; continue
+        if glob.startswith("**", i):
+            out += ".*"; i += 2; continue
+        if c == "*":
+            out += "[^/]*"
+        elif c == "?":
+            out += "[^/]"
+        elif c == "[":
+            j = glob.find("]", i + 1)
+            if j < 0:
+                out += re.escape(c)
+            else:
+                body = glob[i + 1:j]
+                out += "[" + ("^" + body[1:] if body[:1] == "!" else body).replace("\\", "\\\\") + "]"
+                i = j
+        else:
+            out += re.escape(c)
+        i += 1
+    return re.compile(out + r"\Z")
+
+
+def prune_compile(patterns):
+    rules = []
+    for p in patterns:
+        p = (p or "").strip()
+        if not p or p.startswith("!") or p.startswith("#"):
+            continue
+        dir_only = p.endswith("/")
+        p = p.rstrip("/")
+        anchored = "/" in p
+        p = p.lstrip("/")
+        if p:
+            rules.append((prune_rx(p), anchored, dir_only))
+    return rules
+
+
+def prune_match(rules, rel, is_dir):
+    name = rel.rsplit("/", 1)[-1]
+    for rx, anchored, dir_only in rules:
+        if dir_only and not is_dir:
+            continue
+        if rx.match(rel if anchored else name):
+            return True
+    return False
+
+
+def prune_size(path, budget):
+    total = 0
+    for top, dirs, files in os.walk(path):
+        for f in files:
+            budget[0] -= 1
+            try:
+                total += os.lstat(os.path.join(top, f)).st_size
+            except OSError:
+                pass
+        if budget[0] <= 0:
+            break
+    return total
+
+
+def prune_find(root, patterns):
+    root = os.path.realpath(os.path.expanduser(root))
+    if not os.path.isdir(root):
+        return {"items": [], "total": 0, "truncated": False, "missing": True}
+    rules = prune_compile(patterns)
+    items, budget, stack, truncated = [], [MAX_SCAN], [""], False
+    while stack and rules:
+        rel_dir = stack.pop()
+        try:
+            entries = sorted(os.scandir(os.path.join(root, rel_dir) if rel_dir else root), key=lambda e: e.name)
+        except OSError:
+            continue
+        for e in entries:
+            budget[0] -= 1
+            if e.name == ".git":
+                continue
+            rel = rel_dir + "/" + e.name if rel_dir else e.name
+            try:
+                is_dir = e.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if prune_match(rules, rel, is_dir):
+                if len(items) >= MAX_ITEMS:
+                    truncated = True
+                    continue
+                try:
+                    size = prune_size(e.path, budget) if is_dir else e.stat(follow_symlinks=False).st_size
+                except OSError:
+                    size = 0
+                items.append({"path": rel, "dir": is_dir, "size": size})
+            elif is_dir:
+                stack.append(rel)
+        if budget[0] <= 0:
+            truncated = True
+            break
+    items.sort(key=lambda x: x["path"])
+    return {"items": items, "total": sum(x["size"] for x in items), "truncated": truncated}
+
+
+def prune_delete(root, patterns, paths):
+    # deletes only what the patterns still name now AND the user saw in the list
+    root = os.path.realpath(os.path.expanduser(root))
+    want = set(paths or [])
+    found = [x for x in prune_find(root, patterns)["items"] if x["path"] in want]
+    done, errors = 0, []
+    for x in found:
+        full = os.path.join(root, x["path"])
+        parent = os.path.realpath(os.path.dirname(full))
+        if not (parent == root or parent.startswith(root + os.sep)) or ".git" in x["path"].split("/"):
+            errors.append(x["path"] + ": outside the project"); continue
+        try:
+            st = os.lstat(full)
+            if stat.S_ISDIR(st.st_mode):
+                shutil.rmtree(full)
+            else:
+                os.unlink(full)
+            done += 1
+        except OSError as e:
+            errors.append(x["path"] + ": " + (e.strerror or str(e)))
+    return {"deleted": done, "errors": errors[:20]}
+
+
+def prune_main(argv):
+    try:
+        op, root, patterns = argv[0], argv[1], json.loads(argv[2])
+        if op == "find":
+            print(json.dumps(prune_find(root, patterns)))
+        elif op == "delete":
+            print(json.dumps(prune_delete(root, patterns, json.loads(argv[3]))))
+        else:
+            print(json.dumps({"error": "bad request"}))
+    except (OSError, ValueError, IndexError) as e:
+        print(json.dumps({"error": str(e)}))
+
+
+if __name__ == "__main__":
+    prune_main(sys.argv[1:])
+"""
+_PRUNE = {}
+
+
+def prune_call(app, project: dict, where: str, op: str, patterns: list, paths: list = None) -> dict:
+    """Find (op "find") or delete (op "delete") what the patterns name, on one side of a project."""
+    args = [op, project["local"] if where == "local" else project["remote"], json.dumps(patterns)]
+    if op == "delete":
+        args.append(json.dumps(paths or []))
+    if where == "local":
+        if not _PRUNE:
+            ns = {"__name__": "simab_prune"}
+            exec(compile(PRUNE_PY, "<prune>", "exec"), ns)
+            _PRUNE.update(ns)
+        f = _PRUNE["prune_find"] if op == "find" else _PRUNE["prune_delete"]
+        res = f(*([args[1], patterns] + ([paths or []] if op == "delete" else [])))
+    else:
+        res = remote_python(app._project_conf(project), PRUNE_PY, args,
+                            multiplex=bool(app.store.settings.get("sshMultiplex")), timeout=300 if op == "delete" else 90)
+    if not isinstance(res, dict):
+        raise ApiError(502, "bad answer from the server")
+    if res.get("error"):
+        raise ApiError(400, str(res["error"]))
+    return res
+
+
 def fs_local():
     """The FS_PY functions, loaded once into this process."""
     if not _FS:
@@ -4657,11 +4837,8 @@ class App:
         self.activity.add("move", name, "moved folders" + (" → " + local if local else "") + (" | server → " + remote if remote else ""))
         return {"ok": True, "output": out[-1500:]}
 
-    def set_ignores(self, name: str, ignores) -> dict:
-        """What is never synced for a project (Mutagen ignore patterns); the sync is recreated."""
-        p = next((x for x in self.projects(max_age=5) if x["name"] == name), None)
-        if not p or p.get("source") != "mutagen":
-            raise ApiError(404, "this project is not synced")
+    @staticmethod
+    def _clean_ignores(ignores) -> list:
         if not isinstance(ignores, list) or len(ignores) > 200:
             raise ApiError(400, "bad list")
         out, seen = [], set()
@@ -4675,12 +4852,66 @@ class App:
                 raise ApiError(400, f"not a valid pattern: {x[:60]}")
             seen.add(x)
             out.append(x)
+        return out
+
+    def _synced(self, name: str) -> dict:
+        p = next((x for x in self.projects(max_age=5) if x["name"] == name), None)
+        if not p or p.get("source") != "mutagen":
+            raise ApiError(404, "this project is not synced")
+        return p
+
+    def _sides(self, p: dict) -> list:
+        return [w for w in ("server", "local")
+                if (w == "local" and p.get("local") and os.path.isdir(p["local"])) or (w == "server" and p.get("remote"))]
+
+    def ignores_preview(self, name: str, ignores) -> dict:
+        """What the newly added patterns name on each side now (copies made before) — shown before Save."""
+        p = self._synced(name)
+        new = self._clean_ignores(ignores)
+        cur = (self._session(name).get("configuration") or {}).get("ignores") or []
+        added = [x for x in new if x not in cur]
+        out = {"added": added}
+        for w in ("server", "local"):
+            if not added or w not in self._sides(p):
+                out[w] = {"items": [], "total": 0, "truncated": False}
+                continue
+            try:
+                out[w] = prune_call(self, p, w, "find", added)
+            except ApiError as e:
+                out[w] = {"items": [], "total": 0, "truncated": False, "error": e.message}
+        return out
+
+    def set_ignores(self, name: str, ignores, delete=None) -> dict:
+        """What is never synced for a project (Mutagen ignore patterns); the sync is recreated.
+        delete = {"server": [paths], "local": [paths]}: copies of newly added patterns to remove
+        afterwards (only after the new sync ignores them, so the deletion is not synced over)."""
+        p = self._synced(name)
+        out = self._clean_ignores(ignores)
+        delete = delete if isinstance(delete, dict) else {}
+        cur = []
+        if delete:
+            cur = (self._session(name).get("configuration") or {}).get("ignores") or []
+        added = [x for x in out if x not in cur]
         code, text = self.run_script(["ignore", name, ",".join(out)], timeout=900)
         self.invalidate()
         if code != 0:
             raise ApiError(400, self.script_error(text, "could not change what is not synced"))
         self.activity.add("sync-ignores", name, "not synced: " + (", ".join(out) or "nothing"))
-        return {"ok": True, "ignores": out}
+        res = {"ok": True, "ignores": out, "deleted": {}}
+        for w in ("server", "local"):
+            paths = delete.get(w)
+            if not paths or not added or w not in self._sides(p):
+                continue
+            if not isinstance(paths, list) or not all(isinstance(x, str) for x in paths):
+                raise ApiError(400, "bad list")
+            try:
+                r = prune_call(self, p, w, "delete", added, paths)
+            except ApiError as e:
+                r = {"deleted": 0, "errors": [e.message]}
+            res["deleted"][w] = r
+            self.activity.add("sync-prune", name, f"deleted {r.get('deleted', 0)} not-synced item(s) on "
+                              + ("the server" if w == "server" else "this machine"))
+        return res
 
     def uninstall(self) -> dict:
         def run():
@@ -6254,7 +6485,10 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "details":
             return app.sync_details(parts[1])
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "ignores":
-            return app.set_ignores(parts[1], self._body().get("ignores"))
+            b = self._body()
+            return app.set_ignores(parts[1], b.get("ignores"), b.get("delete"))
+        if route == ("POST", "sync") and len(parts) == 4 and parts[2] == "ignores" and parts[3] == "preview":
+            return app.ignores_preview(parts[1], self._body().get("ignores"))
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "resolve":
             b = self._body()
             return app.resolve_conflict(parts[1], b.get("path") or "", b.get("keep") or "")

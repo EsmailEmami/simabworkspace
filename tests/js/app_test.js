@@ -90,7 +90,9 @@ global.fetch = (url, opts) => {
     server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
   else if (url === '/api/sync/cheshmeh/resolve') res = { ok: true };
-  else if (url === '/api/sync/cheshmeh/ignores') res = { ok: true, ignores: body.ignores };
+  else if (url === '/api/sync/cheshmeh/ignores') res = { ok: true, ignores: body.ignores, deleted: body.delete && body.delete.server ? { server: { deleted: 1, errors: [] } } : {} };
+  else if (url === '/api/sync/cheshmeh/ignores/preview') res = { added: ['*.log', '/tmp', 'dist'],
+    server: { items: [{ path: 'web/dist', dir: true, size: 2048 }], total: 2048, truncated: false }, local: { items: [], total: 0, truncated: false } };
   else if (url === '/api/server-folders') res = { folders: [{ path: '/home/esi/shop', name: 'shop', git: 'repo', mtime: 1, project: '' }, { path: '/home/esi/cheshmeh', name: 'cheshmeh', git: 'repos inside', mtime: 2, project: 'cheshmeh' }] };
   else if (url === '/api/add-project') res = { ok: true, project: 'shop' };
   else if (url.startsWith('/api/update') && method === 'GET') res = { current: '9', latest: '10.0.0', available: true, notes: '## Changes\n- faster', url: 'https://x' };
@@ -601,8 +603,35 @@ const tests = {
     assert.strictEqual(ta.value, 'node_modules\n*.log\n/tmp\ndist');
     q('.btn.primary', modal).pop().click();
     await settle();
+    // step 2: what the new entries name already, per side; nothing deleted unless ticked
+    assert.ok(!calls.some((c) => c.url === '/api/sync/cheshmeh/ignores'));
+    assert.match(modal.textContent, /On the server — 1 found · 2\.0 KB/);
+    assert.match(modal.textContent, /web\/dist\//);
+    assert.match(modal.textContent, /On this machine.*Nothing there/);
+    const boxes = q('input', modal).filter((i) => i.getAttribute('type') === 'checkbox');
+    assert.strictEqual(boxes.length, 1);
+    boxes[0].checked = true; boxes[0].dispatch('change');
+    const save = q('.btn.primary', modal).pop();
+    assert.strictEqual(save.textContent, 'Save and delete');
+    save.click();
+    await settle();
     const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop();
-    assert.deepStrictEqual(post.body, { ignores: ['node_modules', '*.log', '/tmp', 'dist'] });
+    assert.deepStrictEqual(post.body, { ignores: ['node_modules', '*.log', '/tmp', 'dist'], delete: { server: ['web/dist'] } });
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'not synced: removing an entry saves at once, nothing to delete'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
+    await settle();
+    const modal = q('.modal').pop();
+    q('textarea', modal)[0].value = '';
+    const n = calls.length;
+    q('.btn.primary', modal).pop().click();
+    await settle();
+    assert.ok(!calls.slice(n).some((c) => c.url.indexOf('/preview') > 0));
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop().body, { ignores: [], delete: {} });
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

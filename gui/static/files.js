@@ -47,6 +47,9 @@
     this.tree.addEventListener('contextmenu', function (e) { if (e.target === self.tree) { e.preventDefault(); self.menu(e.clientX, e.clientY); } });
     this.tree.tabIndex = 0;
     this.tree.addEventListener('keydown', function (e) { self.treeKey(e); });
+    this.tree.addEventListener('dragover', function (ev) { if (ev.target === self.tree) { ev.preventDefault(); self.tree.classList.add('ft-drop'); } });
+    this.tree.addEventListener('dragleave', function (ev) { if (!self.tree.contains(ev.relatedTarget)) self.tree.classList.remove('ft-drop'); });
+    this.tree.addEventListener('drop', function (ev) { if (ev.target === self.tree || ev.currentTarget === self.tree) { ev.preventDefault(); self.tree.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer.files, ''); } });
     this.side = h('div', { class: 'files-side' },
       h('div', { class: 'files-bar' }, this.filter, this.gitBtn,
         h('button', { class: 'icon-btn', title: 'New file', onclick: function () { self.create(false); } }, '+'),
@@ -180,6 +183,10 @@
       } }, '⋯') : null);
     row.addEventListener('click', function () { if (e.dir) self.toggle(path); else self.openFile(path); });
     row.addEventListener('contextmenu', function (ev) { ev.preventDefault(); ev.stopPropagation(); self.sel = path; self.renderTree(); self.rowMenu(path, e.dir, ev.clientX, ev.clientY); });
+    var dropTarget = e.dir ? path : parentOf(path);
+    row.addEventListener('dragover', function (ev) { ev.preventDefault(); row.classList.add('ft-drop'); });
+    row.addEventListener('dragleave', function (ev) { if (!row.contains(ev.relatedTarget)) row.classList.remove('ft-drop'); });
+    row.addEventListener('drop', function (ev) { ev.preventDefault(); row.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer.files, dropTarget); });
     return row;
   };
 
@@ -537,6 +544,23 @@
     this.closed = true;
     this.el.remove();
     this.pane.remove();
+  };
+
+  P.uploadFiles = function (files, folder) {
+    var self = this;
+    if (!files || !files.length) return;
+    Array.prototype.forEach.call(files, function (file) {
+      var url = '/api/fs/' + encodeURIComponent(self.key) + '/upload?path=' + encodeURIComponent(folder) + '&name=' + encodeURIComponent(file.name);
+      SW.toast('Uploading ' + file.name + '…', 'ok', { timeout: 3000 });
+      var reader = new FileReader();
+      reader.onload = function (ev) {
+        fetch(url, { method: 'POST', headers: { 'X-Token': SW.token(), 'Content-Type': 'application/octet-stream' }, body: ev.target.result })
+          .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error || r.statusText); }); })
+          .then(function () { SW.toast('Uploaded ' + file.name, 'ok', { timeout: 2000 }); self.refresh(true); })
+          .catch(function (e) { SW.toast(file.name + ': ' + e.message, 'err'); });
+      };
+      reader.readAsArrayBuffer(file);
+    });
   };
 
   // ---------------------------------------------------------------- helpers

@@ -758,6 +758,7 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .ft-row { display: flex; align-items: center; gap: 4px; height: 24px; padding-right: 8px; cursor: pointer; white-space: nowrap; user-select: none; }
 .ft-row:hover { background: var(--bg3); }
 .ft-row.sel { background: #1b2230; }
+.ft-row.ft-drop, .files-tree.ft-drop { background: var(--bg3); outline: 1px solid var(--accent); outline-offset: -1px; }
 .ft-row.ignored .ft-name { color: var(--faint); }
 .ft-caret { width: 12px; flex: none; color: var(--faint); font-size: 10px; text-align: center; }
 .ft-name { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; unicode-bidi: plaintext; }

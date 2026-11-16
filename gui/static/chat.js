@@ -291,6 +291,9 @@
     this.ta.addEventListener('click', function () { self.slashPopup(); });
     this.ta.addEventListener('blur', function () { setTimeout(function () { self.slashEl.classList.add('hidden'); }, 150); });
     this.ta.addEventListener('paste', function (e) { self.pasteFiles(e); });
+    this.ta.addEventListener('dragover', function (e) { if (hasImages(e)) { e.preventDefault(); self.ta.classList.add('drag-over'); } });
+    this.ta.addEventListener('dragleave', function () { self.ta.classList.remove('drag-over'); });
+    this.ta.addEventListener('drop', function (e) { self.ta.classList.remove('drag-over'); if (!hasImages(e)) return; e.preventDefault(); self.addFiles(e.dataTransfer.files); });
     this.attachEl = h('div', { class: 'attach hidden' });
     this.slashEl = h('div', { class: 'slash hidden' });
     this.modeSel = h('select', { class: 'mini-sel mode', title: 'Permission mode (Shift+Tab)', onchange: function () { self.send({ t: 'mode', mode: self.modeSel.value }); } },
@@ -1515,6 +1518,12 @@
     this.autosize();
     this.ta.focus();
   };
+
+  function hasImages(e) {
+    var items = e.dataTransfer && e.dataTransfer.items;
+    if (!items) return false;
+    return Array.prototype.some.call(items, function (i) { return i.kind === 'file' && /^image\//.test(i.type); });
+  }
 
   P.pasteFiles = function (e) {
     var items = (e.clipboardData && e.clipboardData.files) || [];

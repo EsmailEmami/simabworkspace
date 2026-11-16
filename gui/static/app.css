@@ -322,6 +322,7 @@ details.thinking.live summary { animation: pulse 1.4s infinite; }
 .chat-composer { flex: none; padding: 6px 16px 12px; position: relative; max-width: 900px; width: 100%; margin: 0 auto; }
 .cbox { border: 1px solid var(--line2); border-radius: 9px; background: var(--bg2); }
 .cbox:focus-within { border-color: #3d4a66; }
+.cbox textarea.drag-over { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .cbox textarea { width: 100%; resize: none; border: none; outline: none; background: transparent; padding: 9px 12px 2px; min-height: 40px; max-height: 260px; font: 14px/1.7 var(--ui); unicode-bidi: plaintext; }
 .cbar { display: flex; align-items: center; gap: 4px; padding: 2px 6px 6px; }
 .mini-sel { height: 22px; border: none; border-radius: 4px; background: transparent; color: var(--faint); font: 11px var(--mono); outline: none; padding: 0 2px; }

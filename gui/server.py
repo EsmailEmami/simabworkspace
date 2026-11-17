@@ -4863,6 +4863,9 @@ class App:
         self._docker_seq = 0
         self._docker_error = ""
         self._docker_checked = 0.0
+        self._restored = threading.Event()    # set once the tabs of the last run are back (restore_live)
+        self._restored.set()
+        self._live_saved = False
 
     @property
     def conf(self) -> ServerConf:
@@ -4921,8 +4924,10 @@ class App:
             info = self.get(info["id"]).info()
         return info
 
-    def _create_session(self, body: dict) -> dict:
-        sid = secrets.token_hex(6)
+    def _create_session(self, body: dict, sid: str = None, ready=False) -> dict:
+        if not ready:
+            self._restored.wait(60)
+        sid = sid or secrets.token_hex(6)
         if body.get("kind") == "chat" and isinstance(body.get("resume"), str) and body["resume"]:
             same = next((x for x in list(self.sessions.values()) if isinstance(x, ChatSession) and not x.closed
                          and body["resume"] in (x.session_id, x.spec.get("resume"))), None)
@@ -5076,11 +5081,15 @@ class App:
         return s.info()
 
     def tabs(self) -> dict:
+        self._restored.wait(60)
         wins = self.live_windows()
         return {"sessions": [s.info() for s in self.sessions.values()], "windows": wins, "now": time.time()}
 
     def get(self, sid: str) -> Session:
         s = self.sessions.get(sid)
+        if not s and not self._restored.is_set():
+            self._restored.wait(60)
+            s = self.sessions.get(sid)
         if not s:
             raise ApiError(404, "this tab no longer exists")
         return s
@@ -5826,11 +5835,78 @@ class App:
         self.store.set_last_tabs(specs)
 
     def shutdown_sessions(self):
+        self._save_live()
         for s in list(self.sessions.values()):
             getattr(s, "shutdown", s.kill)()
         self.sessions = {}
         for t in list(self.tunnels.values()):
             t.stop()
+
+    # A restart (update, the web service restarted) must not cost the open tabs: chats (Claude
+    # keeps running on the server under its relay), watched chats and Files tabs come back with
+    # the SAME ids, so browsers simply reconnect. Terminals cannot: their process is gone.
+    LIVE_KINDS = ("chat", "files")
+    LIVE_MAX_AGE = 600              # installed app: only right after a restart, not the next morning
+
+    def _save_live(self):
+        if self._live_saved:
+            return
+        self._live_saved = True
+        tabs = []
+        for s in list(self.sessions.values()):
+            sp = dict(s.spec)
+            if sp.get("kind") not in self.LIVE_KINDS:
+                continue
+            if sp.get("kind") == "chat" and not sp.get("resume"):
+                continue              # a chat with no conversation yet: nothing to come back to
+            tabs.append({"id": s.id, "win": s.win or "", "title": s.title, "spec": sp})
+        self.store.db.put("live", {"at": time.time(), "tabs": tabs})
+
+    def restore_live(self, wait=False):
+        """Bring back the tabs saved by the last shutdown (in a thread: chats read their history
+        over SSH). Until it is done, state/tabs/new tabs/websockets wait for it."""
+        rec = self.store.db.get("live", None)
+        if not isinstance(rec, dict) or not rec.get("tabs"):
+            return
+        self.store.db.put("live", {"at": 0, "tabs": []})
+        if not self.web and time.time() - float(rec.get("at") or 0) > self.LIVE_MAX_AGE:
+            return
+        self._restored.clear()
+
+        def run():
+            try:
+                for t in rec["tabs"][:40]:
+                    try:
+                        self._restore_one(t)
+                    except Exception as e:                # one bad tab must not stop the others
+                        log_line(f"restore tab {t.get('id')}: {e}")
+            finally:
+                self._restored.set()
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        if wait:
+            th.join()
+
+    def _restore_one(self, t: dict):
+        sid, sp = t.get("id"), t.get("spec") or {}
+        if not (isinstance(sid, str) and re.fullmatch(r"[0-9a-f]{12}", sid)) or sid in self.sessions:
+            return
+        body = {"kind": sp.get("kind"), "project": sp.get("project") or "", "title": t.get("title") or ""}
+        if sp.get("kind") == "chat":
+            body["resume"] = sp.get("resume") or ""
+            if sp.get("watch"):
+                body["watch"] = True
+            elif sp.get("relay"):
+                body["relay"] = sp["relay"]
+            for k in ("mode", "model", "effort", "named"):
+                if sp.get(k):
+                    body[k] = sp[k]
+        info = self._create_session(body, sid=sid, ready=True)
+        wid = t.get("win") or ""
+        if wid and WIN_RE.fullmatch(wid):
+            s = self.sessions.get(info["id"])
+            if s:
+                s.win, s.moved = wid, time.time()
 
     def _project(self, name: str) -> dict:
         p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
@@ -6088,6 +6164,7 @@ class App:
         return {"ok": True}
 
     def state(self) -> dict:
+        self._restored.wait(60)
         windows = self.live_windows()
         return {"version": VERSION, "windows": windows, "now": time.time(), "server": self.conf.to_dict(), "settings": self.store.settings,
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
@@ -6378,6 +6455,7 @@ class WebGate:
             return None
         app = App(Store(d / "simab.db"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
         self.apps[wsid] = app
+        app.restore_live()
         if self.start_loops:
             threading.Thread(target=app.git_watch_loop, daemon=True).start()
             threading.Thread(target=app.docker_watch_loop, daemon=True).start()
@@ -7110,6 +7188,7 @@ def serve(foreground_msg=True):
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
     threading.Thread(target=app.docker_watch_loop, daemon=True).start()
     threading.Thread(target=app.start_tunnels, daemon=True).start()
+    app.restore_live()
     start_wsl_keepalive()
     log_line(f"started {VERSION} on 127.0.0.1:{app.port} (pid {os.getpid()})")
     for sig in (signal.SIGTERM, signal.SIGINT):

@@ -137,3 +137,71 @@ ExtraWindowsHttp.test_windows_routes = test_windows_routes
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TabsSurviveARestart(base.TmpHome):
+    """An update / a restart of the web service: chats and Files tabs come back with the same ids."""
+    def setUp(self):
+        super().setUp()
+        self.mut = mock.patch.object(sw, "mutagen_sessions", return_value=[])
+        self.mut.start()
+        self.store.add_manual({"name": "p", "local": self.tmp.name, "remote": "/srv/p"})
+
+    def tearDown(self):
+        self.mut.stop()
+        super().tearDown()
+
+    def chat(self, sid, conv):
+        c = sw.ChatSession(sid, {"make_argv": lambda *a: ["/bin/sh", "-c", "cat >/dev/null"], "cwd": "/tmp", "title": "Fix login",
+                                 "resume": conv, "relay": "abcdef0123456789",
+                                 "spec": {"kind": "chat", "project": "p", "where": "server", "resume": conv}})
+        return c
+
+    def test_restart_brings_back_chats_and_files_with_the_same_ids(self):
+        conv = "11111111-2222-3333-4444-555555555555"
+        app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        app.invalidate()
+        f = app.create_session({"kind": "files", "project": "p"})
+        app.set_window(f["id"], "w2abc")
+        app.sessions["aaaaaaaaaaaa"] = self.chat("aaaaaaaaaaaa", conv)
+        app.sessions["bbbbbbbbbbbb"] = self.chat("bbbbbbbbbbbb", "")          # no conversation yet: not kept
+        with mock.patch.object(sw.ChatSession, "shutdown", lambda self: None):
+            app.shutdown_sessions()
+            app.shutdown_sessions()                                        # called twice on the way out: kept once
+        saved = self.store.db.get("live")
+        self.assertEqual([t["id"] for t in saved["tabs"]], [f["id"], "aaaaaaaaaaaa"])
+
+        made = []
+
+        def fake_chat(self2, body, sid=None, ready=False):
+            if body.get("kind") != "chat":
+                return orig(self2, body, sid=sid, ready=ready)
+            made.append((sid, body))
+            self2.sessions[sid] = sw.FilesSession(sid, "p", body["title"])   # stands in for the chat
+            return self2.sessions[sid].info()
+        orig = sw.App._create_session
+        app2 = sw.App(self.store, sw.ServerConf("esi", "h"))
+        with mock.patch.object(sw.App, "_create_session", fake_chat):
+            app2.restore_live(wait=True)
+        self.assertEqual(list(app2.sessions), [f["id"], "aaaaaaaaaaaa"])
+        self.assertEqual(app2.sessions[f["id"]].win, "w2abc")
+        self.assertEqual(made[0][1]["resume"], conv)
+        self.assertEqual(made[0][1]["relay"], "abcdef0123456789")
+        self.assertEqual(made[0][1]["title"], "Fix login")
+        # used once: the next start does not bring them back again
+        app3 = sw.App(self.store, sw.ServerConf("esi", "h"))
+        app3.restore_live(wait=True)
+        self.assertEqual(app3.sessions, {})
+        app2.sessions.clear()
+
+    def test_installed_app_restores_only_right_after_a_restart(self):
+        self.store.db.put("live", {"at": time.time() - 3600, "tabs": [{"id": "cccccccccccc", "win": "", "title": "Files · p",
+                                                                    "spec": {"kind": "files", "project": "p"}}]})
+        app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        app.restore_live(wait=True)
+        self.assertEqual(app.sessions, {})
+        self.store.db.put("live", {"at": time.time() - 3600, "tabs": [{"id": "cccccccccccc", "win": "", "title": "Files · p",
+                                                                    "spec": {"kind": "files", "project": "p"}}]})
+        web = sw.App(self.store, sw.ServerConf("esi", "h"), web=True)
+        web.restore_live(wait=True)
+        self.assertEqual(list(web.sessions), ["cccccccccccc"])

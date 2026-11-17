@@ -255,7 +255,7 @@ const tests = {
     };
     ws.onclose();
     assert.ok(tab.composerEl.classList.contains('offline'));
-    assert.ok(tab.sendBtn.disabled);
+    assert.ok(tab.actionBtn.disabled);
     tab.ta.value = 'still here';
     toasts.length = 0;
     tab.submit();
@@ -270,7 +270,7 @@ const tests = {
     const ws2 = global.sockets[global.sockets.length - 1];
     assert.match(ws2.url, /id=c9/);
     ws2.onopen();
-    assert.ok(!tab.composerEl.classList.contains('offline') && !tab.sendBtn.disabled);
+    assert.ok(!tab.composerEl.classList.contains('offline') && !tab.actionBtn.disabled);
     global.apiImpl = () => Promise.resolve({});
   },
 
@@ -773,7 +773,7 @@ const tests = {
     ws.onopen();
     feed({ t: 's', events: [], state: { alive: true, busy: false, mode: 'auto', model: 'opus', effort: 'high' } });
     const chip = tab.optsBtn;
-    assert.ok(tab.sendBtn.parentNode === chip.parentNode, 'chip and send share the bar');
+    assert.ok(tab.actionBtn.parentNode === chip.parentNode, 'chip and send share the bar');
     assert.match(chip.textContent, /auto.*Opus 5\.5.*high/);
     assert.match(chip.className, /m-auto/);
     let items = null;

@@ -287,7 +287,7 @@
     this.ta = h('textarea', { rows: 1, dir: 'auto', enterkeyhint: touch ? 'enter' : 'send',
       placeholder: touch ? 'Message Claude  ·  @ file  / command' : 'Message Claude   ·   @ file   / command   Esc stop' });
     this.ta.addEventListener('keydown', function (e) { self.key(e); });
-    this.ta.addEventListener('input', function () { self.autosize(); self.slashPopup(); });
+    this.ta.addEventListener('input', function () { self.autosize(); self.slashPopup(); self._updateActionBtn(); });
     this.ta.addEventListener('click', function () { self.slashPopup(); });
     this.ta.addEventListener('blur', function () { setTimeout(function () { self.slashEl.classList.add('hidden'); }, 150); });
     this.ta.addEventListener('paste', function (e) { self.pasteFiles(e); });
@@ -306,8 +306,9 @@
     // phones: the three selects fold into one chip ("auto · Opus 5.5 · medium") that opens a menu
     this.optsBtn = h('button', { class: 'cb-opts', title: 'Mode, model and effort', onclick: function () { self.optsMenu(); } });
     [this.modeSel, this.modelSel, this.effortSel].forEach(function (sel) { sel.addEventListener('change', function () { self.paintOpts(); }); });
-    this.sendBtn = h('button', { class: 'send', title: 'Send (Enter)', onclick: function () { self.submit(); } }, '↑');
-    this.stopBtn = h('button', { class: 'stopbtn hidden', title: 'Stop (Esc)', onclick: function () { self.interrupt(); } }, '■');
+    this.actionBtn = h('button', { class: 'send', title: 'Send (Enter)', onclick: function () {
+      if (self._stopMode) self.interrupt(); else self.submit();
+    } }, '↑');
     this.stDot = h('i', { class: 'dot' });
     this.stText = h('span', { class: 'st-text' }, 'connecting…');
     this.stExtra = h('span', { class: 'st-extra' });
@@ -336,7 +337,7 @@
           h('span', { class: 'grow' }),
           h('button', { class: 'link cb-hist', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, h('span', { class: 'lbl' }, 'history'), h('span', { class: 'ico' }, '⟲')),
           h('button', { class: 'link cb-new', title: 'Start a new conversation in this tab', onclick: function () { self.newChat(); } }, h('span', { class: 'lbl' }, 'new'), h('span', { class: 'ico' }, '✎')),
-          this.stopBtn, this.sendBtn)));
+          this.actionBtn)));
 
     this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
@@ -650,8 +651,16 @@
   P.setBusy = function (b) {
     this.busy = !!b;
     if (this.busy) this.el.classList.remove('done');
-    this.stopBtn.classList.toggle('hidden', !this.busy);
     this.el.classList.toggle('busy', this.busy);
+    this._updateActionBtn();
+  };
+
+  P._updateActionBtn = function () {
+    var stopMode = this.busy && !this.ta.value.trim();
+    this._stopMode = stopMode;
+    this.actionBtn.textContent = stopMode ? '■' : '↑';
+    this.actionBtn.className = stopMode ? 'stopbtn' : 'send';
+    this.actionBtn.title = stopMode ? 'Stop (Esc)' : 'Send (Enter)';
   };
 
   P.applyInfo = function () {
@@ -738,7 +747,7 @@
     // no connection: nothing can be sent, so the message box says so (the text you type is kept)
     var off = !!conn && !this.watching;
     if (this.composerEl) this.composerEl.classList.toggle('offline', off);
-    if (this.sendBtn) this.sendBtn.disabled = off;
+    if (this.actionBtn) this.actionBtn.disabled = off;
     var kind = conn ? 'off' : (this.phaseKind || 'idle');
     var extra = [];
     var waiting = (this.echoes || []).length - (kind === 'work' && this.phaseText === 'sending…' ? 1 : 0);
@@ -883,7 +892,7 @@
       var b = this.draft.blocks[ev.index];
       if (!b) return;
       var d = ev.delta || {};
-      if (d.type === 'text_delta') { this.type(b.el, d.text); this.turnText = true; }
+      if (d.type === 'text_delta') { this.liveMarkdown(b.el, d.text); this.turnText = true; }
       else if (d.type === 'thinking_delta') { b.el.lastChild.append(d.thinking); this.scrollEnd(); }
     } else if (ev.type === 'content_block_stop') {
       var bb = this.draft.blocks[ev.index];
@@ -922,8 +931,31 @@
   P.flushTyping = function (el) {
     if (el._pending) { el.append(el._pending); el._pending = ''; }
     if (el._timer) { clearTimeout(el._timer); el._timer = null; }
+    if (el._mdTimer) {
+      clearTimeout(el._mdTimer); el._mdTimer = null;
+      if (el._fullText !== undefined) el.replaceChildren(markdown(el._fullText));
+    }
     if (el._onDone) { var f = el._onDone; el._onDone = null; f(); }
     this.scrollEnd();
+  };
+
+  // Stream text as markdown incrementally: re-render every 80 ms so headings, bold etc.
+  // appear in formatted form while typing, not all at once at the end.
+  P.liveMarkdown = function (el, text) {
+    el._fullText = (el._fullText || '') + text;
+    var self = this;
+    if (window.SWChat.instant) {
+      el.replaceChildren(markdown(el._fullText));
+      self.scrollEnd();
+      return;
+    }
+    if (el._mdTimer) return;
+    el._mdTimer = setTimeout(function () {
+      el._mdTimer = null;
+      el.replaceChildren(markdown(el._fullText));
+      self.scrollEnd();
+      if (el._onDone) { var f = el._onDone; el._onDone = null; f(); }
+    }, 80);
   };
 
   // the oldest live draft of this message and block type that has no final yet
@@ -953,7 +985,7 @@
       var final = self.renderBlock(b);
       var draft = self.takeDraft(msg.id, b.type);
       var put = function () { if (final) { if (draft && draft.parentNode) draft.replaceWith(final); else g.append(final); } else if (draft) draft.remove(); self.scrollEnd(); };
-      if (draft && (draft._pending || draft._timer)) draft._onDone = put;     // finish typing first
+      if (draft && (draft._pending || draft._timer || draft._mdTimer)) draft._onDone = put;     // finish typing first
       else put();
     });
     if (msg.model && !this.replaying) this.modelName = msg.model;

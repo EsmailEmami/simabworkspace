@@ -42,7 +42,7 @@
     this.filter = h('input', { class: 'inp files-filter', placeholder: 'Find file', spellcheck: 'false', dir: 'auto',
       oninput: function () { self.renderTree(); }, onkeydown: function (e) { self.filterKey(e); } });
     this.gitBtn = h('button', { class: 'icon-btn files-git hidden', title: 'Changes, commit, pull, push',
-      onclick: function () { var p = SW.project(self.project); if (p) SW.gitDialog(p); } });
+      onclick: function () { SW.openSession({ kind: 'changes', project: self.project }); } });
     this.tree = h('div', { class: 'files-tree' });
     this.tree.addEventListener('contextmenu', function (e) { if (e.target === self.tree) { e.preventDefault(); self.menu(e.clientX, e.clientY); } });
     this.tree.tabIndex = 0;
@@ -588,7 +588,7 @@
 
   // another branch: the files changed — every Files tab of that project reads them again
   window.addEventListener('sw-git-changed', function (e) {
-    ((SW.S && SW.S.tabs) || []).forEach(function (t) { if (t.isFiles && t.project === e.detail) t.refresh(true); });
+    ((SW.S && SW.S.tabs) || []).forEach(function (t) { if (t.isFiles && t.project === e.detail) t.refresh(true); });   // Files and Changes tabs
     if (window.sideFilesPanel && window.sideFilesPanel.project === e.detail) window.sideFilesPanel.refreshTree();
   });
 
@@ -772,7 +772,206 @@
     });
   };
 
+  // ---------------------------------------------------------------- ChangesTab
+  // Review what changed (by you or by Claude): the changed files on the left, the diff on the
+  // right; tick what goes into the commit, discard a file, pull / push.
+  function ChangesTab(info) {
+    var self = this;
+    this.id = info.id;
+    this.info = info;
+    this.alive = true;
+    this.exitCode = null;
+    this.isFiles = true;          // no process: app.js treats it like a Files tab
+    this.isChanges = true;
+    this.opened = true;
+    this.faOpen = false;
+    this.closed = false;
+    this.gone = false;
+    this.project = info.spec.project || '';
+    this.data = null;             // git/<p>/repos answer
+    this.picked = {};             // repo + '\0' + path -> false when left out of the commit
+    this.sel = null;              // { repo, path }
+    this.focusOn = null;          // files to show first (from a chat turn)
+    SW.tabEl(this);
+    this.branchEl = h('span', { class: 'ch-branch mono' });
+    this.list = h('div', { class: 'files-tree ch-list' });
+    this.msg = h('textarea', { class: 'inp ch-msg', rows: 2, placeholder: 'Commit message', dir: 'auto' });
+    this.msg.addEventListener('keydown', function (e) { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); self.commit(); } });
+    this.commitBtn = h('button', { class: 'btn primary', onclick: function () { self.commit(); } }, 'Commit');
+    this.side = h('div', { class: 'files-side' },
+      h('div', { class: 'files-bar' }, this.branchEl, h('span', { class: 'grow' }),
+        h('button', { class: 'icon-btn', title: 'Pull', onclick: function () { self.git('pull'); } }, '↓'),
+        h('button', { class: 'icon-btn', title: 'Push', onclick: function () { self.git('push'); } }, '↑'),
+        h('button', { class: 'icon-btn', title: 'Refresh', onclick: function () { self.refresh(); } }, '⟳')),
+      this.list,
+      h('div', { class: 'ch-commit' }, this.msg, this.commitBtn));
+    this.vhead = h('div', { class: 'files-vhead' });
+    this.vbody = h('div', { class: 'files-vbody' });
+    this.view = h('div', { class: 'files-view' }, this.vhead, this.vbody);
+    this.body = h('div', { class: 'pbody files-body' }, this.side, this.view);
+    this.pane = h('div', { class: 'pane files hidden-pane' }, this.body);
+    this.vbody.replaceChildren(h('div', { class: 'muted files-note' }, 'Pick a file to see what changed.'));
+    this.refresh();
+  }
+  var C = ChangesTab.prototype;
+  C.focus = function () { if (!TOUCH) this.list.focus(); };
+  C.ensureOpen = function () { if (this.loadedAt && Date.now() - this.loadedAt > STALE) this.refresh(true); };
+  C.doFit = function () {};
+  C.toggleFa = function () {};
+  C.renderFa = function () {};
+  C.toggleComposer = function () { this.msg.focus(); };
+  C.connect = function () {};
+  C.stop = function () {};
+  C.restart = function () { this.refresh(); };
+  C.applyInfo = function () { this.ttlEl.textContent = this.info.title; };
+  C.dispose = function () { this.closed = true; this.el.remove(); this.pane.remove(); };
+  C.menu = function (x, y, extra) { SW.showMenu(x, y, [{ label: 'Refresh', action: this.refresh.bind(this) }].concat(extra ? ['-'].concat(extra) : [])); };
+
+  C.files = function () {           // [{ repo, where, f }]
+    var d = this.data, out = [];
+    if (!d) return out;
+    (d.repos || []).forEach(function (repo) {
+      var st = (d.statuses || {})[repo];
+      if (st && st.repo) (st.files || []).forEach(function (f) { out.push({ repo: repo, where: d.where, f: f }); });
+    });
+    return out;
+  };
+
+  C.refresh = function (quiet) {
+    var self = this;
+    if (!quiet) this.list.replaceChildren(h('div', { class: 'muted files-note' }, 'Reading git…'));
+    return api('GET', 'git/' + enc(this.project) + '/repos').then(function (d) {
+      self.data = d;
+      self.loadedAt = Date.now();
+      self.render();
+      var all = self.files();
+      var still = self.sel && all.some(function (x) { return x.repo === self.sel.repo && x.f.path === self.sel.path; });
+      var first = null;
+      if (self.focusOn) first = all.find(function (x) {                // Claude's paths are absolute on the server
+        var full = join(x.repo, x.f.path);
+        return self.focusOn.some(function (a) { return a === full || a.slice(-full.length - 1) === '/' + full; });
+      });
+      self.focusOn = null;
+      if (first) self.show(first);
+      else if (!still) { self.sel = null; if (!TOUCH && all.length) self.show(all[0]); else self.vbody.replaceChildren(h('div', { class: 'muted files-note' }, all.length ? 'Pick a file to see what changed.' : 'No changes — everything is committed.')); }
+    }).catch(function (e) { self.list.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
+  };
+
+  C.render = function () {
+    var self = this, d = this.data || {}, all = this.files();
+    var st0 = (d.statuses || {})[(d.repos || [])[0]] || {};
+    var multi = (d.repos || []).length > 1;
+    this.branchEl.textContent = st0.branch ? '⎇ ' + st0.branch + (st0.ahead ? ' ↑' + st0.ahead : '') + (st0.behind ? ' ↓' + st0.behind : '') : '';
+    var rows = [], lastRepo = null;
+    all.forEach(function (x) {
+      if (multi && x.repo !== lastRepo) { rows.push(h('div', { class: 'ch-repo mono' }, x.repo || '(project)')); lastRepo = x.repo; }
+      var key = x.repo + '\0' + x.f.path;
+      var box = h('input', { type: 'checkbox', title: 'In the next commit' });
+      box.checked = self.picked[key] !== false;
+      box.addEventListener('click', function (e) { e.stopPropagation(); self.picked[key] = box.checked; self.renderCount(); });
+      var code = shownCode(SW.gitCode(x.f));
+      var on = self.sel && self.sel.repo === x.repo && self.sel.path === x.f.path;
+      var row = h('div', { class: 'ft-row ch-row' + (on ? ' sel' : ''), title: join(x.repo, x.f.path),
+        onclick: function () { self.show(x); },
+        oncontextmenu: function (e) { e.preventDefault(); self.rowMenu(x, e.clientX, e.clientY); } },
+        box, h('span', { class: 'ft-name' }, baseOf(x.f.path.replace(/\/$/, ''))),
+        h('span', { class: 'muted ch-dir mono' }, parentOf(x.f.path.replace(/\/$/, ''))),
+        h('span', { class: 'ft-git g' + code }, code));
+      rows.push(row);
+    });
+    if (!all.length) rows.push(h('div', { class: 'muted files-note' }, 'No changes — everything is committed.'));
+    this.list.replaceChildren.apply(this.list, rows);
+    this.renderCount();
+  };
+
+  C.pickedFiles = function () {
+    var self = this;
+    return this.files().filter(function (x) { return self.picked[x.repo + '\0' + x.f.path] !== false; });
+  };
+  C.renderCount = function () {
+    var n = this.pickedFiles().length, all = this.files().length;
+    this.commitBtn.textContent = n === all ? 'Commit' + (all ? ' all ' + all : '') : 'Commit ' + n + ' of ' + all;
+    this.commitBtn.disabled = !n;
+  };
+
+  C.show = function (x) {
+    var self = this;
+    this.sel = { repo: x.repo, path: x.f.path };
+    this.body.classList.add('viewing');
+    this.render();
+    var full = join(x.repo, x.f.path);
+    this.vhead.replaceChildren(
+      h('button', { class: 'btn sm files-back', onclick: function () { self.body.classList.remove('viewing'); } }, '←'),
+      h('span', { class: 'mono grow' }, full),
+      h('button', { class: 'btn sm', title: 'Open in the Files tab', onclick: function () {
+        SW.openSession({ kind: 'files', project: self.project }).then(function (t) { if (t && t.openFile) t.openFile(full.replace(/\/$/, '')); });
+      } }, 'Open'),
+      h('button', { class: 'btn sm', title: 'Ask Claude about this file', onclick: function () { askClaude(self.project, full); } }, 'Ask Claude'),
+      h('button', { class: 'btn sm danger', onclick: function () { self.discard([x]); } }, 'Discard'));
+    this.vbody.replaceChildren(h('div', { class: 'muted files-note' }, 'Loading…'));
+    api('GET', 'git/' + enc(this.project) + '/diff?repo=' + enc(x.repo) + '&where=' + enc(x.where || '') + '&path=' + enc(x.f.path) + '&untracked=' + (x.f.untracked ? 1 : 0))
+      .then(function (d) { if (self.sel && self.sel.path === x.f.path) self.vbody.replaceChildren(SW.diffEl(d.diff || '(no textual changes)')); })
+      .catch(function (e) { self.vbody.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
+  };
+
+  C.rowMenu = function (x, cx, cy) {
+    var self = this;
+    SW.showMenu(cx, cy, [
+      { label: 'Show the change', action: function () { self.show(x); } },
+      { label: 'Ask Claude about it', action: function () { askClaude(self.project, join(x.repo, x.f.path)); } },
+      '-',
+      { label: 'Discard the change…', action: function () { self.discard([x]); } }]);
+  };
+
+  C.discard = function (xs) {
+    var self = this, x = xs[0];
+    var what = x.f.untracked ? 'Delete the new file ' + x.f.path + '?' : 'Throw away the changes to ' + x.f.path + '? It goes back to the last commit.';
+    SW.confirmDlg(what, x.f.untracked ? 'Delete' : 'Discard', true).then(function (ok) {
+      if (!ok) return;
+      api('POST', 'git/' + enc(self.project) + '/discard', { repo: x.repo, where: x.where, files: [x.f.path] }).then(function () {
+        toast('Discarded ' + baseOf(x.f.path.replace(/\/$/, '')), 'ok');
+        self.sel = null;
+        window.dispatchEvent(new CustomEvent('sw-git-changed', { detail: self.project }));
+        self.refresh(true);
+      }).catch(fail);
+    });
+  };
+
+  C.commit = function () {
+    var self = this, msg = this.msg.value.trim();
+    if (!msg) { this.msg.focus(); toast('Write a commit message', 'warn'); return; }
+    var picked = this.pickedFiles(), byRepo = {};
+    if (!picked.length) return;
+    var all = this.files();
+    picked.forEach(function (x) { (byRepo[x.repo] = byRepo[x.repo] || { where: x.where, files: [] }).files.push(x.f.path); });
+    this.commitBtn.disabled = true;
+    var chain = Promise.resolve();
+    Object.keys(byRepo).forEach(function (repo) {
+      var allOfRepo = all.filter(function (x) { return x.repo === repo; }).length === byRepo[repo].files.length;
+      chain = chain.then(function () {
+        return api('POST', 'git/' + enc(self.project) + '/commit', { repo: repo, where: byRepo[repo].where, message: msg, files: allOfRepo ? null : byRepo[repo].files });
+      });
+    });
+    chain.then(function () {
+      self.msg.value = '';
+      self.picked = {};
+      toast('Committed', 'ok');
+      window.dispatchEvent(new CustomEvent('sw-git-changed', { detail: self.project }));
+      return self.refresh(true);
+    }).catch(fail).then(function () { self.renderCount(); });
+  };
+
+  C.git = function (act) {
+    var self = this, d = this.data || {};
+    var repos = (d.repos || []).filter(function (r) { var st = (d.statuses || {})[r]; return st && st.repo; });
+    if (!repos.length) return;
+    toast(act === 'pull' ? 'Pulling…' : 'Pushing…', 'ok', { timeout: 1500 });
+    var chain = Promise.resolve();
+    repos.forEach(function (r) { chain = chain.then(function () { return api('POST', 'git/' + enc(self.project) + '/' + act, { repo: r, where: d.where }); }); });
+    chain.then(function () { toast(act === 'pull' ? 'Pulled' : 'Pushed', 'ok'); return self.refresh(true); }).catch(fail);
+  };
+
   window.SideFilesPanel = SideFilesPanel;
 
-  window.SWFiles = { FilesTab: FilesTab, askClaude: askClaude };
+  window.SWFiles = { FilesTab: FilesTab, ChangesTab: ChangesTab, askClaude: askClaude };
 })();

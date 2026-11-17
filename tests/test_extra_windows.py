@@ -196,6 +196,16 @@ class TabsSurviveARestart(base.TmpHome):
         self.assertEqual(app3.sessions, {})
         app2.sessions.clear()
 
+    def test_changes_tab_is_kept_too(self):
+        app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        app.invalidate()
+        c = app.create_session({"kind": "changes", "project": "p"})
+        self.assertEqual((c["spec"]["kind"], c["title"]), ("changes", "Changes · p"))
+        app.shutdown_sessions()
+        app2 = sw.App(self.store, sw.ServerConf("esi", "h"))
+        app2.restore_live(wait=True)
+        self.assertEqual(app2.sessions[c["id"]].spec["kind"], "changes")
+
     def test_installed_app_restores_only_right_after_a_restart(self):
         self.store.db.put("live", {"at": time.time() - 3600, "tabs": [{"id": "cccccccccccc", "win": "", "title": "Files · p",
                                                                     "spec": {"kind": "files", "project": "p"}}]})

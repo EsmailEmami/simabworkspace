@@ -3431,6 +3431,30 @@ class GitRepo:
         self.flush()
         return out
 
+    def discard(self, files) -> str:
+        """Throw away the changes to these files: back to the last commit (new files are deleted)."""
+        if not isinstance(files, list) or not files or len(files) > 500:
+            raise ApiError(400, "pick at least one file")
+        st = {f["path"]: f for f in self.status().get("files", [])}
+        new, back, added = [], [], []
+        for p in files:
+            if not isinstance(p, str) or not git_path_ok(p.rstrip("/")) or p not in st:
+                raise ApiError(400, "not a changed file: " + str(p)[:200])
+            f = st[p]
+            if f["conflict"]:
+                raise ApiError(400, p + " has a merge conflict — resolve it first")
+            (new if f["untracked"] else added if f["x"] == "A" else back).append(p)
+        self.flush()
+        out = ""
+        if back:
+            out += self.check(["checkout", "HEAD", "--"] + back)
+        if added:
+            out += self.check(["rm", "-f", "-q", "--"] + added)
+        if new:
+            out += self.check(["clean", "-f", "-q", "--"] + new)
+        self.flush()
+        return out
+
     # history --------------------------------------------------------------------
     def log(self, limit=80) -> dict:
         """Recent commits of this branch and of its upstream, each marked: push (only here),
@@ -4167,14 +4191,14 @@ def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
 
 
 class FilesSession:
-    """A Files tab: no process, it only keeps its place among the tabs (and after a restart)."""
+    """A Files or Changes tab: no process, it only keeps its place among the tabs (and after a restart)."""
     win = ""
     moved = 0.0
 
-    def __init__(self, sid: str, project: str, title: str = ""):
+    def __init__(self, sid: str, project: str, title: str = "", kind: str = "files"):
         self.id = sid
-        self.spec = {"kind": "files", "project": project, "where": ""}
-        self.title = title or "Files · " + project
+        self.spec = {"kind": kind, "project": project, "where": ""}
+        self.title = title or ("Changes · " if kind == "changes" else "Files · ") + project
         self.alive = True
         self.exit_code = None
         self.started = time.time()
@@ -5153,6 +5177,16 @@ class App:
                 self.sessions[sid] = s
             self._remember()
             return s.info()
+        if body.get("kind") == "changes":
+            p = self._project(body.get("project") or "")
+            if not (p.get("remote") or (p.get("localExists") and not self.web)):
+                raise ApiError(400, "this project has no folder")
+            title = body.get("title") if isinstance(body.get("title"), str) and body.get("title").strip() else ""
+            s = FilesSession(sid, p["name"], title[:80], kind="changes")
+            with self.lock:
+                self.sessions[sid] = s
+            self._remember()
+            return s.info()
         body = {k: v for k, v in body.items() if k not in ("_docker", "_cmd")}
         if body.get("kind") == "run":
             body["_cmd"] = self.command(body.get("project") or "", body.get("cmdId") or "")
@@ -6005,7 +6039,7 @@ class App:
     # A restart (update, the web service restarted) must not cost the open tabs: chats (Claude
     # keeps running on the server under its relay), watched chats and Files tabs come back with
     # the SAME ids, so browsers simply reconnect. Terminals cannot: their process is gone.
-    LIVE_KINDS = ("chat", "files")
+    LIVE_KINDS = ("chat", "files", "changes")
     LIVE_MAX_AGE = 600              # installed app: only right after a restart, not the next morning
 
     def _save_live(self):
@@ -7382,6 +7416,11 @@ class Handler(BaseHTTPRequestHandler):
                 return repo.log()
             if method == "GET" and act == "show":
                 return {"diff": repo.show((query.get("hash") or [""])[0])}
+            if method == "POST" and act == "discard":
+                repo.discard(body.get("files"))
+                app.invalidate()
+                app.activity.add("git-discard", p["name"], ", ".join(str(x) for x in body.get("files") or [])[:200], repo=repo.repo)
+                return {"status": repo.status()}
             if method == "POST" and act == "untrack":
                 repo.untrack(body.get("files"))
                 app.invalidate()

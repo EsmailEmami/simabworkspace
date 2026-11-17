@@ -286,6 +286,28 @@ const tests = {
     global.apiImpl = () => Promise.resolve({});
   },
 
+  'after a turn: the files Claude changed, with Review changes'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', events: [], state: { alive: true, busy: false } });
+    feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [
+      { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/home/esi/p/web/app.ts', old_string: 'a', new_string: 'b' } },
+      { type: 'tool_use', id: 't2', name: 'Write', input: { file_path: '/home/esi/p/README.md', content: 'x' } },
+      { type: 'tool_use', id: 't3', name: 'Edit', input: { file_path: '/home/esi/p/web/app.ts', old_string: 'b', new_string: 'c' } },
+      { type: 'tool_use', id: 't4', name: 'Read', input: { file_path: '/home/esi/p/x.go' } }] } } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'done' } });
+    const line = byClass(tab.msgs, 'turn-files')[0];
+    assert.ok(line, 'a line after the turn');
+    assert.match(line.textContent, /2 files changed:app\.tsREADME\.md/);
+    let opened = null;
+    const old = global.SW.openSession;
+    global.SW.openSession = (spec) => { opened = spec; return Promise.resolve(null); };
+    line.querySelector('button').click();
+    global.SW.openSession = old;
+    assert.deepStrictEqual(opened, { kind: 'changes', project: 'p', focus: ['/home/esi/p/web/app.ts', '/home/esi/p/README.md'] });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'again' } });
+    assert.strictEqual(byClass(tab.msgs, 'turn-files').length, 1, 'only for turns that changed files');
+  },
+
   'Persian question cards are right-to-left'() {
     const { tab, feed } = newTab();
     feed({ t: 'e', e: { type: 'control_request', request_id: 'q1', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',

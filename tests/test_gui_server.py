@@ -1167,6 +1167,26 @@ class GitFlow(TmpHome):
         self.app = sw.App(self.store, sw.ServerConf("", "h"))
         self.p = {"name": "a", "source": "manual", "local": self.a, "localExists": True, "remote": ""}
 
+    def test_discard_changes(self):
+        repo = sw.GitRepo(self.app, self.p)
+        Path(self.a, "f.txt").write_text("changed\n")
+        Path(self.a, "new.txt").write_text("new\n")
+        Path(self.a, "staged.txt").write_text("staged\n")
+        self.git(self.a, "add", "staged.txt")
+        os.makedirs(os.path.join(self.a, "dir"))
+        Path(self.a, "dir", "x.txt").write_text("x\n")
+        self.assertEqual(len(repo.status()["files"]), 4)
+        with self.assertRaises(sw.ApiError):
+            repo.discard(["not-changed.txt"])
+        with self.assertRaises(sw.ApiError):
+            repo.discard(["../f.txt"])
+        repo.discard(["f.txt"])
+        self.assertEqual(Path(self.a, "f.txt").read_text(), "one\n")
+        repo.discard(["new.txt", "staged.txt", "dir/x.txt"])
+        self.assertEqual(repo.status()["files"], [])
+        self.assertFalse(os.path.exists(os.path.join(self.a, "new.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.a, "staged.txt")))
+
     def test_status_diff_commit_push_pull_conflict(self):
         repo = sw.GitRepo(self.app, self.p)
         st = repo.status()

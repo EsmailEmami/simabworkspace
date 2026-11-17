@@ -976,6 +976,10 @@
     card._res = resBox;
     card._sub = null;
     this.cards[b.id] = card;
+    if (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(name) && b.input) {      // remembered for "N files changed" after the turn
+      var fp = b.input.file_path || b.input.notebook_path;
+      if (typeof fp === 'string' && fp) (this.turnFiles = this.turnFiles || {})[fp] = 1;
+    }
     if ((name === 'Task' || name === 'Agent') && !this.replaying) {
       var inp = b.input || {};
       this.agents[b.id] = { title: inp.description || inp.subagent_type || 'agent', type: inp.subagent_type || 'agent',
@@ -1137,12 +1141,26 @@
     var err = e.is_error || (e.subtype && e.subtype !== 'success');
     var line = this.add(h('div', { class: 'result-line' + (err ? ' err' : '') }, (err ? '✗ ' : '✓ ') + parts.join(' · ')));
     if (err && e.result) line.append(h('div', { dir: 'auto' }, String(e.result).slice(0, 500)));
+    this.turnFilesLine();
     if (!Object.keys(this.perms).length) this.el.classList.remove('bell');      // nothing waits for you any more
     if (this.mark('done')) {
       var self = this;
       toast('Claude finished in ' + this.info.title, err ? 'err' : 'ok', { onclick: function () { SW.activate(self); } });
       SW.notify('Claude finished', this.info.title);
     }
+  };
+
+  // the files Claude wrote in this turn, with a link to review them in the Changes tab
+  P.turnFilesLine = function () {
+    var files = Object.keys(this.turnFiles || {});
+    this.turnFiles = {};
+    if (!files.length) return;
+    var self = this, project = this.info.spec.project || '';
+    var names = files.map(function (f) { return f.slice(f.lastIndexOf('/') + 1); });
+    var shown = names.slice(0, 4).map(function (n) { return h('span', { class: 'tf-name' }, n); });
+    this.add(h('div', { class: 'turn-files' }, h('span', null, files.length === 1 ? '1 file changed:' : files.length + ' files changed:'),
+      shown, names.length > 4 ? h('span', null, '+' + (names.length - 4)) : null,
+      project ? h('button', { onclick: function () { SW.openSession({ kind: 'changes', project: project, focus: files }); } }, 'Review changes') : null));
   };
 
   // ------------------------------------------------------------ permissions

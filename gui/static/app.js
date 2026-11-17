@@ -1537,7 +1537,8 @@
     var had = S.tabs.find(function (t) { return t.id === info.id; });
     if (had) return had;
     var tab = info.spec.kind === 'chat' ? new window.SWChat.ChatTab(info)
-      : info.spec.kind === 'files' ? new window.SWFiles.FilesTab(info) : new Tab(info, estimateSize());
+      : info.spec.kind === 'files' ? new window.SWFiles.FilesTab(info)
+      : info.spec.kind === 'changes' ? new window.SWFiles.ChangesTab(info) : new Tab(info, estimateSize());
     var g = group || L.focused || L.groups[0];
     paintTab(tab);
     tab.group = g;
@@ -1614,8 +1615,12 @@
       if (open) { activate(open); return Promise.resolve(open); }
     }
     if (spec.kind === 'files') {
-      var fx = S.tabs.find(function (t) { return t.isFiles && !t.gone && (t.info.spec.project || '') === (spec.project || ''); });
+      var fx = S.tabs.find(function (t) { return t.isFiles && !t.isChanges && !t.gone && (t.info.spec.project || '') === (spec.project || ''); });
       if (fx) { activate(fx); return Promise.resolve(fx); }
+    }
+    if (spec.kind === 'changes') {
+      var cx = S.tabs.find(function (t) { return t.isChanges && !t.gone && t.project === spec.project; });
+      if (cx) { if (spec.focus) cx.focusOn = spec.focus; activate(cx); cx.refresh(true); return Promise.resolve(cx); }
     }
     if (spec.kind === 'run') {
       var ex = S.tabs.find(function (t) { return t.info.spec.kind === 'run' && t.info.spec.cmdId === spec.cmdId && t.info.spec.project === spec.project && !t.gone; });
@@ -1629,6 +1634,7 @@
     var sz = estimateSize();
     return api('POST', 'sessions', Object.assign({}, spec, { cols: sz.cols, rows: sz.rows }, WID ? { win: WID } : {})).then(function (info) {
       var t = addTab(info, opts.background);
+      if (t && t.isChanges && spec.focus) { t.focusOn = spec.focus; t.refresh(true); }
       renderProjects();
       return t;
     }).catch(function (e) { fail(e); return null; });
@@ -2014,6 +2020,7 @@
       { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
+      { label: 'Changes — review, commit', disabled: !r && !p.localExists, action: function () { openSession({ kind: 'changes', project: p.name }); } },
       { label: 'Server terminal', disabled: !r, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
       { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
@@ -3707,11 +3714,13 @@
         items.push({ id: n + ': command ' + c.id, label: n + ': ' + (running ? 'stop ' : 'run ') + c.name, grp: n, action: function () { runCommand(p, c); } });
       });
       if (hasRemote(p) || p.localExists) items.push({ label: n + ': files', grp: n, action: function () { openFiles(p); } });
+      if (hasRemote(p) || p.localExists) items.push({ label: n + ': changes — review, commit', grp: n, action: function () { openSession({ kind: 'changes', project: n }); } });
       items.push({ label: n + ': git — changes, commit, pull, push', grp: n, action: function () { gitDialog(p); } });
       var gs = S.git[n];
       if (gs && gs.repos === 1) items.push({ id: n + ': switch branch', label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
     });
+    items.push({ label: 'Go to file…', grp: 'app', action: function () { setTimeout(function () { quickOpen(); }, 0); } });
     items.push({ label: 'Claude (no project, home folder)', grp: 'app', action: function () { openSession({ kind: 'chat' }); } });
     items.push({ label: 'Claude sessions — all projects', grp: 'app', action: function () { claudeSessionsDialog(null); } });
     items.push({ label: 'Server terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'server' }); } });
@@ -3732,6 +3741,84 @@
     else items.push({ label: 'Quit (stop every terminal)', grp: 'app', action: quitApp });
     if (S.web) items = items.filter(function (it) { return !/local terminal|VS Code|port forwarding|\(localhost:/.test(it.label); });
     return items;
+  }
+
+  // Ctrl+P: go to a file of the project you are in (opens it in its Files tab)
+  var fileLists = {};
+  function projectFiles(name) {
+    var c = fileLists[name];
+    if (c && Date.now() - c.at < 30000) return Promise.resolve(c.files);
+    return api('GET', 'files/' + encodeURIComponent(name)).then(function (d) {
+      var files = (d.files || []).filter(function (f) { return !/\/$/.test(f); });
+      fileLists[name] = { at: Date.now(), files: files };
+      return files;
+    });
+  }
+  function currentProject() {
+    var n = S.active && S.active.info && S.active.info.spec.project;
+    if (n && project(n)) return project(n);
+    return S.projects.length === 1 ? S.projects[0] : null;
+  }
+  function fileScore(path, words) {
+    var low = path.toLowerCase(), base = low.slice(low.lastIndexOf('/') + 1), score = 0;
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      if (base.indexOf(w) === 0) score += 3;
+      else if (base.indexOf(w) >= 0) score += 2;
+      else if (low.indexOf(w) >= 0) score += 1;
+      else return -1;
+    }
+    return score * 1000 - path.length;
+  }
+  function quickOpen(p) {
+    p = p || currentProject();
+    if (!p) {                                         // which project? pick one first
+      menuAt($('#btn-palette') || document.body, S.projects.map(function (x) { return { label: x.title || x.name, action: function () { quickOpen(x); } }; }));
+      return;
+    }
+    if (modalStack.length) return;
+    var inp = h('input', { placeholder: 'Go to a file of ' + (p.title || p.name) + '…', autofocus: true, dir: 'auto', spellcheck: 'false' });
+    var res = h('div', { class: 'results' }, h('div', { class: 'muted', style: 'padding:10px' }, 'Loading the file list…'));
+    var files = null, shown = [], sel = 0;
+    var overlay = h('div', { class: 'overlay' }, h('div', { class: 'modal palette' }, inp, res));
+    function render() {
+      if (!files) return;
+      var words = inp.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      var hits = words.length ? files.map(function (f) { return { f: f, s: fileScore(f, words) }; }).filter(function (x) { return x.s >= 0; })
+        .sort(function (a, b) { return b.s - a.s; }).slice(0, 60).map(function (x) { return x.f; }) : files.slice(0, 60);
+      shown = hits;
+      sel = Math.min(sel, Math.max(0, shown.length - 1));
+      res.replaceChildren.apply(res, shown.map(function (f, i) {
+        var cut = f.lastIndexOf('/');
+        return h('div', { class: 'res' + (i === sel ? ' sel' : ''), onmousemove: function () { if (sel !== i) { sel = i; mark(); } }, onclick: function () { run(i); } },
+          h('span', { class: 'mono' }, f.slice(cut + 1)), h('span', { class: 'grp mono' }, cut > 0 ? f.slice(0, cut) : ''));
+      }));
+      if (!shown.length) res.append(h('div', { class: 'muted', style: 'padding:10px' }, 'No such file'));
+    }
+    function mark() {
+      Array.prototype.forEach.call(res.children, function (c, i) { c.classList.toggle('sel', i === sel); });
+      if (res.children[sel]) res.children[sel].scrollIntoView({ block: 'nearest' });
+    }
+    function close() { var i = modalStack.indexOf(rec); if (i >= 0) modalStack.splice(i, 1); overlay.remove(); }
+    function run(i) {
+      var f = shown[i];
+      close();
+      if (!f) { if (S.active) S.active.focus(); return; }
+      openSession({ kind: 'files', project: p.name }).then(function (t) { if (t && t.reveal) t.reveal(f); if (t && t.openFile) t.openFile(f); });
+    }
+    var rec = { close: function () { close(); if (S.active) S.active.focus(); } };
+    inp.addEventListener('input', function () { sel = 0; render(); });
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(shown.length - 1, sel + 1); mark(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); mark(); }
+      else if (e.key === 'Enter') { e.preventDefault(); run(sel); }
+    });
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) rec.close(); });
+    modalStack.push(rec);
+    $('#modal-root').append(overlay);
+    projectFiles(p.name).then(function (f) { files = f; render(); })
+      .catch(function (e) { res.replaceChildren(h('div', { class: 'add-err', style: 'margin:10px' }, e.message)); });
+    setTimeout(function () { inp.focus(); }, 20);
   }
 
   function openPalette() {
@@ -3810,6 +3897,8 @@
   function isGlobalShortcut(e) {
     if (e.isComposing || e.keyCode === 229) return false;      // on-screen keyboards (Android), IME input
     if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyP') return true;
+    // Ctrl+P = go to file — except in a terminal, where the shell uses it (previous command)
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyP' && !(S.active && S.active.term)) return true;
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       if (/^Digit[1-9]$/.test(e.code)) return true;
       if (['KeyT', 'KeyW', 'KeyF', 'KeyZ', 'KeyG', 'KeyM', 'Backslash', 'Minus', 'PageUp', 'PageDown'].indexOf(e.code) >= 0) return true;
@@ -3828,7 +3917,8 @@
     e.stopPropagation();
     var gt = L.focused ? L.focused.tabs : S.tabs;
     var idx = gt.indexOf(S.active);
-    if (e.code === 'KeyP') openPalette();
+    if (e.code === 'KeyP' && !e.shiftKey) quickOpen();
+    else if (e.code === 'KeyP') openPalette();
     else if (e.code === 'Backslash') splitGroup(L.focused, 'right');
     else if (e.code === 'Minus') splitGroup(L.focused, 'bottom');
     else if (e.code === 'KeyZ') toggleZoom(L.focused);

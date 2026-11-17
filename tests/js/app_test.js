@@ -108,6 +108,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/tunnels/cheshmeh') { tunnels = body.tunnels.map((t) => Object.assign({ project: 'cheshmeh', state: 'connecting', error: '' }, t, { id: t.id || 'n' + t.remotePort })); res = { tunnels }; }
   else if (url === '/api/usage') res = usage;
   else if (url.startsWith('/api/git/cheshmeh/diff')) res = { diff: '@@ -1 +1 @@\n-a\n+b' };
+  else if (url === '/api/git/cheshmeh/discard') res = { status: gitStatus };
   else if (url.startsWith('/api/git/cheshmeh/commit')) res = { output: 'ok', status: Object.assign({}, gitStatus, { files: [gitStatus.files[1]], ahead: 1 }) };
   else if (url.startsWith('/api/fs/cheshmeh/list')) {
     const p = decodeURIComponent(url.split('path=')[1] || '');
@@ -1118,6 +1119,52 @@ const tests = {
     const res = q('.res').find((e) => e.classList.contains('err'));
     assert.ok(res && res.textContent === '✗1', 'the last run failed with 1');
     SW.closeTab(tab, true); await settle();
+  },
+  async 'Changes tab: changed files, the diff, commit only the ticked ones, discard'() {
+    const SW = global.SW, S = SW.S;
+    const tab = await SW.openSession({ kind: 'changes', project: 'cheshmeh', focus: ['/home/esi/cheshmeh/cheshmeh-web-app/web/x.ts'] }); await settle();
+    assert.ok(tab.isChanges);
+    const rows = q('.ch-row', tab.pane);
+    assert.deepStrictEqual(rows.map((r) => r.querySelector('.ft-name').textContent), ['main.go', 'x.ts']);
+    assert.strictEqual(tab.sel.path, 'web/x.ts', 'the file Claude changed is shown first');
+    assert.ok(calls.some((c) => c.url.indexOf('/api/git/cheshmeh/diff?repo=cheshmeh-web-app&where=local&path=web%2Fx.ts') === 0));
+    // the same tab is reused
+    assert.strictEqual(await SW.openSession({ kind: 'changes', project: 'cheshmeh' }), tab);
+    // leave x.ts out of the commit
+    const box = rows[1].querySelector('input');
+    box.checked = false; box.dispatch('click', { stopPropagation() {} });
+    assert.strictEqual(tab.commitBtn.textContent, 'Commit 1 of 2');
+    tab.msg.value = 'fix main';
+    tab.commit(); await settle();
+    const cm = calls.filter((c) => c.url === '/api/git/cheshmeh/commit').pop();
+    assert.deepStrictEqual([cm.body.repo, cm.body.message, cm.body.files], ['cheshmeh-web-app', 'fix main', ['api/main.go']]);
+    tab.discard([tab.files()[0]]); await settle();
+    const dlg = q('.modal').pop();
+    assert.match(dlg.textContent, /Throw away the changes to api\/main\.go/);
+    q('button', dlg).find((b) => b.textContent === 'Discard').click(); await settle();
+    const dc = calls.filter((c) => c.url === '/api/git/cheshmeh/discard').pop();
+    assert.deepStrictEqual(dc.body.files, ['api/main.go']);
+    SW.closeTab(tab, true); await settle();
+  },
+
+  async 'Ctrl+P: go to a file of the project you are in'() {
+    const SW = global.SW, S = SW.S;
+    for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });   // earlier tests' dialogs
+    const files = await SW.openSession({ kind: 'files', project: 'cheshmeh' }); await settle();
+    global.dispatchEvent({ type: 'keydown', key: 'p', code: 'KeyP', ctrlKey: true, preventDefault() {}, stopPropagation() {} });
+    await settle();
+    const pal = q('.palette').pop();
+    assert.ok(pal, 'the file finder opens');
+    const inp = pal.querySelector('input');
+    inp.value = 'main';
+    inp.dispatch('input');
+    const res = q('.res', pal);
+    assert.strictEqual(res[0].textContent.indexOf('main.go'), 0);
+    assert.ok(!res.some((r) => /\/$/.test(r.textContent)), 'no folders');
+    res[0].click(); await settle();
+    assert.strictEqual(S.active, files);
+    assert.strictEqual(files.file.path, 'cheshmeh-web-app/api/main.go');
+    SW.closeTab(files, true); await settle();
   }
 };
 

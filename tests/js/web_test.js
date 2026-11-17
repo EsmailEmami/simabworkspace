@@ -266,6 +266,16 @@ tests['a connection that died silently (phone asleep, CDN in between) is noticed
   ws.onclose = oc;
 };
 
+tests['a script error on the phone is written to the app log, once'] = async function () {
+  const n = () => calls.filter((c) => c.url === '/api/client-error').length;
+  const before = n();
+  for (let i = 0; i < 2; i++) global.dispatchEvent({ type: 'error', message: 'boom', filename: 'https://x/static/chat.js', lineno: 7, colno: 3, error: { stack: 'at x' } });
+  await settle();
+  assert.strictEqual(n(), before + 1);
+  const c = calls.filter((x) => x.url === '/api/client-error').pop();
+  assert.deepStrictEqual([c.body.message, c.body.where, c.body.stack], ['boom', 'chat.js:7:3', 'at x']);
+};
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of Object.entries(tests)) {

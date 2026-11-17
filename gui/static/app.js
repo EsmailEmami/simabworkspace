@@ -3844,13 +3844,31 @@
     });
   }
 
-  // any script error is shown instead of failing silently
-  var lastErr = '';
+  // any script error is shown instead of failing silently — and written to the app's log, so a
+  // problem on a phone or tablet can be found without a screenshot
+  var lastErr = '', reported = {}, nReported = 0;
+  function reportClientError(msg, where, stack) {
+    var key = msg + '|' + where;
+    if (reported[key] || nReported >= 20) return;
+    reported[key] = 1;
+    nReported++;
+    api('POST', 'client-error', { message: String(msg).slice(0, 500), where: String(where || '').slice(0, 200),
+      stack: String(stack || '').slice(0, 2000), page: location.pathname, ua: navigator.userAgent || '',
+      size: (window.innerWidth || 0) + 'x' + (window.innerHeight || 0) }).catch(function () {});
+  }
   window.addEventListener('error', function (e) {
     var msg = (e && e.message) || 'error';
-    if (msg === lastErr || /ResizeObserver/.test(msg)) return;
+    if (/ResizeObserver/.test(msg)) return;
+    var where = e.filename ? e.filename.split('/').pop() + ':' + e.lineno + ':' + (e.colno || 0) : '';
+    reportClientError(msg, where, e.error && e.error.stack);
+    if (msg === lastErr) return;
     lastErr = msg;
-    toast('Error: ' + msg + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''), 'err', { timeout: 15000 });
+    toast('Error: ' + msg + (where ? ' (' + where + ')' : ''), 'err', { timeout: 15000 });
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    if (r && r.status) return;                     // an API answer (shown where it was asked for)
+    reportClientError((r && r.message) || String(r), 'promise', r && r.stack);
   });
 
   // ------------------------------------------------------------------ updates
@@ -3903,7 +3921,7 @@
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
-    moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, saveLayout: function () { saveLayout(); }
+    moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
   };
 
   // ------------------------------------------------------------------ boot

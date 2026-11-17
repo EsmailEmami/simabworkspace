@@ -472,6 +472,7 @@
 
   P.reportError = function (err, ev) {
     console.error(err, ev);
+    if (SW.reportError) SW.reportError('chat: ' + (err && err.message), 'event ' + ((ev && (ev.type || ev.t)) || '?'), err && err.stack);
     if (this.errShown) return;
     this.errShown = true;
     toast('Chat display error (' + ((ev && (ev.type || ev.t)) || '?') + '): ' + (err && err.message), 'err', { timeout: 20000 });

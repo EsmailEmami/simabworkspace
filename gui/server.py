@@ -5908,6 +5908,22 @@ class App:
             if s:
                 s.win, s.moved = wid, time.time()
 
+    def client_error(self, b: dict) -> dict:
+        """A script error in a browser (phone, tablet…) → one line in the log. At most 30 a minute."""
+        now = time.time()
+        recent = [t for t in getattr(self, "_client_errs", []) if now - t < 60]
+        if len(recent) >= 30:
+            return {"ok": False}
+        self._client_errs = recent + [now]
+
+        def one(k, n):
+            v = b.get(k) if isinstance(b, dict) else ""
+            return " ".join(str(v if isinstance(v, (str, int, float)) else "").split())[:n]
+        who = f"{self.conf.user}@{self.conf.host}" if self.web else "app"
+        log_line(f"CLIENT ERROR [{who}] {one('message', 500)} @ {one('where', 200)} | {one('size', 20)} | {one('ua', 200)}"
+                 + (f"\n  {one('stack', 2000)}" if one('stack', 10) else ""))
+        return {"ok": True}
+
     def _project(self, name: str) -> dict:
         p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
         if not p:
@@ -6751,6 +6767,8 @@ class Handler(BaseHTTPRequestHandler):
         if app.web and route == ("POST", "manual"):
             b = dict(self._body(), local="")
             self._cached_body = b
+        if route == ("POST", "client-error"):
+            return app.client_error(self._body())
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
         if route == ("GET", "state"):

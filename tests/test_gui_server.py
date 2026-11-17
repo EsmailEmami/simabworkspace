@@ -668,6 +668,19 @@ class HttpServer(TmpHome):
         except ValueError:
             return r.status, raw
 
+    def test_browser_errors_go_to_the_log(self):
+        lines = []
+        with mock.patch.object(sw, "log_line", side_effect=lines.append):
+            st, d = self.req("POST", "/api/client-error", {"message": "x is undefined\nsecond line", "where": "chat.js:10:5",
+                                                          "stack": "at f (chat.js:10)", "ua": "Android tablet", "size": "800x1280"})
+            self.assertEqual((st, d), (200, {"ok": True}))
+            self.req("POST", "/api/client-error", {"message": ["not", "a string"]})
+            for _ in range(40):
+                self.req("POST", "/api/client-error", {"message": "loop"})
+        self.assertIn("CLIENT ERROR [app] x is undefined second line @ chat.js:10:5 | 800x1280 | Android tablet", lines[0])
+        self.assertIn("at f (chat.js:10)", lines[0])
+        self.assertEqual(len(lines), 30, "at most 30 a minute")
+
     def test_files_tab_lives_among_the_tabs(self):
         root = os.path.join(self.tmp.name, "loc")
         os.makedirs(os.path.join(root, "a"))

@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.39.0 2026-11-17  Add project: edit the "Not synced" list before the first sync (--ignores);
+#                       sync progress shows the whole transfer (size, time left), not the current file
 #    1.38.0 2026-11-17  Sync: disconnect toast + Reconnect button (mutagen resume) in Sync details;
 #                       sidebar project drag-drop reorder (saved to db, persists on restart);
 #                       sync progress bar: size-first format, "items" instead of "files".
@@ -293,7 +295,7 @@
 
 set -u -o pipefail
 
-VERSION="1.38.0"
+VERSION="1.39.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -201,7 +201,26 @@ class ProjectMerge(unittest.TestCase):
         sess = {"name": "up", "status": "staging-beta", "paused": False, "alpha": {"path": "/tmp"}, "beta": {"host": "h", "path": "/r"},
                 "betaState": {"stagingProgress": {"receivedFiles": 30, "expectedFiles": 120, "receivedSize": 5_000_000, "expectedSize": 20_000_000}}}
         pr = sw.merge_projects([sess], [], {})[0]["sync"]["progress"]
-        self.assertEqual(pr, {"files": 30, "totalFiles": 120, "bytes": 5_000_000, "totalBytes": 20_000_000, "percent": 25})
+        self.assertEqual(pr, {"files": 30, "totalFiles": 120, "bytes": 0, "totalBytes": 0, "eta": None, "percent": 25},
+                         "old Mutagen: by files only, the sizes are of the file being copied now")
+        # Mutagen 0.18: the whole upload = what this machine has minus what the server has
+        up = {"name": "up2", "status": "staging-beta", "alpha": {"path": "/tmp", "totalFileSize": 1_000_000_000},
+              "beta": {"host": "h", "path": "/r", "totalFileSize": 200_000_000,
+                       "stagingProgress": {"path": "big.iso", "receivedFiles": 7, "expectedFiles": 15269,
+                                           "receivedSize": 100_000_000, "expectedSize": 400_000_000, "totalReceivedSize": 200_000_000}}}
+        pr = sw.sync_progress(up, now=1000)
+        self.assertEqual((pr["bytes"], pr["totalBytes"], pr["percent"], pr["eta"]), (200_000_000, 800_000_000, 25, None))
+        up["beta"]["stagingProgress"]["totalReceivedSize"] = 260_000_000
+        pr = sw.sync_progress(up, now=1060 - 30)     # 60 MB in 30 s = 2 MB/s; 540 MB left
+        self.assertEqual(pr["eta"], 270)
+        # the total is never less than what is already known
+        up["beta"]["totalFileSize"] = 990_000_000
+        self.assertEqual(sw.sync_progress(up, now=1031)["totalBytes"], 260_000_000 + 300_000_000)
+        # download: the server sends, this machine receives
+        down = {"name": "d", "alpha": {"path": "/l", "totalFileSize": 0,
+                                       "stagingProgress": {"receivedFiles": 1, "expectedFiles": 2, "totalReceivedSize": 10}},
+                "beta": {"path": "/r", "totalFileSize": 40}}
+        self.assertEqual(sw.sync_progress(down, now=5)["percent"], 25)
         done = dict(sess, status="watching")
         self.assertIsNone(sw.merge_projects([done], [], {})[0]["sync"]["progress"])
         self.assertIsNone(sw.sync_progress({"a": {"expectedFiles": 0}}))

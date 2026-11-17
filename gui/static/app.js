@@ -34,6 +34,20 @@
   function faNum(n) { return String(n); }
   function debounce(fn, ms) { var t; return function () { var a = arguments, self = this; clearTimeout(t); t = setTimeout(function () { fn.apply(self, a); }, ms); }; }
   function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+  // whole transfer: percent · size so far / total · time left · items
+  function progressLabel(pr) {
+    var bits = [pr.percent + '%'];
+    if (pr.totalBytes) bits.push(fmtBytes(pr.bytes) + ' / ' + fmtBytes(pr.totalBytes));
+    if (pr.eta != null) bits.push(fmtEta(pr.eta) + ' left');
+    bits.push(pr.files + '/' + pr.totalFiles + ' items');
+    return bits.join(' · ');
+  }
+  function fmtEta(sec) {
+    if (sec < 60) return '<1 min';
+    if (sec < 3600) return Math.round(sec / 60) + ' min';
+    var hr = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+    return hr + ' h' + (m ? ' ' + m + ' min' : '');
+  }
   function fmtBytes(b) { var u = ['B', 'KB', 'MB', 'GB'], i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return (i ? b.toFixed(1) : b) + ' ' + u[i]; }
 
   // ------------------------------------------------------------------ token + api
@@ -2782,9 +2796,7 @@
 
     var pr = sync && sync.progress;
     if (pr) {
-      var prLabel = pr.totalBytes
-        ? (pr.percent + '% · ' + fmtBytes(pr.bytes) + ' / ' + fmtBytes(pr.totalBytes) + ' · ' + pr.files + '/' + pr.totalFiles + ' items')
-        : (pr.percent + '% · ' + pr.files + '/' + pr.totalFiles + ' items');
+      var prLabel = progressLabel(pr);
       el.append(h('div', { class: 'sbar', title: prLabel },
         h('i', { style: 'width:' + pr.percent + '%' }), h('span', null, prLabel)));
     }
@@ -3478,7 +3490,7 @@
             d.error ? kv('last error', d.error, 'err') : null,
             isErr ? h('div', { class: 'kv' }, h('span', { class: 'k' }), h('span', { class: 'v muted', style: 'font-size:12px' }, 'Click Reconnect to restore the sync after a network outage.')) : null)];
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
-          h('span', null, d.progress.percent + '% · ' + d.progress.files + '/' + d.progress.totalFiles + ' items')));
+          h('span', null, progressLabel(d.progress))));
         rows.push(h('div', { class: 'sec' }, d.conflicts.length ? plural(d.conflicts.length, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
         if (d.conflicts.length) {
           rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, 'Nothing was overwritten. Pick which version to keep — it is copied over the other one. For folders, or to merge by hand, open VS Code.'));

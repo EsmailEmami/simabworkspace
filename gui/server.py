@@ -667,28 +667,67 @@ def mutagen_sessions(timeout=8) -> list:
         return []
 
 
-def sync_progress(session: dict):
-    """Transfer progress Mutagen reports while staging files (None when idle)."""
-    found = []
+_RATE = {}   # session -> [(time, bytes received so far)], for the time left
 
-    def walk(o):
-        if isinstance(o, dict):
-            if "expectedFiles" in o:
-                found.append(o)
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-    walk(session)
-    for pr in found:
-        ef = int(pr.get("expectedFiles") or 0)
-        if ef > 0:
-            rf = int(pr.get("receivedFiles") or 0)
-            es, rs = int(pr.get("expectedSize") or 0), int(pr.get("receivedSize") or 0)
-            pct = int(rs * 100 / es) if es else int(rf * 100 / ef)
-            return {"files": rf, "totalFiles": ef, "bytes": rs, "totalBytes": es, "percent": max(0, min(100, pct))}
-    return None
+
+def sync_progress(session: dict, now=None):
+    """Transfer progress of the whole staging step (None when idle).
+    Mutagen's receivedSize/expectedSize are the file being copied now; totalReceivedSize is
+    everything so far. The total is not reported, so it is the size the sending side scanned
+    minus what the receiving side already has (never less than what is already known)."""
+    sides = [(k, session.get(k)) for k in ("alpha", "beta", "alphaState", "betaState")]
+    sides = [(k, v) for k, v in sides if isinstance(v, dict)]
+    pr = to = frm = None
+    for k, v in sides:
+        sp = v.get("stagingProgress")
+        if isinstance(sp, dict) and int(sp.get("expectedFiles") or 0) > 0:
+            me = "alpha" if k.startswith("alpha") else "beta"
+            other = "beta" if me == "alpha" else "alpha"
+            pr = sp
+            frm = next((x for kk, x in sides if kk.startswith(other) and "totalFileSize" in x), None)
+            to = next((x for kk, x in sides if kk.startswith(me) and "totalFileSize" in x), None)
+            break
+    if pr is None:
+        found = []
+
+        def walk(o):
+            if isinstance(o, dict):
+                if int(o.get("expectedFiles") or 0) > 0:
+                    found.append(o)
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+        walk(session)
+        if not found:
+            return None
+        pr = found[0]
+    ef, rf = int(pr.get("expectedFiles") or 0), int(pr.get("receivedFiles") or 0)
+    cur_size, cur_got = int(pr.get("expectedSize") or 0), int(pr.get("receivedSize") or 0)
+    got = int(pr.get("totalReceivedSize") or 0) if "totalReceivedSize" in pr else None
+    out = {"files": rf, "totalFiles": ef, "bytes": 0, "totalBytes": 0, "eta": None,
+           "percent": max(0, min(100, int(rf * 100 / ef)))}
+    if got is None:
+        return out
+    total = 0
+    if frm is not None:
+        total = int(frm.get("totalFileSize") or 0) - int((to or {}).get("totalFileSize") or 0)
+    total = max(total, got + max(0, cur_size - cur_got))
+    out["bytes"], out["totalBytes"] = got, total
+    if total:
+        out["percent"] = max(0, min(99 if rf < ef else 100, int(got * 100 / total)))
+    # time left from the speed over the last ~minute
+    now = time.time() if now is None else now
+    key = session.get("identifier") or session.get("name") or ""
+    hist = [x for x in _RATE.get(key, []) if now - x[0] <= 60 and x[1] <= got]
+    if not hist or hist[-1][0] < now - 1:
+        hist.append((now, got))
+    _RATE[key] = hist[-30:]
+    t0, b0 = hist[0]
+    if now - t0 >= 5 and got > b0 and total > got:
+        out["eta"] = int((total - got) / ((got - b0) / (now - t0)))
+    return out
 
 
 def _endpoint(e):

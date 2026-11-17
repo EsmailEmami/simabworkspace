@@ -538,13 +538,13 @@ const tests = {
   },
 
   async 'upload progress shows under the project and a toast when it is done'() {
-    state.projects[1].sync = { state: 'busy', label: 'syncing', progress: { files: 30, totalFiles: 120, bytes: 5242880, totalBytes: 20971520, percent: 25 } };
+    state.projects[1].sync = { state: 'busy', label: 'syncing', progress: { files: 30, totalFiles: 120, bytes: 5242880, totalBytes: 20971520, percent: 25, eta: 3900 } };
     await new Promise((r) => setTimeout(r, 5200));       // the project list refreshes every 5 s
     await settle();
     const bar = q('.sbar')[0];
     assert.ok(bar, 'progress bar shown');
     assert.strictEqual(bar.querySelector('i').style.cssText, 'width:25%');
-    assert.match(bar.textContent, /25% · 5\.0 MB \/ 20\.0 MB · 30\/120 items/);
+    assert.match(bar.textContent, /25% · 5\.0 MB \/ 20\.0 MB · 1 h 5 min left · 30\/120 items/);
     state.projects[1].sync = { state: 'ok', label: 'in sync', progress: null };
     await new Promise((r) => setTimeout(r, 5200));
     await settle();

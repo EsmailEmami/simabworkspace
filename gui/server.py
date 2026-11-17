@@ -488,6 +488,16 @@ class Store:
             self.save()
             return s
 
+    # skill repos
+    def skill_repos(self) -> list:
+        with self.lock:
+            return list(self.db.get("skillRepos") or [])
+
+    def set_skill_repos(self, repos: list) -> list:
+        with self.lock:
+            self.db.put("skillRepos", repos)
+            return repos
+
     # per-project run commands
     def commands(self, project: str) -> list:
         return list((self.data["projects"].get(project) or {}).get("commands") or [])
@@ -2254,6 +2264,27 @@ elif op == "stop":
 '''
 
 # args: project dir, conversation id, [before, limit] → one page, newest last:
+SKILL_LIST_PY = r'''import json,os,sys
+p=sys.argv[1]
+d=os.path.join(p,'.claude','skills')
+print(json.dumps(sorted(f for f in os.listdir(d) if f.endswith('.md')) if os.path.isdir(d) else []))
+'''
+
+SKILL_WRITE_PY = r'''import json,os,sys
+p,name=sys.argv[1],sys.argv[2]
+d=os.path.join(p,'.claude','skills')
+os.makedirs(d,exist_ok=True)
+open(os.path.join(d,name),'w').write(sys.stdin.read())
+print(json.dumps({'ok':True}))
+'''
+
+SKILL_DELETE_PY = r'''import json,os,sys
+p,name=sys.argv[1],sys.argv[2]
+path=os.path.join(p,'.claude','skills',name)
+if os.path.isfile(path): os.remove(path)
+print(json.dumps({'ok':True}))
+'''
+
 # {"total": all messages, "start": index of the first one returned, "entries": [...]}
 REMOTE_HISTORY_PY = r'''
 import sys, os, json
@@ -5873,6 +5904,87 @@ class App:
         threading.Thread(target=shutdown_app, args=(self,), daemon=True).start()
         return {"ok": True, "version": info["latest"]}
 
+    # skills -------------------------------------------------------------------
+    def skill_repos(self) -> list:
+        return self.store.skill_repos()
+
+    def set_skill_repos(self, repos: list) -> list:
+        clean = []
+        for r in (repos or []):
+            if not isinstance(r, dict):
+                continue
+            url = str(r.get("url") or "").strip()[:300]
+            name = str(r.get("name") or "").strip()[:100]
+            if url:
+                clean.append({"url": url, "name": name})
+        return self.store.set_skill_repos(clean[:50])
+
+    def fetch_github_skills(self, repo_url: str) -> list:
+        import re as _re
+        m = _re.match(r'https?://github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$', repo_url.strip())
+        if not m:
+            raise ApiError(400, "not a valid GitHub repo URL")
+        owner, repo = m.group(1), m.group(2)
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+        req = urllib.request.Request(api_url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "simab-workspace/1",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            raise ApiError(502, f"GitHub API error: {e.code}")
+        except Exception as e:
+            raise ApiError(502, f"GitHub fetch failed: {e}")
+        skills = []
+        for item in (data.get("tree") or []):
+            if item.get("type") == "blob" and item.get("path", "").endswith(".md"):
+                path = item["path"]
+                skill_name = path.split("/")[-1]
+                skills.append({"name": skill_name, "path": path, "repo": f"{owner}/{repo}"})
+        return skills
+
+    def fetch_skill_content(self, repo_url: str, path: str) -> str:
+        import re as _re
+        m = _re.match(r'https?://github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$', repo_url.strip())
+        if not m:
+            raise ApiError(400, "not a valid GitHub repo URL")
+        owner, repo = m.group(1), m.group(2)
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
+        req = urllib.request.Request(raw_url, headers={"User-Agent": "simab-workspace/1"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            raise ApiError(502, f"fetch failed: {e}")
+
+    def list_project_skills(self, project_name: str) -> list:
+        p = self._project(project_name)
+        if not p.get("remote"):
+            raise ApiError(400, "project has no server")
+        return remote_python(self._project_conf(p), SKILL_LIST_PY, [p["remote"]],
+                             multiplex=bool(self.store.settings.get("sshMultiplex")))
+
+    def install_skill(self, project_name: str, skill_name: str, content: str) -> None:
+        p = self._project(project_name)
+        if not p.get("remote"):
+            raise ApiError(400, "project has no server")
+        if not skill_name.endswith(".md") or "/" in skill_name or "\\" in skill_name:
+            raise ApiError(400, "invalid skill name")
+        remote_python(self._project_conf(p), SKILL_WRITE_PY, [p["remote"], skill_name],
+                      multiplex=bool(self.store.settings.get("sshMultiplex")),
+                      stdin=content.encode())
+
+    def uninstall_skill(self, project_name: str, skill_name: str) -> None:
+        p = self._project(project_name)
+        if not p.get("remote"):
+            raise ApiError(400, "project has no server")
+        if not skill_name.endswith(".md") or "/" in skill_name or "\\" in skill_name:
+            raise ApiError(400, "invalid skill name")
+        remote_python(self._project_conf(p), SKILL_DELETE_PY, [p["remote"], skill_name],
+                      multiplex=bool(self.store.settings.get("sshMultiplex")))
+
     # git badges ---------------------------------------------------------------
     def git_summary_one(self, p: dict, fetch=False) -> dict:
         info = git_repos(self, p)
@@ -7567,6 +7679,39 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "quit"):
             threading.Thread(target=shutdown_app, args=(app,), daemon=True).start()
             return {"ok": True}
+        if parts and parts[0] == "skills":
+            act = parts[1] if len(parts) > 1 else ""
+            if method == "GET" and act == "repos":
+                return {"repos": app.skill_repos()}
+            if method == "PUT" and act == "repos":
+                repos = (body or {}).get("repos")
+                if not isinstance(repos, list):
+                    raise ApiError(400, "bad request")
+                return {"repos": app.set_skill_repos(repos)}
+            if method == "GET" and act == "list" and len(parts) == 3:
+                import base64 as _b64
+                try:
+                    repo_url = _b64.urlsafe_b64decode(parts[2] + "==").decode()
+                except Exception:
+                    raise ApiError(400, "bad repo url")
+                return {"skills": app.fetch_github_skills(repo_url)}
+            if method == "GET" and act == "installed" and len(parts) == 3:
+                return {"skills": app.list_project_skills(parts[2])}
+            if method == "POST" and act == "install" and len(parts) == 3:
+                d = body or {}
+                project = parts[2]
+                skill_name = str(d.get("name") or "")
+                repo_url = str(d.get("repo_url") or "")
+                skill_path = str(d.get("path") or "")
+                if not skill_name or not repo_url or not skill_path:
+                    raise ApiError(400, "missing fields")
+                content = app.fetch_skill_content(repo_url, skill_path)
+                app.install_skill(project, skill_name, content)
+                return {"ok": True}
+            if method == "DELETE" and act == "installed" and len(parts) == 4:
+                app.uninstall_skill(parts[2], parts[3])
+                return {"ok": True}
+            raise ApiError(404, "not found")
         raise ApiError(404, "not found")
 
     def _websocket(self, query: dict):

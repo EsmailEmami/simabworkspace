@@ -969,3 +969,27 @@ body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: non
 .ch-hunk-head { display: flex; align-items: center; gap: 4px; }
 .ch-hunk-box { flex: none; cursor: pointer; margin: 0 2px; }
 .ch-hunk-off { opacity: 0.35; }
+
+/* ---- Skills dialog ---- */
+.sk-body { display: flex; gap: 12px; min-height: 320px; }
+.sk-left { width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.sk-right { flex: 1; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.sk-section-head { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; padding: 2px 0; }
+.sk-add-row { display: flex; gap: 6px; align-items: center; }
+.sk-repos { display: flex; flex-direction: column; gap: 2px; }
+.sk-repo-row { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 5px; cursor: pointer; }
+.sk-repo-row:hover { background: var(--hover); }
+.sk-repo-row.sel { background: var(--sel); }
+.sk-repo-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.sk-skills { display: flex; flex-direction: column; gap: 2px; }
+.sk-skill-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 5px; }
+.sk-skill-row:hover { background: var(--hover); }
+.sk-skill-name { flex: 1; font-size: 13px; }
+.sk-inst { display: flex; flex-direction: column; gap: 2px; }
+.sk-inst-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 5px; font-size: 12px; }
+.sk-inst-row:hover { background: var(--hover); }
+.sk-inst-row span { flex: 1; }
+.sk-empty { font-size: 12px; color: var(--dim); padding: 8px 6px; }
+.sk-status { font-size: 12px; padding: 4px 6px; border-radius: 4px; }
+.sk-status.ok { color: var(--ok); }
+.sk-status.err { color: var(--err); }

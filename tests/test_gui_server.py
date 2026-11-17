@@ -2273,3 +2273,75 @@ class GitApplyCached(GitFlow):
         repo.commit("mixed commit", files=["whole.txt"], patches={"patched.txt": patch})
         log = repo.log()
         self.assertEqual(log["commits"][0]["subject"], "mixed commit")
+
+
+class SkillsRegistry(TmpHome):
+    """Skills Registry: store, App methods, and HTTP routes."""
+
+    def setUp(self):
+        super().setUp()
+        self.app = sw.App(self.store, sw.ServerConf("", "h"))
+
+    # -- Store --
+
+    def test_skill_repos_start_empty(self):
+        self.assertEqual(self.store.skill_repos(), [])
+
+    def test_skill_repos_roundtrip(self):
+        repos = [{"url": "https://github.com/owner/repo", "name": "owner/repo"}]
+        out = self.store.set_skill_repos(repos)
+        self.assertEqual(out, repos)
+        self.assertEqual(self.store.skill_repos(), repos)
+        # persists across reload
+        self.assertEqual(sw.Store(self.store.path).skill_repos(), repos)
+
+    # -- App.set_skill_repos validation --
+
+    def test_set_skill_repos_cleans_input(self):
+        dirty = [
+            {"url": "https://github.com/a/b", "name": "a/b"},
+            {"url": "", "name": "empty url"},        # dropped
+            "not a dict",                             # dropped
+            {"url": "https://github.com/c/d", "name": "x" * 200},  # name truncated
+        ]
+        out = self.app.set_skill_repos(dirty)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["url"], "https://github.com/a/b")
+        self.assertEqual(len(out[1]["name"]), 100)
+
+    # -- list_project_skills, install_skill, uninstall_skill --
+
+    def test_list_install_uninstall_skill(self):
+        with tempfile.TemporaryDirectory() as remote:
+            self.store.add_manual({"name": "sk-proj", "remote": remote})
+
+            def fake_remote(conf, code, args, **kw):
+                stdin = kw.get("stdin") or b""
+                r = subprocess.run(
+                    [sys.executable, "-I", "-c", code] + args,
+                    capture_output=True, input=stdin, timeout=10
+                )
+                return json.loads(r.stdout)
+
+            with mock.patch.object(sw, "remote_python", side_effect=fake_remote):
+                # list: empty at start
+                lst = self.app.list_project_skills("sk-proj")
+                self.assertEqual(lst, [])
+
+                # install
+                self.app.install_skill("sk-proj", "myhook.md", "# My Hook\ncontent")
+                lst2 = self.app.list_project_skills("sk-proj")
+                self.assertEqual(lst2, ["myhook.md"])
+
+                # uninstall
+                self.app.uninstall_skill("sk-proj", "myhook.md")
+                lst3 = self.app.list_project_skills("sk-proj")
+                self.assertEqual(lst3, [])
+
+    def test_install_skill_rejects_bad_name(self):
+        with tempfile.TemporaryDirectory() as remote:
+            self.store.add_manual({"name": "sk-proj2", "remote": remote})
+            with self.assertRaises(sw.ApiError):
+                self.app.install_skill("sk-proj2", "../escape.md", "bad")
+            with self.assertRaises(sw.ApiError):
+                self.app.install_skill("sk-proj2", "no-extension.txt", "bad")

@@ -2030,6 +2030,7 @@
       { label: 'Copy local path', disabled: !p.localExists, action: function () { copyText(fullLocal(p.local)); } },
       '-',
       { label: 'Git…', action: function () { gitDialog(p); } },
+      { label: 'Skills…', disabled: !r, action: function () { skillsDialog(p); } },
       { label: 'Docker containers…', disabled: !r, k: dockerCount(p.name), action: function () { dockerDialog(p); } },
       { label: 'Port forwarding…', disabled: !r, k: tunnelCount(p.name), action: function () { tunnelsDialog(p); } },
       { label: 'Rename…', action: function () { renameProject(p); } },
@@ -2290,6 +2291,123 @@
       render();
     }).catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
     setTimeout(function () { filter.focus(); }, 40);
+  }
+
+  function skillsDialog(p) {
+    var skRepos = [], skills = [], installed = [], selRepo = null;
+    var repoList = h('div', { class: 'sk-repos' });
+    var repoInput = h('input', { class: 'inp', placeholder: 'https://github.com/owner/repo', style: 'flex:1', autofocus: true });
+    var skillList = h('div', { class: 'sk-skills' });
+    var instList = h('div', { class: 'sk-inst' });
+    var statusEl = h('div', { class: 'sk-status hidden' });
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg || '';
+      statusEl.className = 'sk-status' + (msg ? '' : ' hidden') + (cls ? ' ' + cls : '');
+    }
+
+    function renderRepos() {
+      repoList.replaceChildren.apply(repoList, skRepos.map(function (r, i) {
+        var active = selRepo && selRepo.url === r.url;
+        return h('div', { class: 'sk-repo-row' + (active ? ' sel' : ''), onclick: function () { selRepo = r; renderRepos(); loadSkills(r); } },
+          h('span', { class: 'sk-repo-name' }, r.name || r.url.replace('https://github.com/', '')),
+          h('button', { class: 'icon-btn', title: 'Remove', onclick: function (e) {
+            e.stopPropagation();
+            skRepos.splice(i, 1);
+            if (selRepo && selRepo.url === r.url) { selRepo = null; skills = []; skillList.replaceChildren(); }
+            saveRepos(); renderRepos();
+          } }, '✕'));
+      }));
+    }
+
+    function saveRepos() { api('PUT', 'skills/repos', { repos: skRepos }).catch(fail); }
+
+    function loadSkills(repo) {
+      setStatus('Loading skills…');
+      skillList.replaceChildren();
+      var b64 = btoa(unescape(encodeURIComponent(repo.url))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      api('GET', 'skills/list/' + b64).then(function (d) {
+        skills = d.skills || [];
+        setStatus('');
+        renderSkills();
+      }).catch(function (e) { setStatus('Failed: ' + (e.message || 'error'), 'err'); });
+    }
+
+    function renderSkills() {
+      skillList.replaceChildren.apply(skillList, skills.length
+        ? skills.map(function (s) {
+          var isInst = installed.indexOf(s.name) >= 0;
+          return h('div', { class: 'sk-skill-row' },
+            h('span', { class: 'sk-skill-name' }, s.name.replace(/\.md$/, '')),
+            isInst
+              ? h('button', { class: 'btn sm danger', onclick: function () { uninstallSkill(s.name); } }, 'Uninstall')
+              : h('button', { class: 'btn sm', onclick: function () { installSkill(s); } }, 'Install'));
+        })
+        : [h('div', { class: 'sk-empty' }, 'No .md skills found in this repo')]);
+    }
+
+    function loadInstalled() {
+      if (!hasRemote(p)) { renderInstalled(); return; }
+      api('GET', 'skills/installed/' + encodeURIComponent(p.name)).then(function (d) {
+        installed = d.skills || [];
+        renderInstalled();
+        if (skills.length) renderSkills();
+      }).catch(function () {});
+    }
+
+    function renderInstalled() {
+      instList.replaceChildren.apply(instList, installed.length
+        ? installed.map(function (name) {
+          return h('div', { class: 'sk-inst-row' },
+            h('span', null, name.replace(/\.md$/, '')),
+            h('button', { class: 'btn sm danger', onclick: function () { uninstallSkill(name); } }, 'Remove'));
+        })
+        : [h('div', { class: 'sk-empty' }, hasRemote(p) ? 'No skills installed' : 'Project has no server')]);
+    }
+
+    function installSkill(s) {
+      if (!hasRemote(p)) { toast('Project has no server', 'err'); return; }
+      if (!selRepo) return;
+      setStatus('Installing…');
+      api('POST', 'skills/install/' + encodeURIComponent(p.name), { name: s.name, repo_url: selRepo.url, path: s.path })
+        .then(function () { setStatus('Installed', 'ok'); loadInstalled(); })
+        .catch(function (e) { setStatus('Install failed: ' + (e.message || 'error'), 'err'); });
+    }
+
+    function uninstallSkill(name) {
+      api('DELETE', 'skills/installed/' + encodeURIComponent(p.name) + '/' + encodeURIComponent(name))
+        .then(function () { loadInstalled(); if (skills.length) renderSkills(); })
+        .catch(fail);
+    }
+
+    api('GET', 'skills/repos').then(function (d) {
+      skRepos = d.repos || [];
+      renderRepos();
+    }).catch(fail);
+    loadInstalled();
+
+    var body = h('div', { class: 'sk-body' },
+      h('div', { class: 'sk-left' },
+        h('div', { class: 'sk-section-head' }, 'Repositories'),
+        h('div', { class: 'sk-add-row' }, repoInput,
+          h('button', { class: 'btn sm', onclick: function () {
+            var url = repoInput.value.trim();
+            if (!url) return;
+            if (!/^https?:\/\/github\.com\//.test(url)) { toast('Enter a GitHub repo URL', 'err'); return; }
+            var name = url.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+            skRepos.push({ url: url, name: name });
+            saveRepos(); renderRepos(); repoInput.value = '';
+            selRepo = skRepos[skRepos.length - 1]; renderRepos(); loadSkills(selRepo);
+          } }, 'Add')),
+        repoList,
+        h('div', { class: 'sk-section-head', style: 'margin-top:12px' }, 'Installed in ' + p.name),
+        instList),
+      h('div', { class: 'sk-right' },
+        h('div', { class: 'sk-section-head', id: 'sk-right-head' }, 'Select a repository →'),
+        statusEl,
+        skillList));
+
+    openModal({ title: 'Skills — ' + p.name, size: 'wide', body: body });
   }
 
   function gitDialog(p) {

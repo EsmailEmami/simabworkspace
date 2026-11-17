@@ -926,3 +926,9 @@ body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: non
 .devices .dev { display: flex; align-items: center; gap: 8px; padding: 4px 0 4px 10px; border-left: 2px solid var(--line); margin: 0 0 4px 2px; }
 .devices .dev .grow { flex: 1; min-width: 0; }
 .totp-key { font-size: 15px; letter-spacing: 1px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; user-select: all; word-break: break-all; }
+
+.cmd .res { font-size: 10.5px; flex: none; }
+.cmd .res.ok { color: var(--ok); }
+.cmd .res.err { color: var(--err); }
+.cmd .res.link { color: var(--accent); text-decoration: none; padding: 0 3px; }
+.urlbar { position: absolute; top: 6px; right: 14px; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg2); font-size: 12px; }

@@ -499,35 +499,12 @@ class Store:
         return None
 
     def set_commands(self, project: str, commands) -> list:
-        if not isinstance(commands, list) or len(commands) > 50:
-            raise ApiError(400, "invalid command list")
-        out, seen = [], set()
-        for c in commands:
-            if not isinstance(c, dict):
-                raise ApiError(400, "invalid command list")
-            cid = c.get("id") if isinstance(c.get("id"), str) and re.fullmatch(r"[a-z0-9]{4,16}", c.get("id") or "") else secrets.token_hex(4)
-            while cid in seen:
-                cid = secrets.token_hex(4)
-            seen.add(cid)
-            where = c.get("where") or "local"
-            if where not in WHERE:
-                raise ApiError(400, "where must be local or server")
-            url = clean_str(c.get("url"), 300, "URL")
-            sub = clean_subdir(c.get("cwd"))
-            if url and not re.match(r"https?://", url):
-                raise ApiError(400, "the URL must start with http:// or https://")
-            out.append({
-                "id": cid,
-                "name": clean_str(c.get("name"), 60, "name", required=True),
-                "cmd": clean_str(c.get("cmd"), 4000, "command", required=True),
-                "where": where,
-                "url": url,
-                "cwd": sub,
-            })
+        out = clean_commands(commands)
         with self.lock:
             self.data["projects"].setdefault(project, {})["commands"] = out
             self.save()
         return out
+
 
     # last Claude mode/model chosen in a chat: per project, and as the general default
     def set_chat_prefs(self, project: str, mode=None, model=None, effort=None):
@@ -700,6 +677,90 @@ def _endpoint(e):
     e = e or {}
     return {"path": e.get("path") or "", "host": e.get("host") or "",
             "user": e.get("user") or "", "port": str(e.get("port") or "")}
+
+
+def clean_commands(commands) -> list:
+    """A checked list of run commands (from the editor or a project's .simab.json)."""
+    if not isinstance(commands, list) or len(commands) > 50:
+        raise ApiError(400, "invalid command list")
+    out, seen = [], set()
+    for c in commands:
+        if not isinstance(c, dict):
+            raise ApiError(400, "invalid command list")
+        cid = c.get("id") if isinstance(c.get("id"), str) and re.fullmatch(r"[a-z0-9]{4,16}", c.get("id") or "") else secrets.token_hex(4)
+        while cid in seen:
+            cid = secrets.token_hex(4)
+        seen.add(cid)
+        where = c.get("where") or "local"
+        if where not in WHERE:
+            raise ApiError(400, "where must be local or server")
+        url = clean_str(c.get("url"), 300, "URL")
+        sub = clean_subdir(c.get("cwd"))
+        if url and not re.match(r"https?://", url):
+            raise ApiError(400, "the URL must start with http:// or https://")
+        out.append({
+            "id": cid,
+            "name": clean_str(c.get("name"), 60, "name", required=True),
+            "cmd": clean_str(c.get("cmd"), 4000, "command", required=True),
+            "where": where,
+            "url": url,
+            "cwd": sub,
+        })
+    return out
+
+
+# Shared run commands live in the project itself: .simab.json in its root (on the server, and in
+# the synced local copy) — every device and every person on the project sees the same list.
+SHARED_FILE = ".simab.json"
+SHARED_PY = r'''
+import json, os, sys
+op, root = sys.argv[1], os.path.expanduser(sys.argv[2])
+f = os.path.join(root, ".simab.json")
+try:
+    with open(f, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        data = {}
+except (OSError, ValueError):
+    data = {}
+if op == "write":
+    if not os.path.isdir(root):
+        print(json.dumps({"error": "project folder not found"})); sys.exit()
+    new = json.loads(sys.stdin.read() or "[]")
+    if new:
+        data["commands"] = new
+    else:
+        data.pop("commands", None)
+    if data:
+        tmp = f + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp, f)
+    elif os.path.exists(f):
+        os.remove(f)
+    print(json.dumps({"ok": True}))
+else:
+    print(json.dumps({"commands": data.get("commands") if isinstance(data.get("commands"), list) else []}))
+'''
+
+
+def shared_id(c: dict) -> str:
+    return "s" + hashlib.sha1((c.get("name", "") + "\0" + c.get("cmd", "")).encode()).hexdigest()[:9]
+
+
+def shared_clean(raw) -> list:
+    """Commands from a .simab.json (written by hand maybe): bad entries are skipped, ids come from the content."""
+    out = []
+    for c in (raw if isinstance(raw, list) else [])[:50]:
+        try:
+            x = clean_commands([dict(c, id="tmp0")])[0] if isinstance(c, dict) else None
+        except ApiError:
+            x = None
+        if x:
+            x["id"], x["shared"] = shared_id(x), True
+            out.append(x)
+    return out
 
 
 def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
@@ -910,7 +971,7 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     if kind == "run":
         if not project:
             raise ApiError(400, "run commands belong to a project")
-        cmd = store.command(pname, spec.get("cmdId") or "")
+        cmd = spec.get("_cmd") if isinstance(spec.get("_cmd"), dict) else store.command(pname, spec.get("cmdId") or "")
         if not cmd:
             raise ApiError(404, "this command no longer exists")
         where = cmd["where"]
@@ -4879,6 +4940,8 @@ class App:
         self._docker_seq = 0
         self._docker_error = ""
         self._docker_checked = 0.0
+        self._shared = {}             # project -> (time, [shared commands from .simab.json])
+        self._shared_busy = set()
         self.pusher = None            # web version: Pusher of the web server (phone notifications)
         self.push_msgs = collections.deque(maxlen=30)
         self.push_seq = 0
@@ -4900,8 +4963,82 @@ class App:
         if self.web:                  # "local" would be the web server's own disk
             for x in p:
                 x["local"], x["localExists"] = "", False
+        for x in p:
+            x["commands"] = [c for c in x["commands"] if not c.get("shared")] + self.shared_commands(x)
         self._projects_cache = (time.time(), p)
         return p
+
+    SHARED_TTL = 30
+
+    def _shared_side(self, p: dict) -> str:
+        if p.get("localExists") and not self.web:
+            return "local"
+        return "server" if p.get("remote") and self.conf.configured else ""
+
+    def shared_commands(self, p: dict) -> list:
+        """The project's .simab.json commands from the cache; an old cache is refreshed in the background."""
+        t, cmds = self._shared.get(p["name"], (0.0, []))
+        if time.time() - t > self.SHARED_TTL and p["name"] not in self._shared_busy and self._shared_side(p):
+            self._shared_busy.add(p["name"])
+            threading.Thread(target=self._shared_refresh, args=(dict(p),), daemon=True).start()
+        return [dict(c) for c in cmds]
+
+    def _shared_refresh(self, p: dict):
+        try:
+            cmds = shared_clean(self._shared_call(p, "read").get("commands"))
+            old = self._shared.get(p["name"], (0.0, None))[1]
+            self._shared[p["name"]] = (time.time(), cmds)
+            if old != cmds:
+                self.invalidate()
+        except ApiError:
+            self._shared[p["name"]] = (time.time(), self._shared.get(p["name"], (0.0, []))[1])
+        finally:
+            self._shared_busy.discard(p["name"])
+
+    def _shared_call(self, p: dict, op: str, stdin: bytes = None) -> dict:
+        side = self._shared_side(p)
+        if side == "local":
+            r = subprocess.run([sys.executable, "-I", "-c", SHARED_PY, op, p["local"]], input=stdin or b"",
+                               capture_output=True, timeout=20)
+            try:
+                res = json.loads(r.stdout.decode("utf-8", "replace") or "null")
+            except ValueError:
+                res = None
+        elif side == "server":
+            res = remote_python(self._project_conf(p), SHARED_PY, [op, p["remote"]], stdin=stdin or b"",
+                                multiplex=bool(self.store.settings.get("sshMultiplex")))
+        else:
+            raise ApiError(400, "this project has no folder for shared commands")
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer while reading .simab.json")
+        if res.get("error"):
+            raise ApiError(400, str(res["error"]))
+        return res
+
+    def command(self, project: str, cid: str):
+        """A run command of the project: this workspace's own, or a shared one (.simab.json)."""
+        c = self.store.command(project, cid)
+        if c:
+            return c
+        t, cmds = self._shared.get(project, (0.0, []))
+        return next((dict(x) for x in cmds if x["id"] == cid), None)
+
+    def set_commands(self, project: str, commands) -> list:
+        """From the editor: rows marked shared go to the project's .simab.json, the rest stay here."""
+        p = self._project(project)
+        if not isinstance(commands, list):
+            raise ApiError(400, "invalid command list")
+        mine = [c for c in commands if not (isinstance(c, dict) and c.get("shared"))]
+        shared = [c for c in commands if isinstance(c, dict) and c.get("shared")]
+        before = self._shared.get(project, (0.0, []))[1]
+        out = self.store.set_commands(project, mine)
+        if shared or before:
+            clean = clean_commands([dict(c, id="tmp0") for c in shared])
+            plain = [{k: c[k] for k in ("name", "cmd", "where", "cwd", "url") if c.get(k)} for c in clean]
+            self._shared_call(p, "write", json.dumps(plain, ensure_ascii=False).encode())
+            self._shared[project] = (time.time(), shared_clean(plain))
+        self.invalidate()
+        return out + [dict(c) for c in self._shared.get(project, (0.0, []))[1]]
 
     def invalidate(self):
         self._projects_cache = (0.0, [])
@@ -5016,14 +5153,16 @@ class App:
                 self.sessions[sid] = s
             self._remember()
             return s.info()
-        body = {k: v for k, v in body.items() if k != "_docker"}
+        body = {k: v for k, v in body.items() if k not in ("_docker", "_cmd")}
+        if body.get("kind") == "run":
+            body["_cmd"] = self.command(body.get("project") or "", body.get("cmdId") or "")
         if self.web:
             if body.get("kind") not in WEB_KINDS:
                 raise ApiError(403, "not available in the web version")
             if body.get("kind") == "shell":
                 body["where"] = "server"
             if body.get("kind") == "run":
-                c = self.store.command(body.get("project") or "", body.get("cmdId") or "")
+                c = body.get("_cmd")
                 if c and c.get("where") != "server":
                     raise ApiError(403, "only server commands run in the web version")
         if body.get("kind") == "docker":
@@ -5038,7 +5177,7 @@ class App:
         s.start()
         sp = built["spec"]
         if sp["kind"] == "run":
-            cmd = self.store.command(sp["project"], sp["cmdId"]) or {}
+            cmd = self.command(sp["project"], sp["cmdId"]) or {}
             self.activity.add("run", sp["project"], s.title, cmdId=sp["cmdId"], cmd=cmd.get("cmd", ""), where=sp["where"])
         elif sp["kind"] == "docker":
             self.activity.add("docker-" + sp["action"], sp["project"], sp["container"])
@@ -7089,8 +7228,8 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             cmds = b.get("commands") if isinstance(b.get("commands"), list) else []
             for c in cmds:
-                if isinstance(c, dict):
-                    c["where"] = "server"
+                if isinstance(c, dict) and not c.get("shared"):
+                    c["where"] = "server"         # shared ones keep theirs: the installed app runs the local ones
             self._cached_body = {"commands": cmds}
         if app.web and route == ("POST", "manual"):
             b = dict(self._body(), local="")
@@ -7109,9 +7248,7 @@ class Handler(BaseHTTPRequestHandler):
             s = app.store.update_settings(self._body())
             return {"settings": s}
         if route == ("POST", "commands") and len(parts) == 2:
-            cmds = app.store.set_commands(parts[1], self._body().get("commands"))
-            app.invalidate()
-            return {"commands": cmds}
+            return {"commands": app.set_commands(parts[1], self._body().get("commands"))}
         if route == ("GET", "suggest") and len(parts) == 2:
             p = next((x for x in app.projects() if x["name"] == parts[1]), None)
             return {"suggestions": project_suggestions(app, p)}

@@ -1102,6 +1102,22 @@ const tests = {
     tab.querySelector('.x').click();
     await settle();
     assert.strictEqual(q('.tab').length, before - 1);
+  },
+  async 'run commands: the address a command prints gets an Open link; the last result shows; shared rows are marked'() {
+    const SW = global.SW, S = SW.S;
+    const tab = await SW.openSession({ kind: 'run', project: 'cheshmeh', cmdId: 'c1' }); await settle();
+    const ws = global.sockets[global.sockets.length - 1];
+    ws.onmessage({ data: JSON.stringify({ t: 'o', d: '\x1b[32m** Angular Live Development Server is listening, open your browser on http://localhost:4200/ **\x1b[0m' }) });
+    assert.strictEqual(tab.foundUrl, 'http://localhost:4200/');
+    const bar = tab.pane.querySelector('.urlbar');
+    assert.ok(bar && /localhost:4200/.test(bar.textContent));
+    assert.strictEqual(bar.querySelector('a').getAttribute('href'), 'http://localhost:4200/');
+    assert.ok(q('.res').some((e) => e.classList.contains('link')), 'an ↗ next to the running command');
+    ws.onmessage({ data: JSON.stringify({ t: 'x', code: 1 }) });
+    SW.renderProjects();
+    const res = q('.res').find((e) => e.classList.contains('err'));
+    assert.ok(res && res.textContent === '✗1', 'the last run failed with 1');
+    SW.closeTab(tab, true); await settle();
   }
 };
 

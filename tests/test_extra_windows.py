@@ -114,6 +114,8 @@ def load_tests(loader, tests, pattern):
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(ExtraWindows))
     suite.addTest(ExtraWindowsHttp("test_windows_routes"))
+    suite.addTests(loader.loadTestsFromTestCase(TabsSurviveARestart))
+    suite.addTests(loader.loadTestsFromTestCase(SharedRunCommands))
     return suite
 
 
@@ -205,3 +207,51 @@ class TabsSurviveARestart(base.TmpHome):
         web = sw.App(self.store, sw.ServerConf("esi", "h"), web=True)
         web.restore_live(wait=True)
         self.assertEqual(list(web.sessions), ["cccccccccccc"])
+
+
+class SharedRunCommands(base.TmpHome):
+    """.simab.json in the project: run commands every device and every person on the project gets."""
+    def setUp(self):
+        super().setUp()
+        self.mut = mock.patch.object(sw, "mutagen_sessions", return_value=[])
+        self.mut.start()
+        self.store.add_manual({"name": "p", "local": self.tmp.name})
+        self.app = sw.App(self.store, sw.ServerConf("", "h"))
+        self.app.invalidate()
+
+    def tearDown(self):
+        self.mut.stop()
+        self.app.shutdown_sessions()
+        super().tearDown()
+
+    def cmds(self):
+        self.app._shared_refresh(self.app._project("p"))
+        self.app.invalidate()
+        return self.app._project("p")["commands"]
+
+    def test_shared_rows_go_to_the_project_file(self):
+        import json as _j
+        out = self.app.set_commands("p", [{"name": "mine", "cmd": "make", "where": "local"},
+                                          {"name": "web", "cmd": "npm start", "where": "local", "cwd": "", "url": "http://localhost:4200", "shared": True}])
+        f = Path(self.tmp.name) / ".simab.json"
+        self.assertEqual(_j.loads(f.read_text())["commands"], [{"name": "web", "cmd": "npm start", "where": "local", "url": "http://localhost:4200"}])
+        self.assertEqual([(c["name"], bool(c.get("shared"))) for c in out], [("mine", False), ("web", True)])
+        self.assertEqual([c["name"] for c in self.store.commands("p")], ["mine"], "not kept twice")
+        listed = self.cmds()
+        self.assertEqual([(c["name"], bool(c.get("shared"))) for c in listed], [("mine", False), ("web", True)])
+        sid = listed[1]["id"]
+        self.assertEqual(self.cmds()[1]["id"], sid, "the id stays the same")
+        # someone else edits the file by hand (other keys are kept when we write)
+        f.write_text(_j.dumps({"other": 1, "commands": [{"name": "api", "cmd": "go run .", "where": "local"}, {"bad": 1}, "x"]}))
+        self.assertEqual([c["name"] for c in self.cmds()], ["mine", "api"])
+        self.assertEqual(self.app.command("p", self.cmds()[1]["id"])["cmd"], "go run .")
+        built = sw.build_spec({"kind": "run", "project": "p", "cmdId": "x", "_cmd": self.app.command("p", self.cmds()[1]["id"])},
+                              sw.ServerConf("esi", "h"), self.store, self.app.projects(max_age=0))
+        self.assertEqual((built["spec"]["where"], built["title"]), ("local", "api"))
+        # all unshared → the commands leave the file, the file keeps the rest
+        self.app.set_commands("p", [{"name": "mine", "cmd": "make", "where": "local"}])
+        self.assertEqual(_j.loads(f.read_text()), {"other": 1})
+
+    def test_a_client_cannot_send_its_own_command(self):
+        with self.assertRaises(sw.ApiError):
+            self.app.create_session({"kind": "run", "project": "p", "cmdId": "nope", "_cmd": {"cmd": "rm -rf ~", "where": "local", "name": "x", "id": "nope"}})

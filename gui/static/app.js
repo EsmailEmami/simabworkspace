@@ -771,7 +771,7 @@
       var msg;
       self.lastRx = Date.now();
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (msg.t === 'o') { self.term.write(msg.d); self.onOutput(); }
+      if (msg.t === 'o') { self.term.write(msg.d); self.onOutput(); if (self.info.spec.kind === 'run' && !self.foundUrl) self.scanUrl(msg.d); }
       else if (msg.t === 's') {
         self.term.reset();
         if (msg.d) self.term.write(msg.d);
@@ -832,6 +832,26 @@
       var self = this;
       toast(this.info.title + (ok ? ' finished' : ' failed (code ' + code + ')'), ok ? 'ok' : 'err', { onclick: function () { activate(self); } });
     }
+  };
+
+  // a run command printed the address it serves (Angular, Vite, Django…): offer to open it
+  var URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})\b[^\s"'\x1b]*/;
+  Tab.prototype.scanUrl = function (text) {
+    var m = URL_RE.exec(String(text || '').replace(/\x1b\[[0-9;]*m/g, ''));
+    if (!m) return;
+    var port = Number(m[1]);
+    this.foundUrl = 'http://localhost:' + port + m[0].replace(/^[^/]*\/\/[^/]*/, '').replace(/[.,;)]+$/, '');
+    this.foundPort = port;
+    var self = this, server = this.info.spec.where === 'server';
+    var p = project(this.info.spec.project);
+    if (this.urlBar) this.urlBar.remove();
+    this.urlBar = h('div', { class: 'urlbar' }, h('span', { class: 'mono' }, (server ? 'on the server · ' : '') + 'localhost:' + port),
+      !server ? h('a', { class: 'btn sm', href: this.foundUrl, target: '_blank', rel: 'noopener' }, 'Open ↗')
+        : !S.web && p ? h('button', { class: 'btn sm', onclick: function () { tunnelsDialog(p, { name: self.info.title, remotePort: port, localPort: port < 1024 ? port + 10000 : port, http: true }); } }, 'Forward to this computer…')
+          : h('span', { class: 'muted', title: 'Port forwarding is in the installed app' }, 'port forwarding: installed app'),
+      h('button', { class: 'icon-btn', title: 'Hide', onclick: function () { self.urlBar.remove(); } }, '✕'));
+    this.body.append(this.urlBar);
+    renderProjects();
   };
 
   Tab.prototype.setBanner = function (text, cls, noButtons, onlyClose) {
@@ -1612,6 +1632,11 @@
       renderProjects();
       return t;
     }).catch(function (e) { fail(e); return null; });
+  }
+
+  function lastRun(projectName, cmdId) {
+    var done = S.tabs.filter(function (t) { return t.info.spec.kind === 'run' && t.info.spec.project === projectName && t.info.spec.cmdId === cmdId && !t.alive && t.exitCode !== undefined; });
+    return done[done.length - 1] || null;
   }
 
   function runningCmd(projectName, cmdId) {
@@ -2569,10 +2594,13 @@
         return;
       }
       var t = runningCmd(p.name, c.id);
-      body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (t ? '\nclick to stop' : ''),
+      var last = t ? null : lastRun(p.name, c.id);
+      var res = last ? (last.exitCode === 0 ? h('span', { class: 'res ok', title: 'last run: finished fine' }, '✓') : h('span', { class: 'res err', title: 'last run: exit code ' + last.exitCode }, '✗' + (last.exitCode != null ? last.exitCode : ''))) : null;
+      var link = t && t.foundUrl && c.where !== 'server' ? h('a', { class: 'res link', href: t.foundUrl, target: '_blank', rel: 'noopener', title: 'Open ' + t.foundUrl, onclick: function (e) { e.stopPropagation(); } }, '↗') : null;
+      body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (c.shared ? '\nshared with the project (.simab.json)' : '') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
-        h('span', { class: 'ic' }, t ? '■' : '▶'), h('span', { class: 'nm' }, c.name),
-        h('span', { class: 'tag' }, c.where === 'server' ? 'srv' : 'loc')));
+        h('span', { class: 'ic' }, t ? '■' : '▶'), h('span', { class: 'nm' }, c.name), res, link,
+        h('span', { class: 'tag' }, (c.shared ? '⇄ ' : '') + (c.where === 'server' ? 'srv' : 'loc'))));
     });
     if (!p.commands.length) body.append(h('button', { class: 'add-link', onclick: function () { editCommands(p); } }, '+ run command'));
     projectTunnels(p.name).forEach(function (t) { var tl = tunnelLine(t); if (tl) body.append(tl); });
@@ -2608,8 +2636,10 @@
     function row(c) {
       var name = h('input', { class: 'inp', value: c.name || '', placeholder: 'Name, e.g. web' });
       var where = h('select', { class: 'inp' }, h('option', { value: 'local' }, 'Local'), h('option', { value: 'server' }, 'Server'));
-      where.value = S.web ? 'server' : (c.where || 'local');
+      where.value = S.web ? (c.shared && c.where === 'local' ? 'local' : 'server') : (c.where || 'local');
       if (S.web) { where.disabled = true; where.title = 'In the web version commands run on the server. Local commands: ' + APP_ONLY; }
+      var shared = h('input', { type: 'checkbox' });
+      shared.checked = !!c.shared;
       var cmd = h('textarea', { class: 'inp mono', rows: 2, value: c.cmd || '', placeholder: 'npm start', spellcheck: 'false' });
       var cwd = h('input', { class: 'inp mono', value: c.cwd || '', placeholder: 'folder (empty = project root)', list: dirsId });
       var url = h('input', { class: 'inp mono', value: c.url || '', placeholder: 'URL to open (optional)' });
@@ -2620,8 +2650,10 @@
           h('button', { class: 'icon-btn', title: 'Move up', onclick: function () { var s = box.previousElementSibling; if (s) list.insertBefore(box, s); } }, '↑'),
           h('button', { class: 'icon-btn', title: 'Remove', onclick: function () { box.remove(); } }, '✕')),
         h('div', { class: 'field', style: 'margin-bottom:6px' }, cmd),
-        h('div', { class: 'row' }, h('div', { style: 'display:flex;gap:6px;flex:1;min-width:0' }, cwd, browse), url));
-      box._get = function () { return { id: c.id, name: name.value, where: where.value, cmd: cmd.value, url: url.value, cwd: cwd.value }; };
+        h('div', { class: 'row' }, h('div', { style: 'display:flex;gap:6px;flex:1;min-width:0' }, cwd, browse), url),
+        h('label', { class: 'check', style: 'margin-top:6px', title: 'Saved in the project as .simab.json — every device and everyone on the project gets it (commit it to git to share)' },
+          shared, ' shared with the project (.simab.json)'));
+      box._get = function () { return { id: c.id, name: name.value, where: where.value, cmd: cmd.value, url: url.value, cwd: cwd.value, shared: shared.checked }; };
       return box;
     }
     p.commands.forEach(function (c) { list.append(row(Object.assign({}, c))); });
@@ -3440,7 +3472,7 @@
     return p ? el : null;
   }
 
-  function tunnelsDialog(p) {
+  function tunnelsDialog(p, pre) {
     var list = h('div');
     function row(t) {
       var name = h('input', { class: 'inp', value: t.name || '', placeholder: 'Name, e.g. postgres' });
@@ -3466,6 +3498,7 @@
     }
     var mine = projectTunnels(p.name);
     mine.forEach(function (t) { list.append(row(t)); });
+    if (pre && !mine.some(function (t) { return String(t.remotePort) === String(pre.remotePort); })) list.append(row(pre));
     // what can be forwarded: the ports the project's containers publish on the server
     var avail = h('div', { class: 'tavail' }, h('span', { class: 'muted' }, 'Looking for open ports on the server…'));
     function rowsNow() { return Array.prototype.map.call(list.children, function (b) { return b._get(); }); }

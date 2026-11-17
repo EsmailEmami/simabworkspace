@@ -3377,20 +3377,40 @@ class GitRepo:
         text = out or err
         return text if len(text) < 400_000 else text[:400_000] + "\n… (cut)"
 
-    def commit(self, message: str, files) -> str:
+    def commit(self, message: str, files, patches: dict = None) -> str:
         message = clean_str(message, 5000, "commit message", required=True)
         self.flush()
-        if files is None:
+        if patches:
+            # Stage whole files first
+            whole = [f for f in (files or []) if f not in patches]
+            if whole:
+                if not all(isinstance(f, str) and git_path_ok(f) for f in whole):
+                    raise ApiError(400, "invalid file path")
+                self.check(["add", "-A", "--"] + whole)
+            # Stage selected hunks per file
+            for f_path, patch_str in patches.items():
+                self.apply_cached(patch_str)
+            # Commit whatever is now staged
+            out = self.check(["commit", "-m", message])
+        elif files is None:
             self.check(["add", "-A"])
+            out = self.check(["commit", "-m", message])
         else:
             if not isinstance(files, list) or not files or not all(isinstance(f, str) and git_path_ok(f) for f in files):
                 raise ApiError(400, "pick at least one file")
             self.check(["add", "-A", "--"] + files)
-        args = ["commit", "-m", message]
-        if files is not None:
-            args += ["--"] + files
-        out = self.check(args)
+            out = self.check(["commit", "-m", message, "--"] + files)
         self.flush()
+        return out
+
+    def apply_cached(self, patch: str) -> str:
+        """Stage a subset of changes given as a unified diff (for per-hunk staging)."""
+        if not isinstance(patch, str) or not patch.strip():
+            raise ApiError(400, "empty patch")
+        code, out, err = self.run(["apply", "--cached", "--whitespace=fix", "--recount"],
+                                   stdin=patch.encode("utf-8", "replace"), timeout=30)
+        if code != 0:
+            raise ApiError(400, (err.strip() or out.strip())[-500:] or "git apply --cached failed")
         return out
 
     def pull(self) -> str:
@@ -7444,7 +7464,10 @@ class Handler(BaseHTTPRequestHandler):
                 return {"diff": repo.diff((query.get("path") or [""])[0], (query.get("untracked") or ["0"])[0] == "1")}
             if method == "POST" and act in ("commit", "pull", "push", "fetch"):
                 if act == "commit":
-                    out = repo.commit(body.get("message"), body.get("files"))
+                    patches_raw = body.get("patches")
+                    patches = {str(k): str(v) for k, v in patches_raw.items()
+                               if isinstance(k, str) and isinstance(v, str)} if isinstance(patches_raw, dict) else None
+                    out = repo.commit(body.get("message"), body.get("files"), patches)
                 else:
                     out = getattr(repo, act)()
                 app.invalidate()

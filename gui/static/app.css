@@ -947,3 +947,25 @@ body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: non
 .turn-files { margin: 6px 0 2px; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .turn-files .tf-name { font-family: var(--mono); color: var(--text); }
 .turn-files button { border: 1px solid var(--line); background: var(--bg2); color: var(--accent); border-radius: 5px; padding: 1px 8px; font-size: 11.5px; cursor: pointer; }
+
+/* Changes tab: mode toggle pills */
+.ch-mode-toggle { display: flex; gap: 4px; padding: 6px 8px 2px; border-bottom: 1px solid var(--line2); }
+.ch-mode-toggle .btn { flex: 1; }
+
+/* Commit history list */
+.ch-hist-row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; min-height: 30px; border-bottom: 1px solid var(--line2); }
+.ch-hist-row:hover, .ch-hist-row.sel { background: var(--hover); }
+.ch-hist-state { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.ch-hist-state.push { background: var(--ok); }
+.ch-hist-state.pull { background: var(--warn); }
+.ch-hist-state.sync { background: var(--line2); }
+.ch-hist-hash { flex: none; font-size: 11px; color: var(--muted); min-width: 44px; }
+.ch-hist-subj { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ch-hist-date { flex: none; font-size: 11px; min-width: 32px; text-align: right; }
+.ch-repo-row { padding: 4px 8px; }
+.ch-repo-sel { width: 100%; font-size: 12px; }
+
+/* Per-hunk staging */
+.ch-hunk-head { display: flex; align-items: center; gap: 4px; }
+.ch-hunk-box { flex: none; cursor: pointer; margin: 0 2px; }
+.ch-hunk-off { opacity: 0.35; }

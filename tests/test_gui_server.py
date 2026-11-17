@@ -2213,3 +2213,63 @@ class BashScript(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class GitApplyCached(GitFlow):
+    """Tests for per-hunk staging: GitRepo.apply_cached and commit(patches=...)."""
+
+    def test_apply_cached_raises_on_empty_patch(self):
+        repo = sw.GitRepo(self.app, self.p, "", "local")
+        with self.assertRaises(sw.ApiError):
+            repo.apply_cached("")
+        with self.assertRaises(sw.ApiError):
+            repo.apply_cached("   ")
+
+    def test_commit_with_patch_stages_selected_hunk(self):
+        repo = sw.GitRepo(self.app, self.p, "", "local")
+        # Set up a file with two independent change sites
+        (Path(self.a) / "pfile.txt").write_text(
+            "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n")
+        self.git(self.a, "add", "pfile.txt")
+        self.git(self.a, "commit", "-m", "base")
+        # Modify both areas
+        (Path(self.a) / "pfile.txt").write_text(
+            "aaa\nBBB\nccc\nddd\neee\nFFF\nggg\n")
+        # Build a valid patch for only the second change (FFF at line 6)
+        patch = (
+            "--- a/pfile.txt\n"
+            "+++ b/pfile.txt\n"
+            "@@ -4,4 +4,4 @@\n"
+            " ddd\n"
+            " eee\n"
+            "-fff\n"
+            "+FFF\n"
+            " ggg\n"
+        )
+        # commit() calls apply_cached internally
+        repo.commit("hunk commit", files=[], patches={"pfile.txt": patch})
+        log = repo.log()
+        self.assertEqual(log["commits"][0]["subject"], "hunk commit")
+        # Working tree still has the first change (BBB) — not committed
+        content = (Path(self.a) / "pfile.txt").read_text()
+        self.assertIn("BBB", content)
+
+    def test_commit_with_mixed_files_and_patches(self):
+        repo = sw.GitRepo(self.app, self.p, "", "local")
+        (Path(self.a) / "whole.txt").write_text("whole\n")
+        (Path(self.a) / "patched.txt").write_text("line1\nline2\nline3\n")
+        self.git(self.a, "add", ".")
+        self.git(self.a, "commit", "-m", "init mixed")
+        (Path(self.a) / "whole.txt").write_text("whole changed\n")
+        (Path(self.a) / "patched.txt").write_text("line1\nCHANGED\nline3\n")
+        patch = (
+            "--- a/patched.txt\n"
+            "+++ b/patched.txt\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line1\n"
+            "-line2\n"
+            "+CHANGED\n"
+            " line3\n"
+        )
+        repo.commit("mixed commit", files=["whole.txt"], patches={"patched.txt": patch})
+        log = repo.log()
+        self.assertEqual(log["commits"][0]["subject"], "mixed commit")

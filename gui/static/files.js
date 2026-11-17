@@ -792,19 +792,31 @@
     this.picked = {};             // repo + '\0' + path -> false when left out of the commit
     this.sel = null;              // { repo, path }
     this.focusOn = null;          // files to show first (from a chat turn)
+    this.hmode = 'changes';       // 'changes' or 'history'
+    this.histRepo = null;         // repo path for history view
+    this.histLog = null;          // log data: {commits, ahead, behind}
+    this.histCommit = null;       // hash of commit shown in view
+    this.pickedHunks = {};        // key -> Set of checked hunk indices | null (all)
+    this.hunkMode = false;        // show hunk checkboxes in diff view
+    this._lastDiff = null;        // cached diff text for hunk building
     SW.tabEl(this);
     this.branchEl = h('span', { class: 'ch-branch mono' });
     this.list = h('div', { class: 'files-tree ch-list' });
     this.msg = h('textarea', { class: 'inp ch-msg', rows: 2, placeholder: 'Commit message', dir: 'auto' });
     this.msg.addEventListener('keydown', function (e) { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); self.commit(); } });
     this.commitBtn = h('button', { class: 'btn primary', onclick: function () { self.commit(); } }, 'Commit');
+    this.modeToggle = h('div', { class: 'ch-mode-toggle' },
+      h('button', { class: 'btn sm on', onclick: function () { self.switchMode('changes'); } }, 'Changes'),
+      h('button', { class: 'btn sm',    onclick: function () { self.switchMode('history'); } }, 'History'));
+    this.commitArea = h('div', { class: 'ch-commit' }, this.msg, this.commitBtn);
     this.side = h('div', { class: 'files-side' },
       h('div', { class: 'files-bar' }, this.branchEl, h('span', { class: 'grow' }),
         h('button', { class: 'icon-btn', title: 'Pull', onclick: function () { self.git('pull'); } }, '↓'),
         h('button', { class: 'icon-btn', title: 'Push', onclick: function () { self.git('push'); } }, '↑'),
         h('button', { class: 'icon-btn', title: 'Refresh', onclick: function () { self.refresh(); } }, '⟳')),
+      this.modeToggle,
       this.list,
-      h('div', { class: 'ch-commit' }, this.msg, this.commitBtn));
+      this.commitArea);
     this.vhead = h('div', { class: 'files-vhead' });
     this.vbody = h('div', { class: 'files-vbody' });
     this.view = h('div', { class: 'files-view' }, this.vhead, this.vbody);
@@ -852,6 +864,7 @@
         return self.focusOn.some(function (a) { return a === full || a.slice(-full.length - 1) === '/' + full; });
       });
       self.focusOn = null;
+      if (self.hmode === 'history') { self.fetchHistory(); return; }
       if (first) self.show(first);
       else if (!still) { self.sel = null; if (!TOUCH && all.length) self.show(all[0]); else self.vbody.replaceChildren(h('div', { class: 'muted files-note' }, all.length ? 'Pick a file to see what changed.' : 'No changes — everything is committed.')); }
     }).catch(function (e) { self.list.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
@@ -889,20 +902,37 @@
     return this.files().filter(function (x) { return self.picked[x.repo + '\0' + x.f.path] !== false; });
   };
   C.renderCount = function () {
-    var n = this.pickedFiles().length, all = this.files().length;
-    this.commitBtn.textContent = n === all ? 'Commit' + (all ? ' all ' + all : '') : 'Commit ' + n + ' of ' + all;
+    var self = this, picked = this.pickedFiles(), all = this.files();
+    var n = picked.length;
+    picked.forEach(function (x) {
+      var ph = self.pickedHunks[x.repo + '\0' + x.f.path];
+      if (ph !== null && ph !== undefined && ph.size === 0) n--;
+    });
+    this.commitBtn.textContent = n === all.length ? 'Commit' + (all.length ? ' all ' + all.length : '') : 'Commit ' + n + ' of ' + all.length;
     this.commitBtn.disabled = !n;
   };
 
   C.show = function (x) {
     var self = this;
-    this.sel = { repo: x.repo, path: x.f.path };
+    var key = x.repo + '\0' + x.f.path;
+    this.sel = { repo: x.repo, path: x.f.path, key: key };
     this.body.classList.add('viewing');
     this.render();
     var full = join(x.repo, x.f.path);
+    this._lastDiff = null;
+    var hunksBtn = h('button', { class: 'btn sm' + (this.hunkMode ? ' on' : ''), title: 'Pick hunks to include in the commit',
+      onclick: function () {
+        self.hunkMode = !self.hunkMode;
+        hunksBtn.classList.toggle('on', self.hunkMode);
+        if (self._lastDiff !== null) {
+          self.vbody.replaceChildren(self.hunkMode ? self.diffHunksEl(self._lastDiff, key) : SW.diffEl(self._lastDiff || '(no textual changes)'));
+        }
+        self.renderCount();
+      } });
     this.vhead.replaceChildren(
       h('button', { class: 'btn sm files-back', onclick: function () { self.body.classList.remove('viewing'); } }, '←'),
       h('span', { class: 'mono grow' }, full),
+      hunksBtn,
       h('button', { class: 'btn sm', title: 'Open in the Files tab', onclick: function () {
         SW.openSession({ kind: 'files', project: self.project }).then(function (t) { if (t && t.openFile) t.openFile(full.replace(/\/$/, '')); });
       } }, 'Open'),
@@ -910,7 +940,11 @@
       h('button', { class: 'btn sm danger', onclick: function () { self.discard([x]); } }, 'Discard'));
     this.vbody.replaceChildren(h('div', { class: 'muted files-note' }, 'Loading…'));
     api('GET', 'git/' + enc(this.project) + '/diff?repo=' + enc(x.repo) + '&where=' + enc(x.where || '') + '&path=' + enc(x.f.path) + '&untracked=' + (x.f.untracked ? 1 : 0))
-      .then(function (d) { if (self.sel && self.sel.path === x.f.path) self.vbody.replaceChildren(SW.diffEl(d.diff || '(no textual changes)')); })
+      .then(function (d) {
+        if (!self.sel || self.sel.key !== key) return;
+        self._lastDiff = d.diff || '';
+        self.vbody.replaceChildren(self.hunkMode ? self.diffHunksEl(self._lastDiff, key) : SW.diffEl(self._lastDiff || '(no textual changes)'));
+      })
       .catch(function (e) { self.vbody.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
   };
 
@@ -943,18 +977,37 @@
     var picked = this.pickedFiles(), byRepo = {};
     if (!picked.length) return;
     var all = this.files();
-    picked.forEach(function (x) { (byRepo[x.repo] = byRepo[x.repo] || { where: x.where, files: [] }).files.push(x.f.path); });
+    picked.forEach(function (x) {
+      var key = x.repo + '\0' + x.f.path;
+      var ph = self.pickedHunks[key];
+      var r = byRepo[x.repo] = byRepo[x.repo] || { where: x.where, files: [], patches: {} };
+      // per-hunk: only use patch when this file is currently shown and has partial hunk selection
+      if (ph !== null && ph !== undefined && ph.size > 0 && self._lastDiff !== null && self.sel && self.sel.key === key) {
+        var patch = self.getHunkPatch(key, self._lastDiff);
+        if (patch) { r.patches[x.f.path] = patch; return; }
+      }
+      r.files.push(x.f.path);
+    });
     this.commitBtn.disabled = true;
     var chain = Promise.resolve();
     Object.keys(byRepo).forEach(function (repo) {
-      var allOfRepo = all.filter(function (x) { return x.repo === repo; }).length === byRepo[repo].files.length;
+      var r = byRepo[repo];
+      var allOfRepo = all.filter(function (x) { return x.repo === repo; }).length === (r.files.length + Object.keys(r.patches).length);
+      var hasPatch = Object.keys(r.patches).length > 0;
       chain = chain.then(function () {
-        return api('POST', 'git/' + enc(self.project) + '/commit', { repo: repo, where: byRepo[repo].where, message: msg, files: allOfRepo ? null : byRepo[repo].files });
+        return api('POST', 'git/' + enc(self.project) + '/commit', {
+          repo: repo, where: r.where, message: msg,
+          files: hasPatch ? (r.files.length ? r.files : null) : (allOfRepo ? null : r.files),
+          patches: hasPatch ? r.patches : undefined
+        });
       });
     });
     chain.then(function () {
       self.msg.value = '';
       self.picked = {};
+      self.pickedHunks = {};
+      self.hunkMode = false;
+      self._lastDiff = null;
       toast('Committed', 'ok');
       window.dispatchEvent(new CustomEvent('sw-git-changed', { detail: self.project }));
       return self.refresh(true);
@@ -969,6 +1022,136 @@
     var chain = Promise.resolve();
     repos.forEach(function (r) { chain = chain.then(function () { return api('POST', 'git/' + enc(self.project) + '/' + act, { repo: r, where: d.where }); }); });
     chain.then(function () { toast(act === 'pull' ? 'Pulled' : 'Pushed', 'ok'); return self.refresh(true); }).catch(fail);
+  };
+
+  C.switchMode = function (m) {
+    this.hmode = m;
+    var btns = this.modeToggle.querySelectorAll('.btn');
+    btns[0].classList.toggle('on', m === 'changes');
+    btns[1].classList.toggle('on', m === 'history');
+    this.commitArea.classList.toggle('hidden', m === 'history');
+    this.body.classList.remove('viewing');
+    if (m === 'history') {
+      this.list.replaceChildren(h('div', { class: 'muted files-note' }, 'Loading history…'));
+      this.histCommit = null;
+      this.vhead.replaceChildren();
+      this.vbody.replaceChildren(h('div', { class: 'muted files-note' }, 'Pick a commit to see what changed.'));
+      this.fetchHistory();
+    } else {
+      this.render();
+    }
+  };
+
+  C.fetchHistory = function (repo) {
+    var self = this;
+    var d = this.data || {};
+    if (repo !== undefined) this.histRepo = repo;
+    if (!this.histRepo && d.repos && d.repos.length) this.histRepo = d.repos[0];
+    if (!this.histRepo) { this.list.replaceChildren(h('div', { class: 'muted files-note' }, 'No repository.')); return; }
+    api('GET', 'git/' + enc(this.project) + '/log?repo=' + enc(this.histRepo)).then(function (data) {
+      self.histLog = data;
+      self.renderHistory();
+    }).catch(function (e) { self.list.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
+  };
+
+  C.renderHistory = function () {
+    var self = this, d = this.data || {};
+    var repos = (d.repos || []).filter(function (r) { return (d.statuses || {})[r] && (d.statuses || {})[r].repo; });
+    var rows = [];
+    if (repos.length > 1) {
+      var sel = h('select', { class: 'inp ch-repo-sel', onchange: function () { self.fetchHistory(sel.value); } });
+      repos.forEach(function (r) { var o = h('option', { value: r }, r || '(root)'); if (r === self.histRepo) o.selected = true; sel.appendChild(o); });
+      rows.push(h('div', { class: 'ch-repo-row' }, sel));
+    }
+    var log = this.histLog || {};
+    var commits = log.commits || [];
+    if (!commits.length) rows.push(h('div', { class: 'muted files-note' }, 'No commits yet.'));
+    commits.forEach(function (c) {
+      var stateClass = c.state === 'push' ? 'push' : c.state === 'pull' ? 'pull' : 'sync';
+      var on = self.histCommit === c.hash;
+      var row = h('div', { class: 'ch-hist-row' + (on ? ' sel' : ''), onclick: function () { self.showCommit(c); } },
+        h('span', { class: 'ch-hist-state ' + stateClass, title: c.state }),
+        h('span', { class: 'ch-hist-hash mono' }, c.short),
+        h('span', { class: 'ch-hist-subj', dir: 'auto' }, c.subject),
+        h('span', { class: 'ch-hist-date muted' }, SW.agoShort ? SW.agoShort(c.date) : ''));
+      rows.push(row);
+    });
+    this.list.replaceChildren.apply(this.list, rows);
+  };
+
+  C.showCommit = function (c) {
+    var self = this;
+    this.histCommit = c.hash;
+    this.renderHistory();
+    this.body.classList.add('viewing');
+    this.vhead.replaceChildren(
+      h('button', { class: 'btn sm files-back', onclick: function () { self.body.classList.remove('viewing'); } }, '←'),
+      h('span', { class: 'ch-hist-hash mono', style: 'flex:none' }, c.short),
+      h('span', { dir: 'auto', style: 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, c.subject));
+    this.vbody.replaceChildren(h('div', { class: 'muted files-note' }, 'Loading…'));
+    api('GET', 'git/' + enc(this.project) + '/show?repo=' + enc(this.histRepo || '') + '&hash=' + enc(c.hash))
+      .then(function (d) { if (self.histCommit === c.hash) self.vbody.replaceChildren(SW.diffEl(d.diff || '(empty commit)')); })
+      .catch(function (e) { self.vbody.replaceChildren(h('div', { class: 'muted files-note' }, e.message)); });
+  };
+
+  C.diffHunksEl = function (diff, key) {
+    var self = this;
+    var lines = String(diff || '').split('\n');
+    var file_header = [], hunks = [], cur = null;
+    lines.forEach(function (l) {
+      if (/^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename )/.test(l)) { file_header.push(l); return; }
+      if (l.slice(0, 2) === '@@') { if (cur) hunks.push(cur); cur = { header: l, lines: [] }; return; }
+      if (cur) cur.lines.push(l); else file_header.push(l);
+    });
+    if (cur) hunks.push(cur);
+    if (!hunks.length) return SW.diffEl(diff);
+    if (!this.pickedHunks[key]) this.pickedHunks[key] = null;  // null = all selected
+    var wrap = h('div', { class: 'gdiff ch-hunks' });
+    file_header.forEach(function (l) {
+      var cls = /^(--- |\+\+\+ |diff |index |new file|deleted file|similarity|rename )/.test(l) ? 'meta' : '';
+      wrap.append(h('div', { class: 'gl ' + cls }, l || ' '));
+    });
+    hunks.forEach(function (hunk, i) {
+      var ph = self.pickedHunks[key];
+      var checked = ph === null || ph.has(i);
+      var box = h('input', { type: 'checkbox', class: 'ch-hunk-box', title: 'Include this hunk in the commit' });
+      box.checked = checked;
+      var hunkEl = h('div', { class: 'ch-hunk' + (checked ? '' : ' ch-hunk-off') });
+      box.addEventListener('change', function () {
+        var cur2 = self.pickedHunks[key];
+        if (cur2 === null) cur2 = new Set(hunks.map(function (_, j) { return j; }));
+        if (box.checked) cur2.add(i); else cur2.delete(i);
+        if (cur2.size === hunks.length) cur2 = null;
+        self.pickedHunks[key] = cur2;
+        hunkEl.classList.toggle('ch-hunk-off', !box.checked);
+        self.renderCount();
+      });
+      var headerEl = h('div', { class: 'gl hunk ch-hunk-head' }, box, h('span', null, hunk.header));
+      hunkEl.append(headerEl);
+      hunk.lines.forEach(function (l) {
+        var cls = l[0] === '+' ? 'add' : l[0] === '-' ? 'del' : '';
+        hunkEl.append(h('div', { class: 'gl ' + cls }, l || ' '));
+      });
+      wrap.append(hunkEl);
+    });
+    return wrap;
+  };
+
+  C.getHunkPatch = function (key, diff) {
+    var ph = this.pickedHunks[key];
+    if (ph === null) return null;
+    var lines = String(diff || '').split('\n');
+    var file_header = [], hunks = [], cur = null;
+    lines.forEach(function (l) {
+      if (/^(diff |index |--- |\+\+\+ |new file|deleted file|similarity|rename )/.test(l)) { file_header.push(l); return; }
+      if (l.slice(0, 2) === '@@') { if (cur) hunks.push(cur); cur = { header: l, lines: [] }; return; }
+      if (cur) cur.lines.push(l); else file_header.push(l);
+    });
+    if (cur) hunks.push(cur);
+    if (!ph.size) return null;
+    var out = file_header.join('\n') + '\n';
+    hunks.forEach(function (hk, i) { if (ph.has(i)) out += hk.header + '\n' + hk.lines.join('\n') + '\n'; });
+    return out;
   };
 
   window.SideFilesPanel = SideFilesPanel;

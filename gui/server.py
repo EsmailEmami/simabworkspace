@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.35.0"
+VERSION = "1.35.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1041,6 +1041,11 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
 
 
 # ----------------------------------------------------------------------------- run-command suggestions
+# SUGGEST_PY is one script: exec'd here for the local copy, sent as `python3 -c` for the server
+# (the web version, or a project without a folder on this machine). argv: FOLDER → JSON list.
+SUGGEST_PY = r'''
+import json, os, sys
+from pathlib import Path
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".angular", "vendor", "tmp", "docker", ".next", ".cache"}
 PREFERRED_SCRIPTS = ("start-local-server", "start", "dev", "serve", "watch", "test")
 
@@ -1086,6 +1091,36 @@ def suggestions(local: str) -> list:
     if (root / "go.mod").is_file():
         out.append({"name": "go test", "cmd": "go test ./...", "where": "server", "url": ""})
     return out[:24]
+
+
+if __name__ == "__main__":
+    print(json.dumps(suggestions(os.path.expanduser(sys.argv[1]))))
+'''
+_SUGGEST = {}
+
+
+def suggestions(local: str) -> list:
+    if not _SUGGEST:
+        _SUGGEST["__name__"] = "simab_suggest"
+        exec(compile(SUGGEST_PY, "<suggest>", "exec"), _SUGGEST)
+    return _SUGGEST["suggestions"](local)
+
+
+def project_suggestions(app, p: dict) -> list:
+    """Run-command ideas read from the local copy, else from the server folder (then every
+    suggestion runs on the server — in the web version nothing else can run)."""
+    if not p:
+        return []
+    if p.get("localExists") and not app.web:
+        return suggestions(p["local"])
+    if not (p.get("remote") and app.conf.configured):
+        return []
+    res = remote_python(app._project_conf(p), SUGGEST_PY, [p["remote"]],
+                        multiplex=bool(app.store.settings.get("sshMultiplex")), timeout=30)
+    out = [x for x in res if isinstance(x, dict)] if isinstance(res, list) else []
+    for x in out:
+        x["where"] = "server"
+    return out
 
 
 # ----------------------------------------------------------------------------- websocket (RFC 6455, minimal)
@@ -6177,7 +6212,7 @@ WEB_KINDS = ("chat", "shell", "claude", "run", "docker")
 WEB_BLOCKED = {("POST", "editor"), ("POST", "open-folder"), ("POST", "pick-folder"), ("POST", "sync"), ("POST", "git-sync"), ("GET", "connection"), ("POST", "connection"),
                ("POST", "ssh-key"), ("POST", "autostart"), ("POST", "sync-service"), ("POST", "shortcut"),
                ("GET", "update"), ("POST", "update"), ("GET", "prereqs"), ("POST", "prereqs"), ("POST", "move"),
-               ("POST", "uninstall"), ("POST", "quit"), ("POST", "tunnels"), ("GET", "suggest"), ("POST", "add-project")}
+               ("POST", "uninstall"), ("POST", "quit"), ("POST", "tunnels"), ("POST", "add-project")}
 SSH_USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
 SSH_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}|\[?[0-9A-Fa-f:]+\]?")
 
@@ -6655,7 +6690,7 @@ class Handler(BaseHTTPRequestHandler):
             return {"commands": cmds}
         if route == ("GET", "suggest") and len(parts) == 2:
             p = next((x for x in app.projects() if x["name"] == parts[1]), None)
-            return {"suggestions": suggestions(p["local"]) if p and p.get("localExists") else []}
+            return {"suggestions": project_suggestions(app, p)}
         if route == ("POST", "starter") and len(parts) == 2:
             app._project(parts[1])
             t = app.store.set_starter(parts[1], self._body().get("text"))

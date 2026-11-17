@@ -2416,7 +2416,7 @@
         return;
       }
       var t = runningCmd(p.name, c.id);
-      body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (t ? '\nclick to stop' : ''),
+      body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
         h('span', { class: 'ic' }, t ? '■' : '▶'), h('span', { class: 'nm' }, c.name),
         h('span', { class: 'tag' }, c.where === 'server' ? 'srv' : 'loc')));
@@ -2428,6 +2428,22 @@
   }
 
   // ------------------------------------------------------------------ run command editor
+  // The folder of a run command: browse the project's folders on the server, keep the path
+  // relative to the project ("" = project root); folders outside the project are refused.
+  function pickCmdFolder(p, rel, done) {
+    api('GET', 'browse?path=' + encodeURIComponent(p.remote)).then(function (d) {
+      var root = d.path.replace(/\/$/, '');
+      serverFolderDialog({ title: 'Folder of the command — ' + p.name, start: rel ? root + '/' + rel.replace(/^\/+/, '') : root,
+        note: 'Pick a folder inside the project (' + root + ').',
+        pick: function (path) {
+          path = path.replace(/\/$/, '');
+          if (path === root) done('');
+          else if (path.indexOf(root + '/') === 0) done(path.slice(root.length + 1));
+          else toast('Pick a folder inside the project', 'err');
+        } });
+    }).catch(fail);
+  }
+
   function editCommands(p) {
     var dirsId = 'dirs-' + Math.random().toString(36).slice(2);
     var dirs = h('datalist', { id: dirsId });
@@ -2440,31 +2456,35 @@
       var name = h('input', { class: 'inp', value: c.name || '', placeholder: 'Name, e.g. web' });
       var where = h('select', { class: 'inp' }, h('option', { value: 'local' }, 'Local'), h('option', { value: 'server' }, 'Server'));
       where.value = S.web ? 'server' : (c.where || 'local');
-      if (S.web) where.classList.add('hidden');
+      if (S.web) { where.disabled = true; where.title = 'In the web version commands run on the server. Local commands: ' + APP_ONLY; }
       var cmd = h('textarea', { class: 'inp mono', rows: 2, value: c.cmd || '', placeholder: 'npm start', spellcheck: 'false' });
       var cwd = h('input', { class: 'inp mono', value: c.cwd || '', placeholder: 'folder (empty = project root)', list: dirsId });
       var url = h('input', { class: 'inp mono', value: c.url || '', placeholder: 'URL to open (optional)' });
+      var browse = h('button', { class: 'btn cwd-browse', title: 'Pick a folder of the project on the server', disabled: !hasRemote(p),
+        onclick: function () { pickCmdFolder(p, cwd.value.trim(), function (rel) { cwd.value = rel; }); } }, 'Browse…');
       var box = h('div', { class: 'cmd-edit' },
         h('div', { class: 'top' }, name, where,
           h('button', { class: 'icon-btn', title: 'Move up', onclick: function () { var s = box.previousElementSibling; if (s) list.insertBefore(box, s); } }, '↑'),
           h('button', { class: 'icon-btn', title: 'Remove', onclick: function () { box.remove(); } }, '✕')),
         h('div', { class: 'field', style: 'margin-bottom:6px' }, cmd),
-        h('div', { class: 'row' }, cwd, url));
+        h('div', { class: 'row' }, h('div', { style: 'display:flex;gap:6px;flex:1;min-width:0' }, cwd, browse), url));
       box._get = function () { return { id: c.id, name: name.value, where: where.value, cmd: cmd.value, url: url.value, cwd: cwd.value }; };
       return box;
     }
     p.commands.forEach(function (c) { list.append(row(Object.assign({}, c))); });
-    if (!p.commands.length) list.append(row({ where: 'local' }));
+    var newWhere = S.web || !p.localExists ? 'server' : 'local';
+    if (!p.commands.length) list.append(row({ where: newWhere }));
     var sugBtn = h('button', { class: 'btn', onclick: function () {
       api('GET', 'suggest/' + encodeURIComponent(p.name)).then(function (d) {
-        if (!d.suggestions.length) { toast('Nothing to suggest (reads the local copy of the project)', 'warn'); return; }
+        if (!d.suggestions.length) { toast('Nothing to suggest (looks for package.json, compose, go.mod)', 'warn'); return; }
         menuAt(sugBtn, d.suggestions.map(function (s) { return { label: s.name, k: s.where, action: function () { list.append(row(s)); } }; }));
       }).catch(fail);
     } }, 'Suggest');
     var md = openModal({
       title: 'Run commands — ' + p.name,
-      body: [h('div', { class: 'muted', style: 'margin-bottom:10px;font-size:12px' }, 'Each command becomes a ▶ under the project and runs in its own tab. Local runs on this machine (synced folder), Server runs over SSH.'), dirs, list],
-      foot: [h('button', { class: 'btn left', onclick: function () { list.append(row({ where: 'local' })); } }, '+ Add'), sugBtn,
+      body: [h('div', { class: 'muted', style: 'margin-bottom:10px;font-size:12px' }, S.web ? 'Each command becomes a ▶ under the project and runs on the server, in its own tab.'
+        : 'Each command becomes a ▶ under the project and runs in its own tab. Local runs on this machine (synced folder), Server runs over SSH.'), dirs, list],
+      foot: [h('button', { class: 'btn left', onclick: function () { list.append(row({ where: newWhere })); } }, '+ Add'), sugBtn,
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: function () {
           var cmds = Array.prototype.map.call(list.children, function (b) { return b._get(); }).filter(function (c) { return c.name.trim() || c.cmd.trim(); });

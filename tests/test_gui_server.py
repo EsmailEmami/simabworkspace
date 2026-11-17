@@ -393,6 +393,24 @@ class Suggestions(unittest.TestCase):
             self.assertTrue(any("compose.laptop.yml" in c for c in cmds))
         self.assertEqual(sw.suggestions("/nonexistent-xyz"), [])
 
+    def test_read_from_the_server_folder(self):
+        # the web version (and a project with no local copy) reads the server folder: the same
+        # script, run with python3 on the server; every suggestion then runs on the server
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "package.json").write_text(json.dumps({"scripts": {"dev": "vite"}}))
+            def fake_remote(conf, code, args, **kw):
+                r = subprocess.run([sys.executable, "-c", code] + args, capture_output=True, text=True)
+                return json.loads(r.stdout)
+            app = mock.Mock(web=True, conf=mock.Mock(configured=True), store=mock.Mock(settings={}))
+            with mock.patch.object(sw, "remote_python", side_effect=fake_remote):
+                out = sw.project_suggestions(app, {"name": "p", "remote": d, "local": d, "localExists": True})
+            self.assertEqual([(s["cmd"], s["where"]) for s in out], [("npm run dev", "server")])
+            app.web = False
+            self.assertEqual(sw.project_suggestions(app, {"name": "p", "remote": d, "local": d, "localExists": True})[0]["where"], "local")
+            self.assertEqual(sw.project_suggestions(app, None), [])
+        self.assertNotIn(("GET", "suggest"), sw.WEB_BLOCKED)
+
 
 class WebSocketFrames(unittest.TestCase):
     def test_accept_key_rfc_example(self):
@@ -2157,7 +2175,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.35.0"', text)
+        self.assertIn('VERSION="1.35.1"', text)
 
 
 if __name__ == "__main__":

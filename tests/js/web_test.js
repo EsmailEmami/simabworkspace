@@ -62,6 +62,8 @@ global.fetch = (url, opts) => {
     res = { path, parent: path === '/' ? '' : path.replace(/\/[^/]+$/, '') || '/', home: '/home/esi', git: false,
       dirs: (tree[path] || []).map((n) => ({ name: n, git: n.startsWith('cheshmeh-') ? 'repo' : '', hidden: n[0] === '.', project: '' })) };
   } else if (url === '/api/manual') res = { project: body };
+  else if (url === '/api/suggest/cheshmeh') res = { suggestions: [{ name: 'dev', cmd: 'npm run dev', cwd: 'cheshmeh-web-app', where: 'server', url: '' }] };
+  else if (url.startsWith('/api/files/')) res = { files: [] };
   else if (url === '/api/logout') res = { ok: true };
   else if (url === '/api/sessions' && method === 'POST') res = { id: 's' + (++sessSeq), title: 'cheshmeh · server', alive: true, exitCode: null, url: '',
     spec: { kind: body.kind, project: body.project, where: body.where, cmdId: '' } };
@@ -213,6 +215,36 @@ const tests = {
     global.terms[global.terms.length - 1].dataCb('d');
     assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: 'd' });
   }
+};
+
+tests['run commands: run on the server, suggested from the server folder, folder picked on the server'] = async function () {
+  document.body.querySelector('#modal-root').replaceChildren();
+  document.body.querySelector('#menu-root').replaceChildren();
+  q('.act').find((b) => b.textContent === '⋯').click();
+  q('button').find((b) => b.textContent.trim() === 'Run commands…').click();
+  await settle();
+  const md = q('.modal').pop();
+  assert.match(md.textContent, /runs on the server/);
+  const where = q('select', md)[0];
+  assert.ok(where.disabled && where.value === 'server' && !where.classList.contains('hidden'), 'Server is shown, fixed');
+  q('button', md).find((b) => b.textContent === 'Suggest').click();
+  await settle();
+  q('button', document.body.querySelector('#menu-root')).find((b) => /dev/.test(b.textContent)).click();
+  assert.strictEqual(q('.cmd-edit', md).length, 3);
+  // Browse… on the first row: go into a folder of the project and use it → relative path
+  q('.cwd-browse', md)[0].click();
+  await settle();
+  const pick = q('.modal').pop();
+  assert.notStrictEqual(pick, md);
+  q('.frow', pick).find((r) => r.querySelector('.fname').textContent === 'cheshmeh-api-service').click();
+  await settle();
+  q('button', pick).find((b) => b.textContent === 'Use this folder').click();
+  await settle();
+  assert.strictEqual(q('input', q('.cmd-edit', md)[0]).find((i) => i.getAttribute('placeholder') === 'folder (empty = project root)').value, 'cheshmeh-api-service');
+  q('button', md).find((b) => b.textContent === 'Save').click();
+  await settle();
+  const saved = calls.filter((c) => c.url === '/api/commands/cheshmeh').pop().body.commands;
+  assert.deepStrictEqual(saved.map((c) => [c.where, c.cwd]), [['server', 'cheshmeh-api-service'], ['server', ''], ['server', 'cheshmeh-web-app']]);
 };
 
 (async () => {

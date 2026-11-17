@@ -41,6 +41,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.35.1 2026-11-17  Run commands: Browse… picks the command's folder among the project's
+#                       server folders; Suggest works in the web version (reads the server
+#                       folder); the web editor shows that commands run on the server.
 #    1.35.0 2026-11-17  Chat tabs show the name Claude gives the conversation (like the VS Code
 #                       extension; saved in Claude's transcript); renaming a chat tab renames the
 #                       conversation in Claude too. Tablet: the message box of chats you are not
@@ -270,7 +273,7 @@
 
 set -u -o pipefail
 
-VERSION="1.35.0"
+VERSION="1.35.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

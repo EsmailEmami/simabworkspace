@@ -41,6 +41,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.37.0 2026-11-17  Skills Registry: add GitHub repos as skill sources, browse .md skills
+#                       and install them per-project (.claude/skills/); commit history tab in
+#                       the Git dialog with per-hunk staging; Git dialog discard selected files;
+#                       chat markdown renders incrementally during streaming (every 80 ms);
+#                       chat box merged send/stop button; sidebar project row cleanup.
 #    1.36.0 2026-11-17  Changes tab (review, tick files to commit, discard, pull/push) and a
 #                       "N files changed — Review changes" line after each Claude turn; Ctrl+P
 #                       go to file; web: phone notifications (Web Push) when Claude finishes or
@@ -285,7 +290,7 @@
 
 set -u -o pipefail
 
-VERSION="1.36.0"
+VERSION="1.37.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

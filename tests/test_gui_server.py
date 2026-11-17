@@ -1605,6 +1605,11 @@ wait_sync() {{ echo "WAIT $1"; }}
             self.assertIn(f"url=esi@h:225:{home}/server/My Shop", create)
             self.assertTrue(create.endswith("git=on"))
             self.assertIn("WAIT my-shop", r.stdout)
+            self.assertIn("ignores=node_modules,dist git", create, "defaults when not given")
+            r = self.run_add(home, [proj, "--yes", "--no-wait", "--remote", "~/b", "--name", "b", "--ignores", "vendor,/out"])
+            self.assertIn("ignores=vendor,/out git", next(l for l in r.stdout.splitlines() if l.startswith("CREATE")))
+            r = self.run_add(home, [proj, "--yes", "--no-wait", "--remote", "~/c", "--name", "c", "--ignores", ""])
+            self.assertIn("ignores= git", next(l for l in r.stdout.splitlines() if l.startswith("CREATE")), "empty list = sync everything")
 
     def test_refuses_merge_into_full_folder_and_bad_input(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1710,6 +1715,12 @@ class SetupFromWindow(unittest.TestCase):
             proj.mkdir()
             app.add_project({"mode": "upload", "local": str(proj), "name": "pp", "git": False})
             self.assertEqual(seen["argv"][2:], ["add-local", str(proj), "--yes", "--no-wait", "--git", "off", "--name", "pp"])
+            app.add_project({"mode": "upload", "local": str(proj), "git": True, "ignores": [" node_modules ", "/dist", "node_modules"]})
+            self.assertEqual(seen["argv"][2:], ["add-local", str(proj), "--yes", "--no-wait", "--git", "on", "--ignores", "node_modules,/dist"])
+            app.add_project({"mode": "upload", "local": str(proj), "ignores": []})
+            self.assertEqual(seen["argv"][-2:], ["--ignores", ""])
+            with self.assertRaises(sw.ApiError):
+                app.add_project({"mode": "upload", "local": str(proj), "ignores": ["a,b"]})
 
         def failing(argv, **kw):
             return subprocess.CompletedProcess(argv, 1, b"", b"  \xe2\x9c\x97 This server folder is already synced:\n")

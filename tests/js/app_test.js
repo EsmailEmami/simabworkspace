@@ -35,6 +35,7 @@ const gitStatus = { repo: true, where: 'local', branch: 'main', upstream: 'origi
   files: [{ path: 'api/main.go', x: ' ', y: 'M', conflict: false, untracked: false }, { path: 'web/x.ts', x: 'U', y: 'U', conflict: true, untracked: false }] };
 let seq = 0;
 const state = {
+  defaultIgnores: ['node_modules', 'dist'],
   version: '9', wsl: false, lastTabs: [], sessions: [],
   server: { configured: true, user: 'esi', host: 'h', port: '225' },
   settings: { fontSize: 13, persianView: 'auto', copyOnSelect: true, confirmClose: true },
@@ -490,7 +491,7 @@ const tests = {
     q('.btn.primary', modal).pop().click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
-    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true });
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, ignores: ['node_modules', 'dist'] });
     assert.ok(q('.toast').some((t) => /shop: downloading in the background/.test(t.textContent)));
   },
 
@@ -504,6 +505,9 @@ const tests = {
     const local = inputs.find((i) => i.getAttribute('placeholder') === '~/projects/my-project');
     const remote = inputs.find((i) => i.getAttribute('placeholder') === '~/my-project');
     local.value = '/Users/me/code/my-shop';
+    const ign = q('textarea', modal)[0];
+    assert.strictEqual(ign.value, 'node_modules\ndist', 'Not synced starts with the defaults');
+    ign.value = 'node_modules\n/dist, *.log\n';
     const browse = q('button', modal).filter((b) => b.textContent === 'Browse…').pop();
     browse.click(); await settle();
     const dlg = q('.modal').pop();
@@ -529,6 +533,7 @@ const tests = {
     q('.btn.primary', modal).pop().click(); await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
     assert.deepStrictEqual([post.body.mode, post.body.remote, post.body.local], ['upload', '/home/esi/work', '/Users/me/code/my-shop']);
+    assert.deepStrictEqual(post.body.ignores, ['node_modules', '/dist', '*.log']);
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

@@ -10,9 +10,9 @@
 #    simabworkspace                 interactive menu (status + all actions)
 #    simabworkspace status          show connection + sync status and exit
 #    simabworkspace add             add a project to sync (asks: on the server, or on this machine)
-#    simabworkspace add-local [FOLDER] [--remote PATH] [--name NAME] [--git on|off] [--yes] [--no-wait]
+#    simabworkspace add-local [FOLDER] [--remote PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait]
 #                                   upload a project from this machine to the server, then sync it
-#    simabworkspace add-server [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--yes] [--no-wait]
+#    simabworkspace add-server [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait]
 #                                   download a project from the server to this machine, then sync it
 #    simabworkspace pause   NAME    pause one project        (resume later)
 #    simabworkspace resume  NAME    resume one project
@@ -978,10 +978,11 @@ sanitize_name() {
 #   to the server by the first sync, then both sides stay in sync.
 add_local_project() {
   title "Upload a project from this machine"
-  local lpath="" rpath="" name="" git="" yes=0 nowait=0
+  local lpath="" rpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --remote) rpath="${2:-}"; shift 2 ;;
+      --ignores) ign_given=1; ign_list="${2:-}"; shift 2 ;;
       --name)   name="${2:-}"; shift 2 ;;
       --git)    git="${2:-}"; shift 2 ;;
       --yes|-y) yes=1; shift ;;
@@ -1035,9 +1036,10 @@ add_local_project() {
       ok "Created $rpath on the server" ;;
   esac
 
-  info "Not uploaded (rebuilt on each side): $DEFAULT_IGNORES"
   local ignores="$DEFAULT_IGNORES" extra
-  if [ $yes -eq 0 ]; then
+  [ $ign_given -eq 1 ] && ignores="$ign_list"
+  info "Not uploaded: ${ignores:-nothing}"
+  if [ $yes -eq 0 ] && [ $ign_given -eq 0 ]; then
     extra=$(ask "Extra folders/patterns to skip, comma-separated (empty = none)" "")
     [ -n "$extra" ] && ignores="$ignores,$(printf '%s' "$extra" | tr -d ' ')"
   fi
@@ -1075,10 +1077,11 @@ add_project_menu() {
 #   Without arguments it asks (folder list, local folder, …); --yes never asks.
 add_project() {
   title "Add project"
-  local rpath="" lpath="" name="" git="" yes=0 nowait=0
+  local rpath="" lpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --local)   lpath="${2:-}"; shift 2 ;;
+      --ignores) ign_given=1; ign_list="${2:-}"; shift 2 ;;
       --name)    name="${2:-}"; shift 2 ;;
       --git)     git="${2:-}"; shift 2 ;;
       --yes|-y)  yes=1; shift ;;
@@ -1160,8 +1163,9 @@ add_project() {
   mkdir -p "$lpath" || { err "Cannot create $lpath"; return 1; }
 
   local ignores="$DEFAULT_IGNORES" extra
-  info "Not synced by default: $DEFAULT_IGNORES"
-  if [ $yes -eq 0 ]; then
+  [ $ign_given -eq 1 ] && ignores="$ign_list"
+  info "Not synced: ${ignores:-nothing}"
+  if [ $yes -eq 0 ] && [ $ign_given -eq 0 ]; then
     extra=$(ask "Extra folders/patterns to skip, comma-separated (empty = none)" "")
     [ -n "$extra" ] && ignores="$ignores,$(printf '%s' "$extra" | tr -d ' ')"
   fi

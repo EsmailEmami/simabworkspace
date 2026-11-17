@@ -5666,6 +5666,8 @@ class App:
                 argv += ["--remote", remote]
         if name:
             argv += ["--name", name]
+        if body.get("ignores") is not None:
+            argv += ["--ignores", ",".join(self._clean_ignores(body.get("ignores")))]
         code, out = self.run_script(argv, timeout=180)
         if code != 0:
             raise ApiError(400, self.script_error(out, "could not add the project"))
@@ -6591,7 +6593,8 @@ class App:
         return {"version": VERSION, "windows": windows, "now": time.time(), "server": self.conf.to_dict(), "settings": self.store.settings,
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
                 "lastTabs": self.store.data.get("lastTabs") or [], "wsl": False if self.web else is_wsl(),
-                "platform": sys.platform, "web": self.web, "home": "" if self.web else os.path.expanduser("~")}
+                "platform": sys.platform, "web": self.web, "home": "" if self.web else os.path.expanduser("~"),
+                "defaultIgnores": default_ignores()}
 
     # the local folder of a project in Explorer / Finder / the file manager
     def open_folder(self, name: str) -> dict:

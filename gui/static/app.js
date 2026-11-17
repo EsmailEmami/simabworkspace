@@ -2987,6 +2987,8 @@
     var local = h('input', { class: 'inp mono', placeholder: '~/projects/my-project' });
     var remote = h('input', { class: 'inp mono', placeholder: '~/my-project' });
     var git = h('input', { type: 'checkbox', checked: true });
+    var ign = h('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
+    ign.value = (S.defaultIgnores || []).join('\n');
     var errBox = h('div', { class: 'add-err hidden' });
     var list = h('div', { class: 'flist' }, h('div', { class: 'muted', style: 'padding:10px' }, 'Loading folders on the server…'));
     var filter = h('input', { class: 'inp', placeholder: 'Filter folders', autocomplete: 'off' });
@@ -3020,7 +3022,12 @@
     local.addEventListener('input', function () { delete local.dataset.auto; });
     name.addEventListener('input', function () { delete name.dataset.auto; });
 
-    var gitRow = function () { return h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))); };
+    var gitRow = function () {
+      return [h('div', { class: 'field' }, h('label', null, 'Not synced'), ign,
+        h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'One per line: ', h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ',
+          h('span', { class: 'mono' }, '/dist'), ' only at the top, ', h('span', { class: 'mono' }, '*.log'), ' by name. Change it later in ⋯ → Not synced…')),
+        h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.')))];
+    };
     var forms = {
       download: function () {
         loadFolders();
@@ -3035,7 +3042,7 @@
         return [h('div', { class: 'field' }, h('label', null, 'Folder on the server'), h('div', { style: 'display:flex;gap:6px' }, filter, deeper), list, pickedNote),
           h('div', { class: 'row' },
             localFolderField('Put it on this machine at', local),
-            h('div', { class: 'field' }, h('label', null, 'Name'), name)), gitRow()];
+            h('div', { class: 'field' }, h('label', null, 'Name'), name))].concat(gitRow());
       },
       upload: function () {
         return [localFolderField('Folder on this machine', local),
@@ -3047,7 +3054,7 @@
                 newName: base && base !== '~' ? base : '' };
             }),
             h('div', { class: 'field' }, h('label', null, 'Name'), name)),
-          h('div', { class: 'muted', style: 'font-size:11.5px;margin:-6px 0 10px' }, 'Empty server folder = ~/<folder name>. It must be new or empty.'), gitRow()];
+          h('div', { class: 'muted', style: 'font-size:11.5px;margin:-6px 0 10px' }, 'Empty server folder = ~/<folder name>. It must be new or empty.')].concat(gitRow());
       },
       list: function () {
         picker = folderPicker(function (d) {
@@ -3097,7 +3104,8 @@
       if (mode === 'upload' && !local.value.trim()) { local.focus(); errBox.textContent = 'Which folder on this machine?'; errBox.classList.remove('hidden'); return; }
       go.disabled = true;
       go.textContent = 'Setting up…';
-      api('POST', 'add-project', { mode: mode, remote: mode === 'download' ? pickedRemote : remote.value.trim(), local: local.value.trim(), name: name.value.trim(), git: git.checked })
+      api('POST', 'add-project', { mode: mode, remote: mode === 'download' ? pickedRemote : remote.value.trim(), local: local.value.trim(), name: name.value.trim(), git: git.checked,
+        ignores: ign.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean) })
         .then(function (d) {
           md.close();
           if (d.project) { S.open.add(d.project); localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open))); }
@@ -4485,6 +4493,7 @@
       S.projectsKey = JSON.stringify(st.projects);
       S.wsl = st.wsl;
       S.home = st.home || '';
+      S.defaultIgnores = st.defaultIgnores || [];
       S.lastTabs = WID ? [] : st.lastTabs;
       S.version = st.version;
       S.windows = st.windows || [];

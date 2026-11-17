@@ -119,7 +119,7 @@ global.fetch = (url, opts) => {
     res = p.endsWith('.png') ? { path: p, size: 9, image: 'data:image/png;base64,AA==' } : { path: p, size: 12, text: 'line one\nسلام\n' };
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
-  else if (url === '/api/tabs') res = fakeTabs;
+  else if (url === '/api/tabs' || url === '/api/tabs?vis=1') res = fakeTabs;
   else if (url.startsWith('/api/server-stats')) res = Object.assign({ cpu: 92.4, cores: 8, load: [7.1, 5, 3], memTotal: 16e9, memUsed: 12.4e9, swapTotal: 0, swapUsed: 0,
     diskTotal: 500e9, diskUsed: 120e9, diskFree: 380e9, diskPath: '/home/esi' }, url.indexOf('top=1') > 0 ? {
     topCpu: [{ pid: 1, user: 'esi', cpu: 180.5, mem: 2, rss: 800e6, name: 'node' }], topMem: [{ pid: 2, user: 'esi', cpu: 3, mem: 30, rss: 4.8e9, name: 'postgres' }] } : {});

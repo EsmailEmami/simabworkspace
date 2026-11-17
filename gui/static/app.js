@@ -187,7 +187,70 @@
   }
   function registerWorker() {
     if (!S.web || !('serviceWorker' in navigator) || location.protocol !== 'https:') return;
+    navigator.serviceWorker.addEventListener('message', function (e) {
+      var tab = e.data && e.data.sw === 'open-tab' && S.tabs.find(function (t) { return t.id === e.data.tab; });
+      if (tab) activate(tab);
+    });
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function () { /* untrusted certificate: no offline copy, still works */ });
+  }
+
+  // ---- phone notifications (Web Push): Claude finished / needs you, even with the page closed
+  function pushSupported() {
+    return S.web && location.protocol === 'https:' && 'serviceWorker' in navigator && window.PushManager && window.Notification;
+  }
+  function pushSub() {
+    return navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription().then(function (sub) { return { reg: reg, sub: sub }; }); });
+  }
+  function pushEnable() {
+    return Notification.requestPermission().then(function (perm) {
+      if (perm !== 'granted') throw new Error('Notifications are blocked for this site — allow them in the browser settings');
+      return api('GET', 'push');
+    }).then(function (info) {
+      if (!info.available) throw new Error('Notifications are not available here');
+      return pushSub().then(function (x) {
+        var key = Uint8Array.from(atob(info.key.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((info.key.length + 3) % 4)), function (c) { return c.charCodeAt(0); });
+        return x.sub || x.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      });
+    }).then(function (sub) {
+      var ua = navigator.userAgent || '';
+      var device = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Linux';
+      return api('POST', 'push', { subscription: sub.toJSON ? sub.toJSON() : sub, device: device + (/Mobile/.test(ua) ? ' phone' : '') });
+    });
+  }
+  function pushDisable() {
+    return pushSub().then(function (x) {
+      if (!x.sub) return null;
+      var ep = x.sub.endpoint;
+      return x.sub.unsubscribe().catch(function () {}).then(function () { return api('POST', 'push/remove', { endpoint: ep }); });
+    });
+  }
+  function pushRow() {
+    if (!S.web) return null;
+    var btn = h('button', { class: 'btn sm' }, '…');
+    var test = h('button', { class: 'btn sm hidden', onclick: function () {
+      api('POST', 'push/test').then(function (d) { toast(d.sent ? 'Sent — lock the screen to see it' : 'Could not send', d.sent ? 'ok' : 'warn'); }).catch(fail);
+    } }, 'Test');
+    var state = h('span', { class: 'muted' });
+    var on = false;
+    function show(v, note) {
+      on = v;
+      btn.textContent = v ? 'Turn off' : 'Turn on';
+      btn.disabled = false;
+      test.classList.toggle('hidden', !v);
+      state.textContent = note || (v ? 'on for this device' : 'off');
+    }
+    if (!pushSupported()) {
+      btn.disabled = true; btn.textContent = 'Turn on';
+      state.textContent = location.protocol !== 'https:' ? 'needs https' : 'not supported by this browser (on iPhone: add to Home Screen first)';
+    } else {
+      pushSub().then(function (x) { show(!!x.sub && Notification.permission === 'granted'); }).catch(function () { show(false); });
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        (on ? pushDisable().then(function () { show(false); }) : pushEnable().then(function () { show(true); toast('Notifications on for this device', 'ok'); }))
+          .catch(function (e) { show(on); fail(e); });
+      });
+    }
+    return h('div', { class: 'svc' }, h('span', null, 'Notifications on this device', h('br'), h('small', { class: 'muted' }, 'When Claude finishes or needs you, with the page closed — '), state), h('span', { style: 'display:flex;gap:6px' }, test, btn));
   }
 
   function logout() {
@@ -1314,7 +1377,7 @@
   function syncTabs() {
     if (syncing || !S.booted) return Promise.resolve();
     syncing = true;
-    return api('GET', 'tabs').then(function (d) {
+    return api('GET', 'tabs' + (document.hidden ? '' : '?vis=1')).then(function (d) {
       syncing = false;
       S.windows = d.windows || [];
       renderTitle();
@@ -2813,6 +2876,7 @@
       h('div', { class: 'sec' }, 'Account'),
       h('div', { class: 'svc' }, h('span', null, 'Signed in as ', h('b', { class: 'mono' }, S.server.user + '@' + S.server.host + (String(S.server.port) !== '22' ? ':' + S.server.port : ''))),
         h('button', { class: 'btn sm', onclick: logout }, 'Sign out')),
+      pushRow(),
       chk('serverPersist', 'Keep server terminals alive (tmux)', 'Shells survive a dropped connection; reopening attaches to the same one.'),
       h('div', { class: 'sec' }, 'Claude'),
       h('div', { class: 'row' },
@@ -4038,6 +4102,8 @@
       var want = sessionStorage.getItem('sw-active');
       var mine = (st.sessions || []).filter(function (x) { return (x.win || '') === WID; });
       if (TAKE.length) want = TAKE[0];
+      var fromNote = /[#&]open=([0-9a-f]{12})/.exec(location.hash);      // a tapped phone notification
+      if (fromNote) want = fromNote[1];
       var placed = initLayout(mine.map(function (x) { return x.id; }));
       mine.forEach(function (info) { addTab(info, true, placed[info.id] || L.focused); });
       L.groups.slice().forEach(function (g) { if (!g.tabs.length && L.groups.length > 1) removeGroup(g); });

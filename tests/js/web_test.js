@@ -140,6 +140,7 @@ const tests = {
     await settle();
     const modal = q('.modal').pop();
     assert.match(modal.textContent, /Signed in as esi@127\.0\.0\.1/);
+    assert.match(modal.textContent, /Notifications on this device/, 'phone notifications can be turned on');
     assert.ok(!q('button', modal).some((b) => /Uninstall|New key|Save & test|Stop service/.test(b.textContent)), 'no local setup controls');
     assert.match(modal.textContent, /In the installed app.*Two-way sync/);
     assert.ok(!calls.some((c) => c.url === '/api/connection' || c.url.startsWith('/api/update') || c.url === '/api/tunnels'), 'nothing local is asked for');

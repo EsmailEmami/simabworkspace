@@ -38,6 +38,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
@@ -2479,6 +2480,8 @@ class ChatSession:
         self.wlock = threading.Lock()
         self.on_usage = None          # callback(rate_limit_info)
         self.on_cost = None           # callback(project, usd) — the cost of each answer
+        self.on_notify = None         # callback(session, "done" | "ask", detail) — phone notifications
+        self._linked_at = 0.0         # when the relay last (re)attached: what follows at once is replayed
         self._cost_seen = 0.0
         # the relay on the server (Claude survives a dropped connection); "" = run Claude directly
         self.relay_key = built.get("relay") or ""
@@ -2580,6 +2583,7 @@ class ChatSession:
         if st in ("started", "attached") and self.session_id:
             self._write({"type": "_sw_relay_conv", "id": self.session_id})
         was_linking, self.linking = self.linking, False
+        self._linked_at = time.time()
         if st == "exit":
             self.relay_exit = ev.get("code") if isinstance(ev.get("code"), int) else -1
             self._broadcast({"t": "link", "linking": False, "busy": False})
@@ -2668,6 +2672,13 @@ class ChatSession:
         except (OSError, ValueError):
             pass
 
+    def _notify(self, kind: str, detail: str):
+        if self.on_notify and time.time() - self._linked_at > 3:
+            try:
+                self.on_notify(self, kind, detail)
+            except Exception as e:  # noqa: BLE001 - a notification must never break the chat
+                log_line(f"notify: {e}")
+
     def _handle_event(self, ev: dict):
         t = ev.get("type")
         sid = ev.get("session_id")
@@ -2700,7 +2711,10 @@ class ChatSession:
             req = ev.get("request") or {}
             if req.get("subtype") == "can_use_tool":
                 with self.lock:
+                    fresh = ev.get("request_id") not in self.pending
                     self.pending[ev.get("request_id")] = ev
+                if fresh:
+                    self._notify("ask", str(req.get("tool_name") or ""))
             else:
                 # not supported here: answer so Claude does not wait forever
                 self._write({"type": "control_response", "response": {
@@ -2710,6 +2724,8 @@ class ChatSession:
             with self.lock:
                 self.pending.pop(ev.get("request_id"), None)
         elif t == "result":
+            if self.busy:
+                self._notify("done", "")
             self.busy = False
             tc = ev.get("total_cost_usd")          # the whole process so far
             if isinstance(tc, (int, float)) and not isinstance(tc, bool):
@@ -4863,6 +4879,10 @@ class App:
         self._docker_seq = 0
         self._docker_error = ""
         self._docker_checked = 0.0
+        self.pusher = None            # web version: Pusher of the web server (phone notifications)
+        self.push_msgs = collections.deque(maxlen=30)
+        self.push_seq = 0
+        self.last_visible = 0.0       # a page of this workspace was on screen (GET tabs?vis=1)
         self._restored = threading.Event()    # set once the tabs of the last run are back (restore_live)
         self._restored.set()
         self._live_saved = False
@@ -4974,6 +4994,7 @@ class App:
             c.remember = self.store.set_chat_prefs
             c.on_usage = self.usage.limits
             c.on_cost = self.usage.cost
+            c.on_notify = self.push_notify
             c.start()
             self.activity.add("chat", built["spec"]["project"], c.title, session=built.get("resume") or "")
             with self.lock:
@@ -5908,6 +5929,74 @@ class App:
             if s:
                 s.win, s.moved = wid, time.time()
 
+    # phone notifications (web version) ------------------------------------------------
+    PUSH_MAX = 10
+
+    def _push_subs(self) -> list:
+        v = self.store.db.get("push", [])
+        return [x for x in v if isinstance(x, dict) and push_endpoint_ok(x.get("endpoint"))] if isinstance(v, list) else []
+
+    def push_info(self) -> dict:
+        if not self.pusher:
+            return {"available": False}
+        return {"available": True, "key": self.pusher.public(), "devices": len(self._push_subs())}
+
+    def push_subscribe(self, b: dict) -> dict:
+        if not self.pusher:
+            raise ApiError(400, "notifications need the web version")
+        sub = b.get("subscription") if isinstance(b, dict) else None
+        ep = sub.get("endpoint") if isinstance(sub, dict) else None
+        if not push_endpoint_ok(ep):
+            raise ApiError(400, "this browser's push service is not supported")
+        subs = [x for x in self._push_subs() if x["endpoint"] != ep]
+        subs.append({"endpoint": ep, "at": time.time(), "seen": self.push_seq, "device": clean_str(b.get("device"), 120, "device")})
+        self.store.db.put("push", subs[-self.PUSH_MAX:])
+        return self.push_info()
+
+    def push_unsubscribe(self, b: dict) -> dict:
+        ep = b.get("endpoint") if isinstance(b, dict) else None
+        self.store.db.put("push", [x for x in self._push_subs() if x["endpoint"] != ep])
+        return self.push_info()
+
+    def push_pending(self, b: dict) -> dict:
+        """The service worker got a push: what to show (messages this device has not shown yet)."""
+        ep = b.get("endpoint") if isinstance(b, dict) else None
+        subs = self._push_subs()
+        me = next((x for x in subs if x["endpoint"] == ep), None)
+        seen = me.get("seen", 0) if me else self.push_seq - 1
+        out = [m for m in self.push_msgs if m["seq"] > seen and time.time() - m["at"] < 3600]
+        if me:
+            me["seen"] = self.push_seq
+            self.store.db.put("push", subs)
+        return {"messages": out[-5:]}
+
+    def push_notify(self, sess, kind: str, detail: str = ""):
+        if not self.pusher or time.time() - self.last_visible < 8:
+            return                        # someone is looking at the workspace: the page shows it
+        subs = self._push_subs()
+        if not subs:
+            return
+        p = (sess.spec or {}).get("project") or ""
+        name = sess.title if not str(sess.title).startswith("Claude · ") else (p or "home")
+        title = "Claude needs you" if kind == "ask" else "Claude finished"
+        body = (name + (" · " + p if p and p != name else "")) + (" — " + detail if detail else "")
+        with self.lock:
+            self.push_seq += 1
+            self.push_msgs.append({"seq": self.push_seq, "at": time.time(), "title": title, "body": body[:200],
+                                   "tag": sess.id + ":" + kind, "tab": sess.id})
+        threading.Thread(target=self._push_send, args=(subs,), daemon=True).start()
+
+    def _push_send(self, subs):
+        gone = []
+        for x in subs:
+            code = self.pusher.send(x["endpoint"])
+            if code in (404, 410):
+                gone.append(x["endpoint"])
+            elif not 200 <= code < 300:
+                log_line(f"push: {urllib.parse.urlsplit(x['endpoint']).hostname} answered {code}")
+        if gone:
+            self.store.db.put("push", [x for x in self._push_subs() if x["endpoint"] not in gone])
+
     def client_error(self, b: dict) -> dict:
         """A script error in a browser (phone, tablet…) → one line in the log. At most 30 a minute."""
         now = time.time()
@@ -6294,6 +6383,134 @@ def write_vscode_ssh_alias(conf: ServerConf, ssh_config: Path = None, chmod=True
         os.chmod(f, 0o600)
 
 
+# ----------------------------------------------------------------------------- web push
+# Phone/tablet notifications when Claude finishes or needs you, even with the page closed.
+# Python has no elliptic-curve crypto in its standard library, so the P-256 maths for the
+# VAPID signature (ES256) is here. Pushes carry NO payload (that would need AES-GCM): the
+# service worker asks the app what happened (POST push/pending) and shows that.
+P256_P = 2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1
+P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+P256_G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
+          0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5)
+PUSH_HOSTS = ("fcm.googleapis.com", ".push.services.mozilla.com", ".notify.windows.com", "web.push.apple.com", ".push.apple.com")
+
+
+def _ec_add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    p = P256_P
+    if a[0] == b[0]:
+        if (a[1] + b[1]) % p == 0:
+            return None
+        m = (3 * a[0] * a[0] - 3) * pow(2 * a[1], -1, p) % p
+    else:
+        m = (b[1] - a[1]) * pow(b[0] - a[0], -1, p) % p
+    x = (m * m - a[0] - b[0]) % p
+    return x, (m * (a[0] - x) - a[1]) % p
+
+
+def _ec_mul(k: int, pt=P256_G):
+    out = None
+    while k:
+        if k & 1:
+            out = _ec_add(out, pt)
+        pt = _ec_add(pt, pt)
+        k >>= 1
+    return out
+
+
+def b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def p256_public(d: int) -> bytes:
+    x, y = _ec_mul(d)
+    return b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+
+
+def es256_sign(d: int, msg: bytes) -> bytes:
+    z = int.from_bytes(hashlib.sha256(msg).digest(), "big")
+    while True:
+        k = secrets.randbelow(P256_N - 1) + 1
+        r = _ec_mul(k)[0] % P256_N
+        if not r:
+            continue
+        sig = pow(k, -1, P256_N) * (z + r * d) % P256_N
+        if sig:
+            return r.to_bytes(32, "big") + sig.to_bytes(32, "big")
+
+
+def es256_verify(pub: bytes, msg: bytes, sig: bytes) -> bool:
+    if len(pub) != 65 or len(sig) != 64:
+        return False
+    q = (int.from_bytes(pub[1:33], "big"), int.from_bytes(pub[33:], "big"))
+    r, s_ = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    if not (0 < r < P256_N and 0 < s_ < P256_N):
+        return False
+    z = int.from_bytes(hashlib.sha256(msg).digest(), "big")
+    w = pow(s_, -1, P256_N)
+    pt = _ec_add(_ec_mul(z * w % P256_N), _ec_mul(r * w % P256_N, q))
+    return pt is not None and pt[0] % P256_N == r
+
+
+def push_endpoint_ok(url) -> bool:
+    if not isinstance(url, str) or len(url) > 1000:
+        return False
+    u = urllib.parse.urlsplit(url)
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and any(host == h or (h.startswith(".") and host.endswith(h)) for h in PUSH_HOSTS)
+
+
+class Pusher:
+    """The VAPID key of this web server (one file, made once) and sending pushes."""
+
+    def __init__(self, keyfile: Path):
+        self.keyfile = Path(keyfile)
+        self._d = None
+
+    def key(self) -> int:
+        if self._d is None:
+            try:
+                self._d = int(json.loads(self.keyfile.read_text())["d"], 16)
+            except (OSError, ValueError, KeyError, TypeError):
+                self._d = secrets.randbelow(P256_N - 1) + 1
+                tmp = self.keyfile.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"d": format(self._d, "064x")}))
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, self.keyfile)
+        return self._d
+
+    def public(self) -> str:
+        return b64u(p256_public(self.key()))
+
+    def auth(self, endpoint: str) -> str:
+        u = urllib.parse.urlsplit(endpoint)
+        head = b64u(json.dumps({"typ": "JWT", "alg": "ES256"}, separators=(",", ":")).encode())
+        claims = b64u(json.dumps({"aud": f"{u.scheme}://{u.netloc}", "exp": int(time.time()) + 12 * 3600,
+                                  "sub": "https://github.com/EsmailEmami/simabworkspace"}, separators=(",", ":")).encode())
+        signing = (head + "." + claims).encode()
+        return f"vapid t={head}.{claims}.{b64u(es256_sign(self.key(), signing))}, k={self.public()}"
+
+    def send(self, endpoint: str) -> int:
+        """HTTP status of the push service (201 = sent; 404/410 = this subscription is gone)."""
+        req = urllib.request.Request(endpoint, data=b"", method="POST", headers={
+            "Authorization": self.auth(endpoint), "TTL": "86400", "Urgency": "high", "Content-Length": "0"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+        except (OSError, ValueError):
+            return 0
+
+
 # ----------------------------------------------------------------------------- web version
 # `server.py web` serves the same window to browsers (a tablet…) over the network. People
 # sign in with an SSH user and password of an allowed server; the password is only used
@@ -6362,6 +6579,7 @@ class WebGate:
         self.fails = {}
         self.all_fails = collections.deque()
         self.db = open_db(self.root / "gate.db")
+        self.pusher = Pusher(self.root / "vapid.json")
 
         def load(f):
             try:
@@ -6470,6 +6688,7 @@ class WebGate:
         except (OSError, ValueError):
             return None
         app = App(Store(d / "simab.db"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
+        app.pusher = self.pusher
         self.apps[wsid] = app
         app.restore_live()
         if self.start_loops:
@@ -6840,7 +7059,27 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             return app.claude_stop(b.get("project") or "", b.get("pid"), b.get("sessionId"))
         if route == ("GET", "tabs"):
+            if query.get("vis") == ["1"]:
+                app.last_visible = time.time()
             return app.tabs()
+        if route == ("GET", "push"):
+            return app.push_info()
+        if route == ("POST", "push") and len(parts) == 1:
+            return app.push_subscribe(self._body())
+        if route == ("POST", "push") and parts[1:] == ["remove"]:
+            return app.push_unsubscribe(self._body())
+        if route == ("POST", "push") and parts[1:] == ["pending"]:
+            return app.push_pending(self._body())
+        if route == ("POST", "push") and parts[1:] == ["test"]:
+            if not app.pusher:
+                raise ApiError(400, "notifications need the web version")
+            with app.lock:
+                app.push_seq += 1
+                app.push_msgs.append({"seq": app.push_seq, "at": time.time(), "title": "Simab Workspace",
+                                      "body": "Notifications work on this device", "tag": "test", "tab": ""})
+            subs = app._push_subs()
+            codes = [app.pusher.send(x["endpoint"]) for x in subs]
+            return {"sent": sum(1 for c in codes if 200 <= c < 300), "devices": len(subs)}
         if route == ("POST", "windows") and len(parts) == 2:
             app.window_seen(parts[1])
             return {"ok": True}

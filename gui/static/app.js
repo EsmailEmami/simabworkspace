@@ -2321,6 +2321,10 @@
     ['fetch', 'pull', 'push'].forEach(function (a) {
       btns[a] = h('button', { class: 'btn', onclick: function () { action(a); } }, a[0].toUpperCase() + a.slice(1));
     });
+    btns.discard = h('button', { class: 'btn danger', disabled: true, title: 'Discard selected changes (cannot be undone)', onclick: function () {
+      var sel = st ? st.files.filter(function (f) { return picked.has(f.path); }) : [];
+      if (sel.length) discard(sel);
+    } }, 'Discard…');
     var allBox = h('input', { type: 'checkbox', checked: true, title: 'Select all', onchange: function () {
       picked = allBox.checked ? new Set(st.files.map(function (f) { return f.path; })) : new Set();
       renderList();
@@ -2391,16 +2395,32 @@
       }).catch(function (e) { setBusy(false, 'untrack'); fail(e); });
     }
 
+    function discard(files) {
+      var label = files.length === 1 ? '"' + files[0].path.split('/').pop() + '"' : files.length + ' files';
+      var isDel = files.some(function (f) { return f.untracked; });
+      var msg2 = isDel ? 'Delete new file ' + label + ' and discard all changes? This cannot be undone.'
+        : 'Discard changes to ' + label + '? The ' + (files.length === 1 ? 'file goes' : 'files go') + ' back to the last commit. This cannot be undone.';
+      confirmDlg(msg2, isDel ? 'Delete' : 'Discard', true).then(function (ok) {
+        if (!ok) return;
+        setBusy(true, 'discarding');
+        gpost('discard', { files: files.map(function (f) { return f.path; }) }).then(function (d) {
+          setBusy(false, 'discard'); apply(d.status);
+          toast('Discarded ' + label, 'ok');
+        }).catch(function (e) { setBusy(false, 'discard'); fail(e); });
+      });
+    }
+
     var md = openModal({
       title: 'Git — ' + p.name, size: 'wide', onclose: function () { refreshGit(p.name); },
       body: [switcher, head, banner, h('div', { class: 'ggrid' }, h('div', { class: 'gleft' }, gtabs, changesHead, list, hist), diff)],
-      foot: [btns.fetch, btns.pull, btns.push, h('span', { class: 'grow' }), h('div', { class: 'gcommit' }, msg), commitBtn]
+      foot: [btns.fetch, btns.pull, btns.push, btns.discard, h('span', { class: 'grow' }), h('div', { class: 'gcommit' }, msg), commitBtn]
     });
 
     function setBusy(b, what) {
       busy = b;
       Object.keys(btns).forEach(function (k) { btns[k].disabled = b; });
       commitBtn.disabled = b || !st || !st.files.length || !picked.size;
+      btns.discard.disabled = b || !picked.size;
       if (what) head.lastChild.textContent = b ? what + '…' : '';
     }
 
@@ -2448,7 +2468,8 @@
             commitBtn.disabled = busy || !picked.size;
           } });
           var name = f.path.split('/').pop(), dir = f.path.slice(0, f.path.length - name.length);
-          return h('div', { class: 'gfile' + (current === f.path ? ' sel' : '') + (f.conflict ? ' conflict' : ''), title: (GIT_LABEL[code] || code) + ': ' + f.path, onclick: function () { showDiff(f); } },
+          return h('div', { class: 'gfile' + (current === f.path ? ' sel' : '') + (f.conflict ? ' conflict' : ''), title: (GIT_LABEL[code] || code) + ': ' + f.path, onclick: function () { showDiff(f); },
+            oncontextmenu: function (e) { e.preventDefault(); showMenu(e.clientX, e.clientY, [{ label: (f.untracked ? 'Delete file…' : 'Discard changes…'), action: function () { discard([f]); } }]); } },
             cb, h('span', { class: 'gcode c' + (code === '?' ? 'N' : code) }, code === '?' ? 'N' : code),
             h('span', { class: 'gname' }, name), h('span', { class: 'gdir' }, dir),
             f.ignored ? h('span', { class: 'ftag', title: 'Named in .gitignore, but git tracks it' }, 'ignored') : null);
@@ -2486,6 +2507,7 @@
       st.files.forEach(function (f) { if (!had || !had.has(f.path) || picked.has(f.path)) next.add(f.path); });
       picked = next;
       allBox.checked = picked.size === st.files.length;
+      btns.discard.disabled = busy || !picked.size;
       renderHead();
       renderList();
       if (current && !st.files.some(function (f) { return f.path === current; })) {

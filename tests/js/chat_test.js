@@ -232,7 +232,58 @@ const tests = {
     feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'x' } });
     assert.strictEqual(tab.stText.textContent, 'ready');
     ws.onclose();
-    assert.match(tab.stText.textContent, /disconnected/);
+    assert.match(tab.stText.textContent, /no connection/);
+  },
+
+  async 'no connection: the box says so; after an app restart the tab opens the same Claude again'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    feed({ t: 's', events: [{ type: 'system', subtype: 'init', session_id: '11111111-2222-3333-4444-555555555555' }], state: { alive: true, busy: true } });
+    tab.info.spec.relay = 'abcdef0123456789';
+    // the server lost its ssh to Claude: the status says it is reconnecting, not "working"
+    feed({ t: 'e', e: { type: '_reconnect', code: 255 } });
+    assert.match(tab.stText.textContent, /reconnecting to Claude/);
+    feed({ t: 'e', e: { type: '_reconnected', running: true } });
+    assert.doesNotMatch(tab.stText.textContent, /reconnecting/);
+    // the browser lost the app: nothing can be sent, the text stays in the box
+    const calls = [];
+    global.apiImpl = (m, u, b) => {
+      calls.push([m, u, b]);
+      if (u === 'state') return Promise.resolve({ sessions: [] });             // restarted: this session is gone
+      if (m === 'POST' && u === 'sessions') return Promise.resolve({ id: 'c9', title: 'Claude · p', alive: true, spec: Object.assign({ kind: 'chat', project: 'p', where: 'server' }, { relay: b.relay, resume: b.resume }) });
+      return Promise.resolve({});
+    };
+    ws.onclose();
+    assert.ok(tab.composerEl.classList.contains('offline'));
+    assert.ok(tab.sendBtn.disabled);
+    tab.ta.value = 'still here';
+    toasts.length = 0;
+    tab.submit();
+    assert.strictEqual(tab.ta.value, 'still here');
+    assert.match(toasts.pop(), /No connection/);
+    await new Promise((r) => setTimeout(r, 450));
+    const post = calls.find((c) => c[0] === 'POST' && c[1] === 'sessions');
+    assert.ok(post, 'the conversation is opened again');
+    assert.deepStrictEqual([post[2].resume, post[2].relay, post[2].project], ['11111111-2222-3333-4444-555555555555', 'abcdef0123456789', 'p']);
+    assert.strictEqual(tab.id, 'c9');
+    assert.ok(!tab.gone);
+    const ws2 = global.sockets[global.sockets.length - 1];
+    assert.match(ws2.url, /id=c9/);
+    ws2.onopen();
+    assert.ok(!tab.composerEl.classList.contains('offline') && !tab.sendBtn.disabled);
+    global.apiImpl = () => Promise.resolve({});
+  },
+
+  async 'a new chat with no conversation yet just ends after an app restart'() {
+    const { tab, ws } = newTab();
+    ws.onopen();
+    global.apiImpl = (m, u) => Promise.resolve(u === 'state' ? { sessions: [] } : {});
+    ws.onclose();
+    await new Promise((r) => setTimeout(r, 450));
+    assert.ok(tab.gone);
+    assert.match(tab.msgs.textContent, /no longer running/);
+    assert.strictEqual(tab.stText.textContent, 'not running');
+    global.apiImpl = () => Promise.resolve({});
   },
 
   'Persian question cards are right-to-left'() {

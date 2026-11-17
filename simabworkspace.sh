@@ -41,6 +41,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.35.2 2026-11-17  Chat connection state is clear: a silently dead connection (phone asleep,
+#                       CDN in between) is noticed by a ping within ~25 s; after the app restarts
+#                       the chat opens the same Claude again by itself; while there is no
+#                       connection the message box is dimmed and sending is off (text kept); the
+#                       status says "reconnecting to Claude on the server…" instead of working.
 #    1.35.1 2026-11-17  Run commands: Browse… picks the command's folder among the project's
 #                       server folders; Suggest works in the web version (reads the server
 #                       folder); the web editor shows that commands run on the server.
@@ -273,7 +278,7 @@
 
 set -u -o pipefail
 
-VERSION="1.35.1"
+VERSION="1.35.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

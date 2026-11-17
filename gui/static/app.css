@@ -360,7 +360,10 @@ details.thinking.live summary { animation: pulse 1.4s infinite; }
 .cstatus.work .st-text { color: var(--text); }
 .cstatus.wait .st-text { color: var(--warn); }
 .cstatus.off .st-text { color: var(--err); }
-.cstatus .st-extra { white-space: nowrap; }
+.cstatus .st-text { flex: 0 0 auto; max-width: 65%; }
+.cstatus .st-extra { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.chat-composer.offline .cbox { opacity: .5; }
+.chat-composer.offline .cbox .send { cursor: not-allowed; }
 .cstatus.wait .dot { animation: pulse 1s infinite; }
 .umsg.pending { opacity: .6; }
 .live-text::after { content: "▍"; color: var(--accent); animation: pulse 1s infinite; margin-left: 1px; }
@@ -892,7 +895,7 @@ body.compact .run-acts { width: 100%; justify-content: flex-start; }
 #btn-claude i { color: #d4976c; }
 
 /* stuck chat: Interrupt / Restart next to the status */
-.cstatus .stuck { margin-left: 8px; display: inline-flex; gap: 8px; }
+.cstatus .stuck { margin-left: 8px; display: inline-flex; gap: 8px; flex: none; }
 .cstatus .stuck .link { border: 1px solid #5c4a2a; border-radius: 5px; padding: 0 7px; color: var(--warn); background: #17140e; font-size: 11px; }
 .cstatus .stuck .link:hover { border-color: var(--warn); }
 .ign-side { margin-bottom: 6px; }

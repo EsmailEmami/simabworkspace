@@ -375,9 +375,10 @@
     if (this.closed || this.gone) return;
     var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(SW.token));
     this.ws = ws;
-    ws.onopen = function () { self.retry = 0; self.conn = 'online'; self.renderStatus(); };
+    ws.onopen = function () { self.retry = 0; self.lastRx = Date.now(); self.pingAt = 0; self.conn = 'online'; self.renderStatus(); };
     ws.onmessage = function (ev) {
       var m;
+      self.lastRx = Date.now();
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       try { self.onMessage(m); } catch (err) { self.reportError(err, m.e || m); }
     };
@@ -436,10 +437,37 @@
       setTimeout(function () {
         api('GET', 'state').then(function (st) {
           if (st.sessions.some(function (s) { return s.id === self.id; })) self.connect();
-          else { self.gone = true; self.system('This conversation is no longer running. Use “history” to continue it.', 'err'); }
+          else self.reopen();
         }).catch(function () { self.connect(); });
       }, Math.min(5000, 300 * self.retry));
     };
+  };
+
+  // The app was restarted (an update, the web server restarted): this tab's session is gone,
+  // but Claude keeps running on the server under its relay. Open the same conversation again
+  // and keep using this tab.
+  P.reopen = function () {
+    var self = this, sp = this.info.spec || {};
+    var conv = this.sessionId || sp.resume;
+    function ended() { self.gone = true; self.conn = 'gone'; self.renderStatus(); self.system('This conversation is no longer running. Use “history” to continue it.', 'err'); }
+    if (!conv || sp.watch || this.closed) { ended(); return; }
+    var spec = { kind: 'chat', project: sp.project || '', resume: conv, title: this.info.title };
+    if (sp.relay) spec.relay = sp.relay;
+    var wid = SW.wid ? SW.wid() : '';
+    if (wid) spec.win = wid;
+    api('POST', 'sessions', spec).then(function (info) {
+      if (self.closed) return;
+      self.id = info.id;
+      self.info = info;
+      self.retry = 0;
+      self.applyInfo();
+      if (SW.saveLayout) SW.saveLayout();
+      self.connect();
+    }).catch(function (e) {
+      if (self.closed) return;
+      if (e && e.status && e.status < 500) ended();
+      else setTimeout(function () { self.reopen(); }, 3000);
+    });
   };
 
   P.reportError = function (err, ev) {
@@ -704,7 +732,12 @@
   };
 
   P.renderStatus = function () {
-    var conn = this.conn === 'online' ? null : (this.conn === 'connecting' ? 'connecting…' : 'disconnected — reconnecting…');
+    var conn = this.conn === 'online' ? null : this.conn === 'connecting' ? 'connecting…'
+      : this.conn === 'gone' ? 'not running' : 'no connection — reconnecting…';
+    // no connection: nothing can be sent, so the message box says so (the text you type is kept)
+    var off = !!conn && !this.watching;
+    if (this.composerEl) this.composerEl.classList.toggle('offline', off);
+    if (this.sendBtn) this.sendBtn.disabled = off;
     var kind = conn ? 'off' : (this.phaseKind || 'idle');
     var extra = [];
     var waiting = (this.echoes || []).length - (kind === 'work' && this.phaseText === 'sending…' ? 1 : 0);
@@ -805,8 +838,16 @@
       case '_error': this.system(e.text, 'err'); break;
       case '_restart': this.system('— restarted —', 'mark'); break;
       case '_reattached': this.system(e.busy ? '— Claude kept working on the server; following it again —' : '— reconnected to the same Claude —', 'mark'); break;
-      case '_reconnect': if (!this.replaying) this.system('Connection lost — Claude keeps working on the server. Reconnecting…', 'mark'); break;
-      case '_reconnected': if (!this.replaying) this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'mark'); break;
+      case '_reconnect':
+        if (this.replaying) break;
+        this.system('Connection to the server lost — Claude keeps working there. Reconnecting…', 'mark');
+        this.setPhase('work', 'reconnecting to Claude on the server…');
+        break;
+      case '_reconnected':
+        if (this.replaying) break;
+        this.system(e.running ? 'Reconnected — picked up where it was' : 'Reconnected', 'mark');
+        if (/^reconnecting/.test(this.phaseText || '')) this.setPhase(this.busy ? 'work' : 'idle', this.busy ? 'working…' : 'ready');
+        break;
       case '_exit':
         this.alive = false;
         this.setBusy(false);
@@ -1601,14 +1642,15 @@
 
   P.submit = function () {
     if (this.watching) return;
+    var text = this.ta.value.trim();
+    if (!text && !this.attachments.length) return;
+    if (this.gone) { toast('This conversation has ended — start a new one', 'warn'); return; }
+    if (this.conn !== 'online') { toast('No connection yet — your message stays here; send it when it is back', 'warn'); return; }
     var queued = this.busy;              // Claude is working: the message waits for its turn
     if (!queued) {
       this.turnStart = Date.now();
       this.tokBase = 0; this.msgTok = 0; this.outTokens = 0;
     }
-    var text = this.ta.value.trim();
-    if (!text && !this.attachments.length) return;
-    if (this.gone) { toast('This conversation has ended — start a new one', 'warn'); return; }
     var content = this.attachments.map(function (a) { return { type: 'image', source: { type: 'base64', media_type: a.type, data: a.data } }; });
     if (text) content.push({ type: 'text', text: text });
     if (!this.send({ t: 'send', content: content })) return;

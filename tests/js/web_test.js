@@ -247,6 +247,25 @@ tests['run commands: run on the server, suggested from the server folder, folder
   assert.deepStrictEqual(saved.map((c) => [c.where, c.cwd]), [['server', 'cheshmeh-api-service'], ['server', ''], ['server', 'cheshmeh-web-app']]);
 };
 
+tests['a connection that died silently (phone asleep, CDN in between) is noticed by a ping'] = async function () {
+  const t = global.SW.S.tabs.find((x) => x.ws && x.ws.readyState === 1);
+  assert.ok(t, 'an open tab');
+  const ws = t.ws;
+  let closed = 0;
+  const oc = ws.onclose;
+  ws.onclose = function () { closed++; };
+  t.lastRx = Date.now() - 20000; t.pingAt = 0;
+  global.SW.heartbeat();
+  assert.deepStrictEqual(ws.sent[ws.sent.length - 1], { t: 'p' }, 'a quiet tab pings');
+  global.SW.heartbeat();
+  assert.strictEqual(closed, 0, 'waits for the answer');
+  t.pingAt = Date.now() - 11000;
+  global.SW.heartbeat();
+  assert.strictEqual(closed, 1, 'no answer → dropped, the tab reconnects');
+  assert.strictEqual(ws.readyState, 3);
+  ws.onclose = oc;
+};
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of Object.entries(tests)) {

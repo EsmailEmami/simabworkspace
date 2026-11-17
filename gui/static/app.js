@@ -99,6 +99,37 @@
     S.tabs.forEach(function (t) { if (t.ws && t.ws.readyState > 1 && !t.closed && !t.gone && t.connect) t.connect(); });
   }
 
+  // A connection can die without the browser noticing (a phone that slept, a CDN in between
+  // that keeps its own side open): a quiet tab pings; no answer within PING_WAIT → it is
+  // treated as dropped and the tab's normal reconnect runs.
+  var PING_QUIET = 15000, PING_WAIT = 10000;
+  function heartbeat() {
+    var now = Date.now();
+    (S.tabs || []).forEach(function (t) {
+      var ws = t.ws;
+      if (!ws || ws.readyState !== 1 || t.closed || t.gone) return;
+      if (t.pingAt && (t.lastRx || 0) < t.pingAt) {
+        if (now - t.pingAt > PING_WAIT) dropWs(t);
+        return;
+      }
+      if (now - (t.lastRx || 0) > PING_QUIET) {
+        t.pingAt = now;
+        try { ws.send('{"t":"p"}'); } catch (e) { dropWs(t); }
+      }
+    });
+  }
+  function dropWs(t) {
+    var ws = t.ws, oc = ws.onclose;
+    t.pingAt = 0;
+    ws.onclose = null;
+    ws.onmessage = null;
+    try { ws.close(); } catch (e) { /* already closed */ }
+    if (oc) oc.call(ws);
+  }
+  setInterval(heartbeat, 2000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) heartbeat(); });
+  window.addEventListener('online', heartbeat);
+
   // Web version: sign in with an SSH user and password of an allowed server.
   var loginShown = false;
   function showLogin() {
@@ -612,11 +643,14 @@
     this.ws = ws;
     ws.onopen = function () {
       self.retry = 0;
+      self.lastRx = Date.now();
+      self.pingAt = 0;
       if (self.opened) self.send({ t: 'r', c: self.term.cols, r: self.term.rows });
       if (self.alive) self.setBanner(null);
     };
     ws.onmessage = function (ev) {
       var msg;
+      self.lastRx = Date.now();
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (msg.t === 'o') { self.term.write(msg.d); self.onOutput(); }
       else if (msg.t === 's') {
@@ -3869,7 +3903,7 @@
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
-    moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }
+    moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, saveLayout: function () { saveLayout(); }
   };
 
   // ------------------------------------------------------------------ boot

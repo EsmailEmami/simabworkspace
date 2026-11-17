@@ -41,6 +41,13 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.36.0 2026-11-17  Changes tab (review, tick files to commit, discard, pull/push) and a
+#                       "N files changed — Review changes" line after each Claude turn; Ctrl+P
+#                       go to file; web: phone notifications (Web Push) when Claude finishes or
+#                       needs you, two-step sign-in (TOTP) and signed-in devices; run commands
+#                       shared in the project's .simab.json, last result ✓/✗, Open for the
+#                       address a command prints; a restart keeps chat/Files/Changes tabs (same
+#                       ids); browser script errors go to the app log.
 #    1.35.2 2026-11-17  Chat connection state is clear: a silently dead connection (phone asleep,
 #                       CDN in between) is noticed by a ping within ~25 s; after the app restarts
 #                       the chat opens the same Claude again by itself; while there is no
@@ -278,7 +285,7 @@
 
 set -u -o pipefail
 
-VERSION="1.35.2"
+VERSION="1.36.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

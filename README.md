@@ -74,12 +74,18 @@ In the window, **+ add project** in the sidebar:
 - **Server only** — work on it on the server without copying it.
 
 Each project has **Claude**, **Terminal**, **Code** and **Git**, its ▶ run commands, and
-more under **⋯** (past chats, sync details and conflicts, move folders, colour, history).
+more under **⋯** (past chats, **Changes** — review, commit, discard —, sync details and
+conflicts, move folders, colour, history). After each Claude turn that wrote files, the chat
+lists them with a link to review the changes.
+
+Run commands can be **shared with the project**: they are saved in `.simab.json` in the
+project folder (commit it), so every device and everyone on the project gets them.
 Everything the installer asked can be changed later in **⚙ Settings**.
 
 | | |
 |---|---|
 | Search everything | `Ctrl+Shift+P` |
+| Go to a file of the project | `Ctrl+P` |
 | New tab / close tab | `Alt+T` / `Alt+W` |
 | Split right / down | `Alt+\` / `Alt+-` |
 | Hide the sidebar | `Alt+M` |
@@ -98,7 +104,10 @@ simabworkspace web --hosts 127.0.0.1:22 --port 8443 --name my.server.com
 Open `https://my.server.com:8443` and sign in with an **SSH user and password** of a
 server in `--hosts` (empty = any server — better to list yours). The password is only
 used to sign in and to put a key of the workspace on that server; it is never stored.
-Five wrong passwords from one address lock it out for 15 minutes.
+Five wrong passwords from one address lock it out for 15 minutes. In **⚙ Settings** you can
+turn on **two-step sign-in** (a code from an authenticator app), see and sign out the
+**signed-in devices**, and turn on **notifications on this device** — when Claude finishes or
+needs you, even with the page closed.
 
 Each user@server gets its own projects, chats and history. Everything runs on the server:
 Claude, server terminals, Git, Docker and server run commands. Things that need your own

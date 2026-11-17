@@ -3380,9 +3380,10 @@
   // ------------------------------------------------------------------ sync details + conflicts
   function syncDetails(p) {
     var body = h('div', null, h('div', { class: 'muted' }, 'Loading…'));
+    var syncNowBtn = h('button', { class: 'btn', onclick: function () { syncAction(p, 'flush'); setTimeout(load, 1500); } }, 'Sync now');
+    var reconnectBtn = h('button', { class: 'btn hidden', onclick: function () { syncAction(p, 'resume'); setTimeout(load, 2000); } }, 'Reconnect');
     var md = openModal({ title: 'Sync — ' + p.name, size: 'wide', body: body,
-      foot: [h('button', { class: 'btn', onclick: function () { syncAction(p, 'flush'); setTimeout(load, 1500); } }, 'Sync now'),
-        h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+      foot: [syncNowBtn, reconnectBtn, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
     function kv(k, v, cls) { return h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: 'v mono ' + (cls || '') }, v)); }
     function resolve(c, keep, btn) {
       btn.disabled = true;
@@ -3397,6 +3398,9 @@
     }
     function load() {
       api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
+        var isErr = d.state === 'err';
+        syncNowBtn.classList.toggle('hidden', isErr);
+        reconnectBtn.classList.toggle('hidden', !isErr);
         var rows = [
           h('div', { class: 'kvs' },
             kv('status', d.label + (d.paused ? '' : ' (' + d.status + ')'), d.state),
@@ -3406,7 +3410,8 @@
             h('div', { class: 'kv' }, h('span', { class: 'k' }, 'not synced'),
               h('span', { class: 'v mono' }, (d.ignores || []).join(', ') || '—', ' ',
                 h('a', { href: '#', class: 'ign-edit', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Edit…'))),
-            d.error ? kv('last error', d.error, 'err') : null)];
+            d.error ? kv('last error', d.error, 'err') : null,
+            isErr ? h('div', { class: 'kv' }, h('span', { class: 'k' }), h('span', { class: 'v muted', style: 'font-size:12px' }, 'Click Reconnect to restore the sync after a network outage.')) : null)];
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
           h('span', null, d.progress.percent + '% · ' + d.progress.files + '/' + d.progress.totalFiles + ' items')));
         rows.push(h('div', { class: 'sec' }, d.conflicts.length ? plural(d.conflicts.length, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
@@ -4112,7 +4117,14 @@
             toast(p.name + ': sync finished — everything is copied', 'ok', { timeout: 8000 });
             notify('Sync finished', p.name);
           }
+          // notify once when sync transitions into an error state
+          var prev = (S.syncStates || {})[p.name];
+          if (p.sync && p.sync.state === 'err' && prev && prev !== 'err') {
+            toast(p.name + ': sync ' + (p.sync.label || 'disconnected') + ' — open Sync details to reconnect', 'err', { timeout: 10000 });
+          }
         });
+        S.syncStates = {};
+        d.projects.forEach(function (p) { if (p.sync) S.syncStates[p.name] = p.sync.state; });
         S.projects = d.projects;
         renderProjects();
         repaintTabs();

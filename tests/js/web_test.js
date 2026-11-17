@@ -30,6 +30,7 @@ const addon = (name) => ({ [name]: { [name]: class { fit() {} findNext() { retur
 Object.assign(global, addon('FitAddon'), addon('SearchAddon'), addon('WebLinksAddon'), addon('Unicode11Addon'), addon('WebglAddon'));
 
 let signedIn = false;
+let twoStep = false;
 const calls = [];
 const state = {
   version: '9', wsl: false, lastTabs: [], sessions: [], web: true,
@@ -46,7 +47,8 @@ global.fetch = (url, opts) => {
   let status = 200, res = {};
   if (url === '/api/web-info') res = { web: true, hosts: ['127.0.0.1:22'], host: '127.0.0.1', port: '22' };
   else if (url === '/api/login') {
-    if (body.password === 'right') signedIn = true;
+    if (body.password === 'right' && twoStep && body.code !== '123456') { status = 401; res = { error: 'enter the 6-digit code', code: true }; }
+    else if (body.password === 'right') signedIn = true;
     else { status = 401; res = { error: 'wrong user or password' }; }
   } else if (!signedIn) { status = 401; res = { error: 'sign in', login: true }; }
   else if (url === '/api/state') res = state;
@@ -96,9 +98,16 @@ const tests = {
     assert.match(q('.add-err', form)[0].textContent, /wrong user or password/);
     assert.strictEqual(pw.value, '', 'password cleared');
     const sent = calls.filter((c) => c.url === '/api/login').pop();
-    assert.deepStrictEqual(sent.body, { host: '127.0.0.1', port: '22', user: 'esi', password: 'nope' });
+    assert.deepStrictEqual(sent.body, { host: '127.0.0.1', port: '22', user: 'esi', password: 'nope', code: '' });
     assert.strictEqual(sent.headers['X-SW'], '1');
-    pw.value = 'right';
+    // two-step sign-in on: the right password asks for the code and is kept
+    pw.value = 'right'; twoStep = true;
+    form.dispatch('submit', { preventDefault() {} });
+    await settle();
+    const codeIn = q('input', form).find((i) => i.getAttribute('autocomplete') === 'one-time-code');
+    assert.ok(!codeIn.parentNode.classList.contains('hidden'), 'the code box shows');
+    assert.strictEqual(pw.value, 'right');
+    codeIn.value = '123456';
     form.dispatch('submit', { preventDefault() {} });
     await settle();
     assert.strictEqual(reloaded, 1);

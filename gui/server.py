@@ -6557,6 +6557,27 @@ def ensure_ssh_key(path: Path):
         raise ApiError(500, "could not create a key: " + r.stderr.decode("utf-8", "replace")[-200:])
 
 
+class NeedCode(ApiError):
+    """Sign-in needs (another) two-step code: the page shows the code box."""
+
+
+def totp_code(secret: str, step: int) -> str:
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    h = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
+    o = h[-1] & 15
+    return "%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7fffffff) % 1000000)
+
+
+def ua_label(ua: str) -> str:
+    """'Chrome on Android' from a User-Agent — enough to tell your devices apart."""
+    ua = ua or ""
+    os_ = next((n for k, n in (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Windows", "Windows"),
+                               ("Mac OS", "Mac"), ("CrOS", "ChromeOS"), ("Linux", "Linux")) if k in ua), "")
+    br = next((n for k, n in (("Edg/", "Edge"), ("OPR/", "Opera"), ("SamsungBrowser", "Samsung Internet"), ("Firefox/", "Firefox"),
+                              ("Chrome/", "Chrome"), ("Safari/", "Safari")) if k in ua), "")
+    return (br + (" on " + os_ if os_ else "")) if br else (os_ or "unknown device")
+
+
 class WebGate:
     SESSION_DAYS = 30
     IDLE_DAYS = 7
@@ -6580,6 +6601,12 @@ class WebGate:
         self.all_fails = collections.deque()
         self.db = open_db(self.root / "gate.db")
         self.pusher = Pusher(self.root / "vapid.json")
+        self.db.run("CREATE TABLE IF NOT EXISTS web_totp (ws TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step INTEGER NOT NULL DEFAULT 0)")
+        for col in ("ua TEXT NOT NULL DEFAULT ''", "created REAL NOT NULL DEFAULT 0"):
+            try:
+                self.db.run("ALTER TABLE web_sessions ADD COLUMN " + col)
+            except sqlite3.OperationalError:
+                pass                              # already there
 
         def load(f):
             try:
@@ -6620,7 +6647,7 @@ class WebGate:
             self.fails.setdefault(ip, []).append(time.time())
             self.all_fails.append(time.time())
 
-    def login(self, ip: str, body: dict) -> str:
+    def login(self, ip: str, body: dict, ua: str = "") -> str:
         self._throttle(ip)
         host = clean_str(body.get("host"), 255, "server", required=True)
         port = str(body.get("port") or "22").strip()
@@ -6646,15 +6673,71 @@ class WebGate:
             if e.status in (401, 403):
                 self._failed(ip)
             raise
+        if self.totp_on(wsid):
+            code = str(body.get("code") or "").replace(" ", "")
+            if not code:
+                raise NeedCode(401, "enter the 6-digit code from your authenticator app")
+            if not self.totp_check(wsid, code):
+                self._failed(ip)
+                raise NeedCode(401, "wrong code — check the time on your phone and try the newest code")
         (d / "workspace.json").write_text(json.dumps({"user": user, "host": host, "port": port}))
         tok = secrets.token_urlsafe(32)
         now = time.time()
         with self.db.tx() as c:
             c.execute("DELETE FROM web_sessions WHERE exp < ? OR last < ?", (now, now - self.IDLE_DAYS * 86400))
-            c.execute("INSERT INTO web_sessions (hash, ws, exp, last, ip) VALUES (?, ?, ?, ?, ?)",
-                      (self._hash(tok), wsid, now + self.SESSION_DAYS * 86400, now, ip))
+            c.execute("INSERT INTO web_sessions (hash, ws, exp, last, ip, ua, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (self._hash(tok), wsid, now + self.SESSION_DAYS * 86400, now, ip, (ua or "")[:300], now))
         log_line(f"web: {user}@{host}:{port} signed in from {ip}")
         return tok
+
+    # ---- two-step sign-in (TOTP, RFC 6238) and the devices signed in to a workspace
+    def ws_of(self, tok: str) -> str:
+        r = self.db.rows("SELECT ws FROM web_sessions WHERE hash = ?", (self._hash(tok or ""),))
+        return r[0][0] if r else ""
+
+    def totp_on(self, ws: str) -> bool:
+        r = self.db.rows("SELECT enabled FROM web_totp WHERE ws = ?", (ws,))
+        return bool(r and r[0][0])
+
+    def totp_check(self, ws: str, code: str, at: float = None) -> bool:
+        r = self.db.rows("SELECT secret, last_step FROM web_totp WHERE ws = ?", (ws,))
+        if not r or not re.fullmatch(r"\d{6}", code or ""):
+            return False
+        secret, last = r[0]
+        step = int((at or time.time()) // 30)
+        for s in (step, step - 1, step + 1):
+            if s > last and hmac.compare_digest(totp_code(secret, s), code):
+                self.db.run("UPDATE web_totp SET last_step = ? WHERE ws = ?", (s, ws))   # a code works once
+                return True
+        return False
+
+    def totp_setup(self, ws: str, label: str) -> dict:
+        if self.totp_on(ws):
+            raise ApiError(409, "two-step sign-in is already on")
+        secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+        self.db.run("INSERT OR REPLACE INTO web_totp (ws, secret, enabled, last_step) VALUES (?, ?, 0, 0)", (ws, secret))
+        uri = "otpauth://totp/" + urllib.parse.quote("Simab Workspace:" + label) + "?secret=" + secret + "&issuer=Simab%20Workspace"
+        return {"secret": secret, "uri": uri}
+
+    def totp_enable(self, ws: str, code: str, on: bool):
+        if not self.totp_check(ws, str(code or "").replace(" ", "")):
+            raise ApiError(400, "wrong code")
+        if on:
+            self.db.run("UPDATE web_totp SET enabled = 1 WHERE ws = ?", (ws,))
+        else:
+            self.db.run("DELETE FROM web_totp WHERE ws = ?", (ws,))
+
+    def devices(self, ws: str, tok: str) -> list:
+        me = self._hash(tok or "")
+        rows = self.db.rows("SELECT hash, ip, ua, created, last FROM web_sessions WHERE ws = ? ORDER BY last DESC", (ws,))
+        return [{"id": h[:16], "ip": ip, "device": ua_label(ua), "created": created, "last": last, "current": h == me}
+                for h, ip, ua, created, last in rows]
+
+    def sign_out_device(self, ws: str, tok: str, which: str):
+        me = self._hash(tok or "")
+        for h, in self.db.rows("SELECT hash FROM web_sessions WHERE ws = ?", (ws,)):
+            if h != me and (which == "others" or (isinstance(which, str) and len(which) == 16 and h.startswith(which))):
+                self.db.run("DELETE FROM web_sessions WHERE hash = ?", (h,))
 
     def logout(self, tok: str):
         if not tok:
@@ -6809,6 +6892,27 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return urllib.parse.urlsplit(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
 
+    def _account(self, method: str, sub: str) -> dict:
+        """Web sign-in settings of this workspace: two-step codes and signed-in devices."""
+        gate, tok = self.gate, self._cookie()
+        ws = gate.ws_of(tok)
+        if not ws:
+            raise ApiError(401, "sign in")
+        if method == "GET" and sub == "":
+            return {"totp": gate.totp_on(ws), "devices": gate.devices(ws, tok)}
+        b = self._body()
+        if method == "POST" and sub == "/totp/setup":
+            c = self.app.conf
+            return gate.totp_setup(ws, f"{c.user}@{c.host}")
+        if method == "POST" and sub == "/totp":
+            gate.totp_enable(ws, b.get("code"), bool(b.get("on")))
+            log_line(f"web: two-step sign-in {'on' if b.get('on') else 'off'} for {self.app.conf.user}@{self.app.conf.host}")
+            return {"totp": gate.totp_on(ws)}
+        if method == "POST" and sub == "/signout":
+            gate.sign_out_device(ws, tok, b.get("id"))
+            return {"devices": gate.devices(ws, tok)}
+        raise ApiError(404, "not found")
+
     def _set_cookie(self, value: str, max_age: int) -> dict:
         secure = "; Secure" if self.gate.secure else ""
         return {"Set-Cookie": f"{WEB_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"}
@@ -6835,7 +6939,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/login" and method == "POST":
                 if self.headers.get("X-SW") != "1":
                     raise ApiError(403, "forbidden")
-                tok = gate.login(self._client_ip(), self._body())
+                try:
+                    tok = gate.login(self._client_ip(), self._body(), self.headers.get("User-Agent") or "")
+                except NeedCode as e:
+                    return self._json(e.status, {"error": e.message, "code": True})
                 body = json.dumps({"ok": True}).encode()
                 return self._send(200, body, "application/json; charset=utf-8", self._set_cookie(tok, WebGate.SESSION_DAYS * 86400))
             if path == "/api/logout" and method == "POST":
@@ -6850,6 +6957,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._websocket(query)
                 if self.headers.get("X-SW") != "1":
                     raise ApiError(403, "forbidden")
+                if path.startswith("/api/account"):
+                    return self._json(200, self._account(method, path[len("/api/account"):]))
                 return self._json(200, self._api(method, path, query))
             if method == "GET":
                 return self._static(path)

@@ -142,6 +142,8 @@
       var pw = h('input', { class: 'inp', type: 'password', placeholder: 'password', autocomplete: 'current-password' });
       var err = h('div', { class: 'add-err hidden' });
       var go = h('button', { class: 'btn primary', type: 'submit' }, 'Sign in');
+      var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
+      var codeField = h('div', { class: 'field hidden' }, h('label', null, 'Code from your authenticator app'), code);
       var fixed = (info.hosts || []).length === 1;
       function submit(e) {
         e.preventDefault();
@@ -149,10 +151,14 @@
         if (!pw.value) { pw.focus(); return; }
         go.disabled = true; go.textContent = 'Signing in…'; err.classList.add('hidden');
         fetch('/api/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-SW': '1' },
-          body: JSON.stringify({ host: host.value.trim(), port: port.value.trim(), user: user.value.trim(), password: pw.value }) })
-          .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); }); })
+          body: JSON.stringify({ host: host.value.trim(), port: port.value.trim(), user: user.value.trim(), password: pw.value, code: code.value.trim() }) })
+          .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) { var x = new Error(d.error || ('HTTP ' + r.status)); x.code = d.code; throw x; } }); })
           .then(function () { location.reload(); })
-          .catch(function (e2) { pw.value = ''; go.disabled = false; go.textContent = 'Sign in'; err.textContent = e2.message; err.classList.remove('hidden'); pw.focus(); });
+          .catch(function (e2) {
+            go.disabled = false; go.textContent = 'Sign in'; err.textContent = e2.message; err.classList.remove('hidden');
+            if (e2.code) { codeField.classList.remove('hidden'); code.value = ''; code.focus(); return; }    // the password was right
+            pw.value = ''; pw.focus();
+          });
       }
       var form = h('form', { class: 'login', onsubmit: submit },
         h('div', { class: 'login-brand' }, 'simab', h('span', null, 'workspace')),
@@ -162,7 +168,7 @@
             h('div', { class: 'field', style: 'flex:0 0 80px' }, h('label', null, 'SSH port'), port)),
         h('div', { class: 'field' }, h('label', null, 'User'), user),
         h('div', { class: 'field' }, h('label', null, 'Password'), pw),
-        err, go,
+        codeField, err, go,
         h('div', { class: 'muted login-note' }, 'The password is only used to sign in; it is not stored.'));
       document.body.replaceChildren(h('div', { class: 'login-wrap' }, form));
       setTimeout(function () { user.focus(); }, 50);
@@ -251,6 +257,56 @@
       });
     }
     return h('div', { class: 'svc' }, h('span', null, 'Notifications on this device', h('br'), h('small', { class: 'muted' }, 'When Claude finishes or needs you, with the page closed — '), state), h('span', { style: 'display:flex;gap:6px' }, test, btn));
+  }
+
+  // ---- web sign-in security: two-step codes (authenticator app) and signed-in devices
+  function accountRows() {
+    if (!S.web) return null;
+    var totpState = h('span', { class: 'muted' }, '…');
+    var totpBtn = h('button', { class: 'btn sm', disabled: true }, '…');
+    var devList = h('div', { class: 'devices' });
+    var othersBtn = h('button', { class: 'btn sm hidden' }, 'Sign out the others');
+    function ago(t) { var m = Math.round((Date.now() / 1000 - t) / 60); return !t ? '' : m < 2 ? 'now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago'; }
+    function render(d) {
+      totpState.textContent = d.totp ? 'on — a code is asked at sign-in' : 'off';
+      totpBtn.textContent = d.totp ? 'Turn off' : 'Set up';
+      totpBtn.disabled = false;
+      totpBtn.onclick = function () { (d.totp ? totpOff : totpSetup)(load); };
+      if (!d.devices) return;
+      devList.replaceChildren.apply(devList, d.devices.map(function (x) {
+        return h('div', { class: 'dev' }, h('span', { class: 'grow' }, x.device + (x.current ? ' · this device' : ''), h('br'),
+          h('small', { class: 'muted mono' }, x.ip + ' · ' + ago(x.last))),
+          x.current ? null : h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/signout', { id: x.id }).then(render).catch(fail); } }, 'Sign out'));
+      }));
+      othersBtn.classList.toggle('hidden', d.devices.filter(function (x) { return !x.current; }).length < 2);
+    }
+    othersBtn.onclick = function () { api('POST', 'account/signout', { id: 'others' }).then(render).catch(fail); };
+    function load() { api('GET', 'account').then(render).catch(function () { totpState.textContent = 'not available'; }); }
+    load();
+    return h('div', null,
+      h('div', { class: 'svc' }, h('span', null, 'Two-step sign-in', h('br'), h('small', { class: 'muted' }, 'A code from an authenticator app too — '), totpState), totpBtn),
+      h('div', { class: 'svc' }, h('span', null, 'Signed-in devices'), othersBtn), devList);
+  }
+  function totpSetup(done) {
+    api('POST', 'account/totp/setup').then(function (d) {
+      var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
+      var md = openModal({ title: 'Two-step sign-in', size: 'sm', body: [
+        h('p', null, '1. Add this key to an authenticator app (Google Authenticator, Microsoft Authenticator, 2FAS…):'),
+        h('p', null, h('a', { class: 'btn', href: d.uri }, 'Open in authenticator app')),
+        h('p', { class: 'muted' }, 'or type the key:'),
+        h('div', { class: 'mono totp-key' }, d.secret.replace(/(.{4})/g, '$1 ').trim()),
+        h('p', null, '2. Enter the code it shows:'), code],
+        foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
+          h('button', { class: 'btn primary', onclick: function () {
+            api('POST', 'account/totp', { code: code.value.trim(), on: true }).then(function () { md.close(); toast('Two-step sign-in is on', 'ok'); done(); }).catch(fail);
+          } }, 'Turn on')] });
+    }).catch(fail);
+  }
+  function totpOff(done) {
+    promptDlg('Code from your authenticator app, to turn two-step sign-in off', '').then(function (c) {
+      if (!c) return;
+      api('POST', 'account/totp', { code: c.trim(), on: false }).then(function () { toast('Two-step sign-in is off', 'ok'); done(); }).catch(fail);
+    });
   }
 
   function logout() {
@@ -2877,6 +2933,7 @@
       h('div', { class: 'svc' }, h('span', null, 'Signed in as ', h('b', { class: 'mono' }, S.server.user + '@' + S.server.host + (String(S.server.port) !== '22' ? ':' + S.server.port : ''))),
         h('button', { class: 'btn sm', onclick: logout }, 'Sign out')),
       pushRow(),
+      accountRows(),
       chk('serverPersist', 'Keep server terminals alive (tmux)', 'Shells survive a dropped connection; reopening attaches to the same one.'),
       h('div', { class: 'sec' }, 'Claude'),
       h('div', { class: 'row' },

@@ -922,3 +922,7 @@ body.touch .grip { width: 26px; font-size: 16px; text-align: center; }
 .starred.dragging { background: #2a3344 !important; opacity: .85; }
 body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: none; }
 .starred { user-select: none; }
+
+.devices .dev { display: flex; align-items: center; gap: 8px; padding: 4px 0 4px 10px; border-left: 2px solid var(--line); margin: 0 0 4px 2px; }
+.devices .dev .grow { flex: 1; min-width: 0; }
+.totp-key { font-size: 15px; letter-spacing: 1px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; user-select: all; word-break: break-all; }

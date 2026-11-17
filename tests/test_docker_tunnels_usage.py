@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import base64
 import time
 import unittest
 from pathlib import Path
@@ -550,6 +551,61 @@ class BrowseServerFolders(TmpHome):
         with mock.patch.object(sw, "remote_python", return_value={"error": "cannot open /root: Permission denied"}):
             with self.assertRaises(sw.ApiError):
                 self.app.browse("/root")
+
+
+class WebTwoStep(unittest.TestCase):
+    setUp, tearDown, login = WebVersion.setUp, WebVersion.tearDown, WebVersion.login
+
+    def test_totp_codes_match_rfc6238(self):
+        secret = base64.b32encode(b"12345678901234567890").decode()
+        self.assertEqual(sw.totp_code(secret, 59 // 30), "287082")          # RFC 6238 test vector (SHA1, last 6 digits)
+        self.assertEqual(sw.totp_code(secret, 1111111109 // 30), "081804")
+
+    def test_two_step_sign_in(self):
+        tok = self.login()
+        ws = self.gate.ws_of(tok)
+        d = self.gate.totp_setup(ws, "esi@127.0.0.1")
+        self.assertTrue(d["uri"].startswith("otpauth://totp/Simab%20Workspace%3Aesi%40127.0.0.1?secret=" + d["secret"]))
+        self.assertIsNotNone(self.gate.app_for(self.login()), "not on until confirmed with a code")
+        with self.assertRaises(sw.ApiError):
+            self.gate.totp_enable(ws, "000000", True)
+        now = time.time()
+        self.gate.totp_enable(ws, sw.totp_code(d["secret"], int(now // 30)), True)
+        with self.assertRaises(sw.ApiError):
+            self.gate.totp_setup(ws, "x")
+        with self.assertRaises(sw.NeedCode):
+            self.login()                                                    # right password, no code
+        with self.assertRaises(sw.NeedCode):
+            self.login(code="123456" if sw.totp_code(d["secret"], int(now // 30) + 1) != "123456" else "654321")
+        good = sw.totp_code(d["secret"], int(now // 30) + 1)
+        self.assertIsNotNone(self.gate.app_for(self.login(code=good)))
+        with self.assertRaises(sw.NeedCode):
+            self.login(code=good)                                           # a code works once
+        with self.assertRaises(sw.ApiError):
+            self.login(pw="wrong", code=good)
+        # off needs a fresh code
+        self.gate.db.run("UPDATE web_totp SET last_step = 0 WHERE ws = ?", (ws,))
+        self.gate.totp_enable(ws, sw.totp_code(d["secret"], int(time.time() // 30)), False)
+        self.assertFalse(self.gate.totp_on(ws))
+        self.assertIsNotNone(self.gate.app_for(self.login()))
+
+    def test_signed_in_devices(self):
+        a = self.gate.login("1.1.1.1", {"host": "127.0.0.1", "port": "22", "user": "esi", "password": "right"},
+                            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/157.0 Mobile Safari/537.36")
+        b = self.gate.login("2.2.2.2", {"host": "127.0.0.1", "port": "22", "user": "esi", "password": "right"},
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15")
+        c = self.login()
+        ws = self.gate.ws_of(a)
+        devs = self.gate.devices(ws, a)
+        self.assertEqual(sorted((x["device"], x["ip"], x["current"]) for x in devs),
+                         [("Chrome on Android", "1.1.1.1", True), ("Safari on Mac", "2.2.2.2", False), ("unknown device", "1.2.3.4", False)])
+        mac = next(x for x in devs if x["ip"] == "2.2.2.2")
+        self.gate.sign_out_device(ws, a, mac["id"])
+        self.assertIsNone(self.gate.app_for(b))
+        self.assertIsNotNone(self.gate.app_for(c))
+        self.gate.sign_out_device(ws, a, "others")
+        self.assertIsNone(self.gate.app_for(c))
+        self.assertIsNotNone(self.gate.app_for(a), "never this device")
 
 
 class WebHttp(unittest.TestCase):

@@ -539,7 +539,7 @@ const tests = {
     const bar = q('.sbar')[0];
     assert.ok(bar, 'progress bar shown');
     assert.strictEqual(bar.querySelector('i').style.cssText, 'width:25%');
-    assert.match(bar.textContent, /25% · 30\/120 files · 5\.0 MB of 20\.0 MB/);
+    assert.match(bar.textContent, /25% · 5\.0 MB \/ 20\.0 MB · 30\/120 items/);
     state.projects[1].sync = { state: 'ok', label: 'in sync', progress: null };
     await new Promise((r) => setTimeout(r, 5200));
     await settle();

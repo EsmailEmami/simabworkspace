@@ -2725,8 +2725,11 @@
 
     var pr = sync && sync.progress;
     if (pr) {
-      el.append(h('div', { class: 'sbar', title: 'Syncing ' + pr.files + ' / ' + pr.totalFiles + ' files' + (pr.totalBytes ? ' · ' + fmtBytes(pr.bytes) + ' / ' + fmtBytes(pr.totalBytes) : '') },
-        h('i', { style: 'width:' + pr.percent + '%' }), h('span', null, pr.percent + '% · ' + pr.files + '/' + pr.totalFiles + ' files' + (pr.totalBytes ? ' · ' + fmtBytes(pr.bytes) + ' of ' + fmtBytes(pr.totalBytes) : ''))));
+      var prLabel = pr.totalBytes
+        ? (pr.percent + '% · ' + fmtBytes(pr.bytes) + ' / ' + fmtBytes(pr.totalBytes) + ' · ' + pr.files + '/' + pr.totalFiles + ' items')
+        : (pr.percent + '% · ' + pr.files + '/' + pr.totalFiles + ' items');
+      el.append(h('div', { class: 'sbar', title: prLabel },
+        h('i', { style: 'width:' + pr.percent + '%' }), h('span', null, prLabel)));
     }
     var r = hasRemote(p);
     var body = h('div', { class: 'proj-body' });
@@ -3405,7 +3408,7 @@
                 h('a', { href: '#', class: 'ign-edit', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Edit…'))),
             d.error ? kv('last error', d.error, 'err') : null)];
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
-          h('span', null, d.progress.percent + '% · ' + d.progress.files + '/' + d.progress.totalFiles + ' files')));
+          h('span', null, d.progress.percent + '% · ' + d.progress.files + '/' + d.progress.totalFiles + ' items')));
         rows.push(h('div', { class: 'sec' }, d.conflicts.length ? plural(d.conflicts.length, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
         if (d.conflicts.length) {
           rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, 'Nothing was overwritten. Pick which version to keep — it is copied over the other one. For folders, or to merge by hand, open VS Code.'));

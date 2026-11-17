@@ -47,9 +47,9 @@
     this.tree.addEventListener('contextmenu', function (e) { if (e.target === self.tree) { e.preventDefault(); self.menu(e.clientX, e.clientY); } });
     this.tree.tabIndex = 0;
     this.tree.addEventListener('keydown', function (e) { self.treeKey(e); });
-    this.tree.addEventListener('dragover', function (ev) { if (ev.target === self.tree) { ev.preventDefault(); self.tree.classList.add('ft-drop'); } });
+    this.tree.addEventListener('dragover', function (ev) { ev.preventDefault(); if (ev.target === self.tree) self.tree.classList.add('ft-drop'); });
     this.tree.addEventListener('dragleave', function (ev) { if (!self.tree.contains(ev.relatedTarget)) self.tree.classList.remove('ft-drop'); });
-    this.tree.addEventListener('drop', function (ev) { if (ev.target === self.tree || ev.currentTarget === self.tree) { ev.preventDefault(); self.tree.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer.files, ''); } });
+    this.tree.addEventListener('drop', function (ev) { ev.preventDefault(); self.tree.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer, ''); });
     this.side = h('div', { class: 'files-side' },
       h('div', { class: 'files-bar' }, this.filter, this.gitBtn,
         h('button', { class: 'icon-btn', title: 'New file', onclick: function () { self.create(false); } }, '+'),
@@ -186,7 +186,7 @@
     var dropTarget = e.dir ? path : parentOf(path);
     row.addEventListener('dragover', function (ev) { ev.preventDefault(); row.classList.add('ft-drop'); });
     row.addEventListener('dragleave', function (ev) { if (!row.contains(ev.relatedTarget)) row.classList.remove('ft-drop'); });
-    row.addEventListener('drop', function (ev) { ev.preventDefault(); row.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer.files, dropTarget); });
+    row.addEventListener('drop', function (ev) { ev.preventDefault(); ev.stopPropagation(); row.classList.remove('ft-drop'); self.tree.classList.remove('ft-drop'); self.uploadFiles(ev.dataTransfer, dropTarget); });
     return row;
   };
 
@@ -546,24 +546,51 @@
     this.pane.remove();
   };
 
-  P.uploadFiles = function (files, folder) {
+  P.uploadFiles = function (dt, folder) {
     var self = this;
-    if (!files || !files.length) return;
-    Array.prototype.forEach.call(files, function (file) {
-      var url = '/api/fs/' + encodeURIComponent(self.key) + '/upload?path=' + encodeURIComponent(folder) + '&name=' + encodeURIComponent(file.name);
-      SW.toast('Uploading ' + file.name + '…', 'ok', { timeout: 3000 });
-      var reader = new FileReader();
-      reader.onload = function (ev) {
-        fetch(url, { method: 'POST', headers: { 'X-Token': SW.token(), 'Content-Type': 'application/octet-stream' }, body: ev.target.result })
-          .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error || r.statusText); }); })
-          .then(function () { SW.toast('Uploaded ' + file.name, 'ok', { timeout: 2000 }); self.refresh(true); })
-          .catch(function (e) { SW.toast(file.name + ': ' + e.message, 'err'); });
-      };
-      reader.readAsArrayBuffer(file);
-    });
+    uploadDropped(this.key, dt, folder).then(function (n) { if (n) self.refresh(true); });
   };
 
   // ---------------------------------------------------------------- helpers
+  // Files dropped from the computer onto a folder: one after another, one toast for all.
+  // Folders cannot be sent (the browser gives no bytes for them) — say so instead of failing quietly.
+  var UPLOAD_MAX = 50000000;
+  function droppedFiles(dt) {
+    var files = Array.prototype.slice.call((dt && dt.files) || []), dirs = [];
+    Array.prototype.forEach.call((dt && dt.items) || [], function (it) {
+      var en = it.webkitGetAsEntry && it.webkitGetAsEntry();
+      if (en && en.isDirectory) dirs.push(en.name);
+    });
+    return { files: files.filter(function (f) { return dirs.indexOf(f.name) < 0; }), dirs: dirs };
+  }
+  function uploadDropped(project, dt, folder) {
+    var got = droppedFiles(dt), files = got.files, errs = [], done = 0;
+    if (got.dirs.length) toast('Folders cannot be uploaded: ' + got.dirs.join(', '), 'err');
+    files = files.filter(function (f) {
+      if (f.size > UPLOAD_MAX) { errs.push(f.name + ': too large (max 50 MB)'); return false; }
+      return true;
+    });
+    if (!files.length) { if (errs.length) toast(errs.join('; '), 'err'); return Promise.resolve(0); }
+    var where = folder ? folder + '/' : 'the project folder';
+    var t = toast('Uploading ' + (files.length === 1 ? files[0].name : files.length + ' files') + ' to ' + where + '…', 'ok', { sticky: true });
+    var chain = Promise.resolve();
+    files.forEach(function (file) {
+      chain = chain.then(function () {
+        var url = '/api/fs/' + encodeURIComponent(project) + '/upload?path=' + encodeURIComponent(folder || '') + '&name=' + encodeURIComponent(file.name);
+        return fetch(url, { method: 'POST', credentials: 'same-origin',
+          headers: { 'X-Token': SW.token || '', 'X-SW': '1', 'Content-Type': 'application/octet-stream' }, body: file })
+          .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status)); done++; }); })
+          .catch(function (e) { errs.push(file.name + ': ' + e.message); });
+      });
+    });
+    return chain.then(function () {
+      if (t && t.remove) t.remove();
+      if (done) toast('Uploaded ' + (done === 1 && files.length === 1 ? files[0].name : done + ' files') + ' to ' + where, 'ok', { timeout: 2500 });
+      if (errs.length) toast('Upload failed — ' + errs.join('; '), 'err');
+      return done;
+    });
+  }
+
   function copyPath(path) {
     navigator.clipboard.writeText(path).then(function () { toast('Copied ' + path, 'ok'); }).catch(fail);
   }
@@ -735,11 +762,10 @@
             });
           }
         });
-        if (e.dir) {
-          row.addEventListener('dragover', function (ev) { ev.preventDefault(); row.classList.add('drop-over'); });
-          row.addEventListener('dragleave', function (ev) { if (!row.contains(ev.relatedTarget)) row.classList.remove('drop-over'); });
-          row.addEventListener('drop', function (ev) { ev.preventDefault(); row.classList.remove('drop-over'); self._upload(ev.dataTransfer.files, path); });
-        }
+        var dropTo = e.dir ? path : dir;     // dropped on a file: into the folder it is in
+        row.addEventListener('dragover', function (ev) { ev.preventDefault(); row.classList.add('drop-over'); });
+        row.addEventListener('dragleave', function (ev) { if (!row.contains(ev.relatedTarget)) row.classList.remove('drop-over'); });
+        row.addEventListener('drop', function (ev) { ev.preventDefault(); ev.stopPropagation(); row.classList.remove('drop-over'); self.treeEl.classList.remove('drop-over'); self._upload(ev.dataTransfer, dropTo); });
         rows.push(row);
         if (e.dir && self._isOpen(path)) walk(path, depth + 1);
       });
@@ -747,29 +773,14 @@
     if (!rows.length) rows.push(h('div', { class: 'sf-note' }, 'This folder is empty.'));
     this.treeEl.ondragover = function (ev) { ev.preventDefault(); self.treeEl.classList.add('drop-over'); };
     this.treeEl.ondragleave = function (ev) { if (!self.treeEl.contains(ev.relatedTarget)) self.treeEl.classList.remove('drop-over'); };
-    this.treeEl.ondrop = function (ev) { ev.preventDefault(); self.treeEl.classList.remove('drop-over'); self._upload(ev.dataTransfer.files, ''); };
+    this.treeEl.ondrop = function (ev) { ev.preventDefault(); self.treeEl.classList.remove('drop-over'); self._upload(ev.dataTransfer, ''); };
     this.treeEl.replaceChildren.apply(this.treeEl, rows);
   };
 
-  SP._upload = function (files, folder) {
+  SP._upload = function (dt, folder) {
     var self = this, project = this.project;
-    if (!files || !files.length || !project) return;
-    Array.from(files).forEach(function (file) {
-      toast('Uploading ' + file.name + '…', 'ok', { timeout: 2500 });
-      var url = '/api/fs/' + encodeURIComponent(project) + '/upload?path=' + encodeURIComponent(folder) + '&name=' + encodeURIComponent(file.name);
-      fetch(url, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'X-Token': SW.token || '', 'X-SW': '1' },
-        body: file
-      }).then(function (r) {
-        if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || r.statusText); });
-        return r.json();
-      }).then(function () {
-        toast('Uploaded ' + file.name, 'ok');
-        if (self.project === project) self.refreshTree();
-      }).catch(function (e) { toast('Upload failed: ' + e.message, 'err'); });
-    });
+    if (!project) return;
+    uploadDropped(project, dt, folder).then(function (n) { if (n && self.project === project) self.refreshTree(); });
   };
 
   // ---------------------------------------------------------------- ChangesTab

@@ -70,8 +70,8 @@ const usage = { limits: { windows: { five_hour: { used: 0.38, resetsAt: now + 36
 global.fetch = (url, opts) => {
   if (offline) return Promise.reject(new TypeError('Failed to fetch'));
   const method = (opts && opts.method) || 'GET';
-  const body = opts && opts.body ? JSON.parse(opts.body) : undefined;
-  calls.push({ method, url, body });
+  const body = opts && typeof opts.body === 'string' ? JSON.parse(opts.body) : opts && opts.body;
+  calls.push({ method, url, body, headers: opts && opts.headers });
   let res = {};
   if (url === '/api/state') res = state;
   else if (url === '/api/projects') res = { projects: state.projects };
@@ -115,6 +115,10 @@ global.fetch = (url, opts) => {
     const p = decodeURIComponent(url.split('path=')[1] || '');
     res = fsTree[p] ? { path: p, entries: fsTree[p], more: false, where: 'local' } : null;
     if (!res) return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'not a folder' }) });
+  }
+  else if (url.startsWith('/api/fs/cheshmeh/upload')) {
+    if (body && body.name === 'bad.bin') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'folder not found' }) });
+    res = { path: 'x', size: body.size };
   }
   else if (url.startsWith('/api/fs/cheshmeh/read')) {
     const p = decodeURIComponent(url.split('path=')[1] || '');
@@ -491,7 +495,7 @@ const tests = {
     q('.btn.primary', modal).pop().click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
-    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, ignores: ['node_modules', 'dist'] });
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, streams: 4, ignores: ['node_modules', 'dist'] });
     assert.ok(q('.toast').some((t) => /shop: downloading in the background/.test(t.textContent)));
   },
 
@@ -534,6 +538,8 @@ const tests = {
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
     assert.deepStrictEqual([post.body.mode, post.body.remote, post.body.local], ['upload', '/home/esi/work', '/Users/me/code/my-shop']);
     assert.deepStrictEqual(post.body.ignores, ['node_modules', '/dist', '*.log']);
+    assert.strictEqual(post.body.streams, 4, 'first copy: 4 connections at once by default');
+    assert.strictEqual(localStorage.getItem('sw-copy-streams'), '4');
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
@@ -855,6 +861,26 @@ const tests = {
     tab.filter.dispatch('keydown', { key: 'Enter' }); await settle();
     assert.strictEqual(tab.file.path, 'cheshmeh-web-app/web/x.ts');
     assert.strictEqual(tab.filter.value, '');
+    // drop files from the computer onto a folder: one request each, to that folder only, with X-SW
+    const up = () => calls.filter((c) => c.url.startsWith('/api/fs/cheshmeh/upload'));
+    const upBefore = up().length;
+    let stopped = false;
+    const folder = rows().find((r) => r.querySelector('.ft-name').textContent === 'cheshmeh-web-app');
+    folder.dispatch('drop', { dataTransfer: { files: [{ name: 'a.txt', size: 3 }, { name: 'b.txt', size: 4 }], items: [] }, stopPropagation() { stopped = true; } });
+    await settle(); await settle();
+    const sent = up().slice(upBefore);
+    assert.ok(stopped, 'the drop does not reach the whole tree too (it uploaded everything twice)');
+    assert.deepStrictEqual(sent.map((c) => c.url), ['a.txt', 'b.txt'].map((n) => '/api/fs/cheshmeh/upload?path=cheshmeh-web-app&name=' + n));
+    assert.strictEqual(sent[0].headers['X-SW'], '1');
+    assert.strictEqual(typeof sent[0].headers['X-Token'], 'string');
+    assert.ok(q('.toast').some((t) => t.textContent === 'Uploaded 2 files to cheshmeh-web-app/'));
+    assert.ok(!q('.toast').some((t) => /^Uploading/.test(t.textContent)), 'the Uploading… note goes away');
+    // a folder dropped (no bytes in the browser) and a server error: said, not silent
+    tab.tree.dispatch('drop', { dataTransfer: { files: [{ name: 'pics', size: 0 }, { name: 'bad.bin', size: 1 }], items: [{ webkitGetAsEntry: () => ({ isDirectory: true, name: 'pics' }) }, { webkitGetAsEntry: () => ({ isDirectory: false, name: 'bad.bin' }) }] } });
+    await settle(); await settle();
+    assert.deepStrictEqual(up().slice(upBefore + 2).map((c) => c.url), ['/api/fs/cheshmeh/upload?path=&name=bad.bin']);
+    assert.ok(q('.toast').some((t) => t.textContent === 'Folders cannot be uploaded: pics'));
+    assert.ok(q('.toast').some((t) => t.textContent === 'Upload failed — bad.bin: folder not found'));
     // closing never asks (nothing runs)
     const tabsBefore = global.SW.S.tabs.length;
     global.SW.closeTab(tab); await settle();

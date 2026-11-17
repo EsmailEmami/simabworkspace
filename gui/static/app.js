@@ -447,7 +447,8 @@
     var el = h('div', { class: 'toast ' + (type || '') }, msg);
     el.addEventListener('click', function () { if (opts.onclick) opts.onclick(); el.remove(); });
     $('#toasts').append(el);
-    setTimeout(function () { el.remove(); }, opts.timeout || (type === 'err' ? 7000 : 3500));
+    if (!opts.sticky) setTimeout(function () { el.remove(); }, opts.timeout || (type === 'err' ? 7000 : 3500));
+    return el;
   }
   function fail(e) { if (e && e.offline) return; toast(e && e.message ? e.message : String(e), 'err'); }
 
@@ -2999,6 +3000,11 @@
     var local = h('input', { class: 'inp mono', placeholder: '~/projects/my-project' });
     var remote = h('input', { class: 'inp mono', placeholder: '~/my-project' });
     var git = h('input', { type: 'checkbox', checked: true });
+    // the first copy: Mutagen alone sends one file at a time; N = that many ssh connections at once
+    var streams = h('select', { class: 'inp' }, [[0, 'One by one (sync only)'], [2, '2 at once'], [4, '4 at once'], [8, '8 at once'], [16, '16 at once']]
+      .map(function (o) { return h('option', { value: String(o[0]) }, o[1]); }));
+    streams.value = localStorage.getItem('sw-copy-streams') || '4';
+    if (!streams.value) streams.value = '4';
     var ign = h('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
     ign.value = (S.defaultIgnores || []).join('\n');
     var errBox = h('div', { class: 'add-err hidden' });
@@ -3038,7 +3044,9 @@
       return [h('div', { class: 'field' }, h('label', null, 'Not synced'), ign,
         h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'One per line: ', h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ',
           h('span', { class: 'mono' }, '/dist'), ' only at the top, ', h('span', { class: 'mono' }, '*.log'), ' by name. Change it later in ⋯ → Not synced…')),
-        h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.')))];
+        h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))),
+        h('div', { class: 'field' }, h('label', null, 'First copy'), streams,
+          h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'More at once = faster with many files. Then the sync takes over.'))];
     };
     var forms = {
       download: function () {
@@ -3116,7 +3124,9 @@
       if (mode === 'upload' && !local.value.trim()) { local.focus(); errBox.textContent = 'Which folder on this machine?'; errBox.classList.remove('hidden'); return; }
       go.disabled = true;
       go.textContent = 'Setting up…';
+      localStorage.setItem('sw-copy-streams', streams.value);
       api('POST', 'add-project', { mode: mode, remote: mode === 'download' ? pickedRemote : remote.value.trim(), local: local.value.trim(), name: name.value.trim(), git: git.checked,
+        streams: +streams.value || 0,
         ignores: ign.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean) })
         .then(function (d) {
           md.close();

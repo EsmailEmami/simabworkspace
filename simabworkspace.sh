@@ -10,9 +10,9 @@
 #    simabworkspace                 interactive menu (status + all actions)
 #    simabworkspace status          show connection + sync status and exit
 #    simabworkspace add             add a project to sync (asks: on the server, or on this machine)
-#    simabworkspace add-local [FOLDER] [--remote PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait]
+#    simabworkspace add-local [FOLDER] [--remote PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait] [--paused]
 #                                   upload a project from this machine to the server, then sync it
-#    simabworkspace add-server [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait]
+#    simabworkspace add-server [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--ignores LIST] [--yes] [--no-wait] [--paused]
 #                                   download a project from the server to this machine, then sync it
 #    simabworkspace pause   NAME    pause one project        (resume later)
 #    simabworkspace resume  NAME    resume one project
@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.40.0 2026-11-17  Add project: "First copy" N at once (--paused; the window copies over N ssh
+#                       tar streams, then resumes the sync); Files: drop-upload fixed (sent twice, crashed)
 #    1.39.0 2026-11-17  Add project: edit the "Not synced" list before the first sync (--ignores);
 #                       sync progress shows the whole transfer (size, time left), not the current file
 #    1.38.0 2026-11-17  Sync: disconnect toast + Reconnect button (mutagen resume) in Sync details;
@@ -295,7 +297,7 @@
 
 set -u -o pipefail
 
-VERSION="1.39.0"
+VERSION="1.40.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -980,7 +982,7 @@ sanitize_name() {
 #   to the server by the first sync, then both sides stay in sync.
 add_local_project() {
   title "Upload a project from this machine"
-  local lpath="" rpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list=""
+  local lpath="" rpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list="" paused=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --remote) rpath="${2:-}"; shift 2 ;;
@@ -989,6 +991,7 @@ add_local_project() {
       --git)    git="${2:-}"; shift 2 ;;
       --yes|-y) yes=1; shift ;;
       --no-wait) nowait=1; shift ;;
+      --paused) paused=1; shift ;;
       *)        lpath="$1"; shift ;;
     esac
   done
@@ -1053,7 +1056,7 @@ add_local_project() {
 
   local url="$SSH_USER@$SSH_HOST:$SSH_PORT:$rpath"
   info "Creating sync:  $lpath  ⇄  $url   (git: $git)"
-  create_session "$name" "$lpath" "$url" "$ignores" "$git" || { err "Could not create the sync (see above)."; return 1; }
+  create_session "$name" "$lpath" "$url" "$ignores" "$git" "$paused" || { err "Could not create the sync (see above)."; return 1; }
   ok "Project '$name' added."
   [ $nowait -eq 1 ] && { info "Uploading in the background."; return 0; }
   info "Uploading to the server — big projects take a few minutes…"
@@ -1079,7 +1082,7 @@ add_project_menu() {
 #   Without arguments it asks (folder list, local folder, …); --yes never asks.
 add_project() {
   title "Add project"
-  local rpath="" lpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list=""
+  local rpath="" lpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list="" paused=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --local)   lpath="${2:-}"; shift 2 ;;
@@ -1088,6 +1091,7 @@ add_project() {
       --git)     git="${2:-}"; shift 2 ;;
       --yes|-y)  yes=1; shift ;;
       --no-wait) nowait=1; shift ;;
+      --paused) paused=1; shift ;;
       *)         rpath="$1"; shift ;;
     esac
   done
@@ -1179,7 +1183,7 @@ add_project() {
 
   local url="$SSH_USER@$SSH_HOST:$SSH_PORT:$rpath"
   info "Creating sync:  $lpath  ⇄  $url   (git: $git)"
-  if ! create_session "$name" "$lpath" "$url" "$ignores" "$git"; then
+  if ! create_session "$name" "$lpath" "$url" "$ignores" "$git" "$paused"; then
     err "Could not create the sync (see the message above)."
     return 1
   fi
@@ -1272,7 +1276,8 @@ project_action() {
   esac
 }
 
-# create_session <name> <local path> <remote URL user@host:port:path> <ignores csv> [git on|off]
+# create_session <name> <local path> <remote URL user@host:port:path> <ignores csv> [git on|off] [paused 0|1]
+#   paused 1: created paused — the window copies the files first (parallel tar over ssh), then resumes it
 #   git on  (default): .git folders are synced too
 #   git off          : .git / .svn / .hg are skipped (--ignore-vcs)
 #   ignores ""       : nothing is ignored
@@ -1280,6 +1285,7 @@ create_session() {
   local vcs="--no-ignore-vcs" ign=()
   [ "${5:-on}" = "off" ] && vcs="--ignore-vcs"
   [ -n "$4" ] && ign=(--ignore "$4")
+  [ "${6:-0}" = "1" ] && ign+=(--paused)   # not an ignore — rides along in the same array
   mutagen sync create \
     --name "$1" \
     --label "$LABEL" \

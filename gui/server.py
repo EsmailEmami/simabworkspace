@@ -35,6 +35,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -54,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.39.0"
+VERSION = "1.40.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4241,6 +4242,223 @@ def prune_call(app, project: dict, where: str, op: str, patterns: list, paths: l
     return res
 
 
+# ----------------------------------------------------------------------------- fast first copy
+# Add project with "Parallel copies": the Mutagen session is created paused, the files go over
+# N separate ssh connections at once as tar streams (Mutagen alone sends one file after another
+# over one connection — slow with many files), then the session is resumed and Mutagen only
+# checks that both sides match. Best effort: whatever fails here, Mutagen copies afterwards.
+COPY_LIST_PY = PRUNE_PY.split("\nif __name__")[0] + r"""
+
+VCS_DIRS = {".git", ".svn", ".hg", ".bzr", "_darcs"}
+
+
+def copy_list(root, patterns, git):
+    # every file / link under root that is synced: [[rel, size], …]
+    root = os.path.realpath(os.path.expanduser(root))
+    if not os.path.isdir(root):
+        return {"error": "folder not found: " + root}
+    rules, out, stack = prune_compile(patterns), [], [""]
+    while stack:
+        rel_dir = stack.pop()
+        try:
+            entries = list(os.scandir(os.path.join(root, rel_dir) if rel_dir else root))
+        except OSError:
+            continue
+        for e in entries:
+            rel = rel_dir + "/" + e.name if rel_dir else e.name
+            try:
+                is_dir = e.is_dir(follow_symlinks=False)
+                if not git and is_dir and e.name in VCS_DIRS:
+                    continue
+                if prune_match(rules, rel, is_dir):
+                    continue
+                if is_dir:
+                    stack.append(rel)
+                elif e.is_file(follow_symlinks=False) or e.is_symlink():
+                    out.append([rel, e.stat(follow_symlinks=False).st_size])
+            except OSError:
+                continue
+    return {"files": out}
+
+
+if __name__ == "__main__":
+    print(json.dumps(copy_list(sys.argv[1], json.loads(sys.argv[2]), sys.argv[3] == "on")))
+"""
+_COPY_NS = {}
+COPY_MAX_STREAMS = 16
+
+
+def copy_list_local(root, patterns, git):
+    if not _COPY_NS:
+        ns = {"__name__": "simab_copy"}
+        exec(compile(COPY_LIST_PY, "<copy>", "exec"), ns)
+        _COPY_NS.update(ns)
+    return _COPY_NS["copy_list"](root, patterns, git)
+
+
+def copy_buckets(files, n):
+    """Split [[rel, size], …] into n lists of about the same size (each sorted by path)."""
+    n = max(1, min(int(n or 1), len(files) or 1))
+    buckets, sizes = [[] for _ in range(n)], [0] * n
+    for rel, size in sorted(files, key=lambda f: -f[1]):
+        i = sizes.index(min(sizes))
+        buckets[i].append(rel)
+        sizes[i] += int(size) + 1024           # + tar header/padding, so many tiny files spread too
+    return [sorted(b) for b in buckets if b]
+
+
+def tar_size(size):
+    return 512 + (int(size) + 511) // 512 * 512
+
+
+class _Counted:
+    """A pipe that counts the bytes going through it (the copy's progress)."""
+    def __init__(self, f, job):
+        self.f, self.job = f, job
+
+    def write(self, b):
+        self.job.add(len(b))
+        return self.f.write(b)
+
+    def read(self, n=-1):
+        b = self.f.read(n)
+        self.job.add(len(b))
+        return b
+
+
+class FastCopy:
+    """One project's first copy (upload: this machine → server, download: server → here)."""
+    def __init__(self, name, mode, local, remote, conf, ignores, git, streams, marker=None, on_done=None):
+        self.name, self.mode, self.local, self.remote, self.conf = name, mode, local, remote, conf
+        self.ignores, self.git, self.streams = list(ignores or []), bool(git), max(1, min(int(streams), COPY_MAX_STREAMS))
+        self.marker, self.on_done = marker, on_done
+        self.lock = threading.Lock()
+        self.bytes = self.total = self.files = self.total_files = 0
+        self.failed = []
+        self.started = time.time()
+        self.done = False
+        self.stop = False
+
+    def add(self, n):
+        with self.lock:
+            self.bytes += n
+
+    def progress(self):
+        with self.lock:
+            got, total = self.bytes, max(self.total, self.bytes)
+        out = {"files": self.files, "totalFiles": self.total_files, "bytes": got, "totalBytes": total,
+               "eta": None, "percent": int(got * 100 / total) if total else 0, "streams": self.streams}
+        out["percent"] = max(0, min(99, out["percent"]))
+        el = time.time() - self.started
+        if el >= 5 and got and total > got:
+            out["eta"] = int((total - got) / (got / el))
+        return out
+
+    def _ssh(self, cmd, **kw):
+        # its own connection each (no ControlMaster): the point is several TCP streams at once
+        argv = ssh_base(self.conf, multiplex=False) + ["-T", "-o", "BatchMode=yes", "-o", "Compression=no", self.conf.target, cmd]
+        return subprocess.Popen(argv, **kw)
+
+    def _list(self):
+        if self.mode == "upload":
+            return copy_list_local(self.local, self.ignores, self.git)
+        return remote_python(self.conf, COPY_LIST_PY, [self.remote, json.dumps(self.ignores), "on" if self.git else "off"],
+                             multiplex=False, timeout=600)
+
+    def _upload(self, rels):
+        q = shlex.quote(self.remote)
+        with tempfile.TemporaryFile() as errf:
+            p = self._ssh(f"mkdir -p {q} && cd {q} && tar -xf -", stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errf)
+            try:
+                with tarfile.open(fileobj=_Counted(p.stdin, self), mode="w|") as tf:
+                    for rel in rels:
+                        if self.stop:
+                            break
+                        try:
+                            tf.add(os.path.join(self.local, *rel.split("/")), arcname=rel, recursive=False)
+                        except OSError:
+                            self.failed.append(rel)
+                        self.files += 1
+                p.stdin.close()
+            except (OSError, ValueError) as e:      # broken pipe: the server side stopped
+                self.failed.append(str(e))
+            rc = p.wait()
+            if rc != 0:
+                errf.seek(0)
+                self.failed.append("tar on the server: " + (errf.read().decode("utf-8", "replace").strip().splitlines() or [str(rc)])[-1][:200])
+
+    def _download(self, rels):
+        q = shlex.quote(self.remote)
+        root = os.path.realpath(self.local)
+        with tempfile.TemporaryFile() as errf:
+            p = self._ssh(f"cd {q} && tar -cf - --null -T -", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf)
+
+            def feed():
+                try:
+                    p.stdin.write(b"\0".join(r.encode("utf-8", "surrogateescape") for r in rels) + b"\0")
+                    p.stdin.close()
+                except OSError:
+                    pass
+            threading.Thread(target=feed, daemon=True).start()
+            try:
+                with tarfile.open(fileobj=_Counted(p.stdout, self), mode="r|") as tf:
+                    for m in tf:
+                        if self.stop:
+                            break
+                        try:
+                            if hasattr(tarfile, "data_filter"):
+                                tf.extract(m, root, filter="data")
+                            elif not (m.name.startswith("/") or ".." in m.name.split("/") or m.issym() or m.islnk()):
+                                tf.extract(m, root)
+                        except (tarfile.TarError, OSError):
+                            self.failed.append(m.name)
+                        if not m.isdir():
+                            self.files += 1
+            except (tarfile.TarError, OSError) as e:
+                self.failed.append(str(e))
+            p.stdout.close()
+            p.wait()       # GNU tar exits 1 when a file changed while it was read: fine, Mutagen checks it
+
+    def run(self):
+        try:
+            got = self._list() or {}
+            if got.get("error"):
+                raise RuntimeError(got["error"])
+            files = got.get("files") or []
+            self.total_files = len(files)
+            self.total = sum(tar_size(f[1]) for f in files) + 1024 * self.streams
+            if self.mode == "download":
+                os.makedirs(self.local, exist_ok=True)
+            work = [threading.Thread(target=self._upload if self.mode == "upload" else self._download, args=(b,), daemon=True)
+                    for b in copy_buckets(files, self.streams)]
+            for t in work:
+                t.start()
+            for t in work:
+                t.join()
+        except Exception as e:      # noqa: BLE001 — Mutagen copies whatever is left
+            self.failed.append(str(e))
+        finally:
+            self.done = True
+            mutagen_resume(self.name)
+            if self.marker:
+                try:
+                    os.unlink(self.marker)
+                except OSError:
+                    pass
+            if self.on_done:
+                self.on_done(self)
+
+
+def mutagen_resume(name):
+    exe = which("mutagen")
+    if exe:
+        try:
+            subprocess.run([exe, "sync", "resume", name], capture_output=True, timeout=60,
+                           env=dict(os.environ, PATH=tool_path()))
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 def fs_local():
     """The FS_PY functions, loaded once into this process."""
     if not _FS:
@@ -5071,6 +5289,8 @@ class App:
         self._restored = threading.Event()    # set once the tabs of the last run are back (restore_live)
         self._restored.set()
         self._live_saved = False
+        self.copies = {}              # project -> FastCopy (Add project with parallel copies)
+        self._copies_checked = False
 
     @property
     def conf(self) -> ServerConf:
@@ -5085,6 +5305,12 @@ class App:
         if self.web:                  # "local" would be the web server's own disk
             for x in p:
                 x["local"], x["localExists"] = "", False
+        else:
+            self._copies_leftover()
+        for x in p:
+            job = self.copies.get(x["name"])
+            if job and not job.done and x.get("sync"):
+                x["sync"].update(state="busy", label=f"copying ×{job.streams}", paused=False, progress=job.progress())
         for x in p:
             x["commands"] = [c for c in x["commands"] if not c.get("shared")] + self.shared_commands(x)
         order = self.store.project_order()
@@ -5705,16 +5931,81 @@ class App:
                 argv += ["--remote", remote]
         if name:
             argv += ["--name", name]
+        ignores = self._clean_ignores(body.get("ignores")) if body.get("ignores") is not None else default_ignores()
         if body.get("ignores") is not None:
-            argv += ["--ignores", ",".join(self._clean_ignores(body.get("ignores")))]
+            argv += ["--ignores", ",".join(ignores)]
+        try:
+            streams = max(0, min(int(body.get("streams") or 0), COPY_MAX_STREAMS))
+        except (TypeError, ValueError):
+            streams = 0
+        if streams:
+            argv += ["--paused"]
         code, out = self.run_script(argv, timeout=180)
         if code != 0:
             raise ApiError(400, self.script_error(out, "could not add the project"))
         self.invalidate()
         added = re.search(r"Project '([^']+)' added", out)
         pname = added.group(1) if added else name
+        if streams and pname:
+            self.start_copy(pname, mode, ignores, git == "on", streams)
         self.activity.add("add-" + mode, pname, ("downloaded from " + remote) if mode == "download" else ("uploaded " + local))
         return {"ok": True, "project": pname, "output": out[-2000:]}
+
+    def _copy_dir(self) -> Path:
+        return self.store.path.parent / "copying"
+
+    def start_copy(self, name: str, mode: str, ignores: list, git: bool, streams: int):
+        """The first copy of a just-added (paused) project over several ssh connections, then resume."""
+        sess = next((x for x in mutagen_sessions() if x.get("name") == name), None)
+        if not sess:
+            mutagen_resume(name)
+            return None
+        a, b = _endpoint(sess.get("alpha")), _endpoint(sess.get("beta"))
+        local, remote = (a, b) if not a["host"] else (b, a)
+        if not local["path"] or not remote["path"]:
+            mutagen_resume(name)
+            return None
+        marker = self._copy_dir() / re.sub(r"[^A-Za-z0-9._-]", "-", name)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(name)
+        except OSError:
+            marker = None
+
+        def done(job):
+            self.invalidate()
+            took = int(time.time() - job.started)
+            note = f"copied {job.files} files over {job.streams} connections in {took // 60}:{took % 60:02d}"
+            if job.failed:
+                note += f" ({len(job.failed)} left for the sync)"
+            self.activity.add("copy", name, note)
+        job = FastCopy(name, mode, local["path"], remote["path"],
+                       self.conf.with_endpoint(remote["user"], remote["host"], remote["port"]),
+                       ignores, git, streams, marker=str(marker) if marker else None, on_done=done)
+        self.copies[name] = job
+        threading.Thread(target=job.run, daemon=True).start()
+        return job
+
+    def _copies_leftover(self):
+        """A copy the app did not finish (closed meanwhile): resume its sync, Mutagen copies the rest."""
+        if self._copies_checked:
+            return
+        self._copies_checked = True
+        try:
+            left = [f for f in self._copy_dir().iterdir() if f.is_file()]
+        except OSError:
+            return
+        for f in left:
+            try:
+                name = f.read_text().strip()
+            except OSError:
+                continue
+            if name and name not in self.copies:
+                threading.Thread(target=mutagen_resume, args=(name,), daemon=True).start()
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
 
     # connection, key, sync service -------------------------------------------
     def connection(self) -> dict:
@@ -6610,6 +6901,9 @@ class App:
         p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
         if not p or p.get("source") != "mutagen":
             raise ApiError(404, "this project is not synced")
+        job = self.copies.get(name)
+        if job and not job.done:
+            raise ApiError(409, "the first copy is still running — the sync starts by itself when it ends")
         exe = which("mutagen")
         if not exe:
             raise ApiError(400, "mutagen not found")

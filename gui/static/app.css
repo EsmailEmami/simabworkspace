@@ -71,7 +71,10 @@ textarea.inp { height: auto; padding: 7px 9px; resize: vertical; }
 #resizer { width: 3px; margin-left: -2px; cursor: col-resize; flex: none; z-index: 5; position: relative; touch-action: none; }
 #resizer:hover, #resizer.drag { background: var(--accent); }
 
-.proj-head { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
+.proj-head { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; user-select: none; }
+.proj.dragging { opacity: .4; }
+.proj.drop-before { box-shadow: 0 -2px 0 var(--accent); }
+.proj.drop-after  { box-shadow: 0 2px 0 var(--accent); }
 .proj-head:hover { background: var(--bg3); }
 .proj-name { font: 12.5px var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proj.open .proj-name { color: #fff; }

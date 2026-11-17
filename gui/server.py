@@ -54,7 +54,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.37.0"
+VERSION = "1.38.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -595,6 +595,14 @@ class Store:
             self.data["manual"] = [m for m in self.data["manual"] if m.get("name") != name]
             (self.data["projects"].get(name) or {}).pop("title", None)
             self.save()
+
+    # project display order (list of names; projects not in list come last)
+    def project_order(self) -> list:
+        return list(self.db.get("projectOrder") or [])
+
+    def set_project_order(self, order: list) -> None:
+        with self.lock:
+            self.db.put("projectOrder", [str(n) for n in order if n][:200])
 
     def set_last_tabs(self, specs: list):
         with self.lock:
@@ -5040,6 +5048,10 @@ class App:
                 x["local"], x["localExists"] = "", False
         for x in p:
             x["commands"] = [c for c in x["commands"] if not c.get("shared")] + self.shared_commands(x)
+        order = self.store.project_order()
+        if order:
+            idx = {name: i for i, name in enumerate(order)}
+            p.sort(key=lambda x: idx.get(x["name"], len(order)))
         self._projects_cache = (time.time(), p)
         return p
 
@@ -7663,6 +7675,13 @@ class Handler(BaseHTTPRequestHandler):
             return {"folders": app.server_folders()}
         if route == ("POST", "add-project"):
             return app.add_project(self._body())
+        if route == ("PUT", "projects/order"):
+            order = (self._body() or {}).get("order")
+            if not isinstance(order, list):
+                raise ApiError(400, "bad request")
+            app.store.set_project_order(order)
+            app.invalidate()
+            return {"ok": True}
         if route == ("GET", "git-summary"):
             return {"summary": app.git_summary((query.get("project") or [""])[0], (query.get("force") or ["0"])[0] == "1")}
         if route == ("GET", "activity"):

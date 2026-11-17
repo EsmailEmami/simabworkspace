@@ -2703,6 +2703,62 @@
     }
     var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0; });
     root.replaceChildren.apply(root, list.map(projEl).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
+    setupProjDrag(root);
+  }
+
+  var _dragProjName = null;
+  function setupProjDrag(root) {
+    root.addEventListener('dragstart', function (e) {
+      var el = e.target.closest('.proj');
+      if (!el) return;
+      _dragProjName = el.dataset.proj;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', _dragProjName);
+      setTimeout(function () { el.classList.add('dragging'); }, 0);
+    });
+    root.addEventListener('dragend', function (e) {
+      _dragProjName = null;
+      root.querySelectorAll('.proj').forEach(function (el) {
+        el.classList.remove('dragging', 'drop-before', 'drop-after');
+      });
+    });
+    root.addEventListener('dragover', function (e) {
+      if (!_dragProjName) return;
+      var el = e.target.closest('.proj');
+      if (!el || el.dataset.proj === _dragProjName) return;
+      e.preventDefault();
+      var r = el.getBoundingClientRect();
+      var before = e.clientY < r.top + r.height / 2;
+      root.querySelectorAll('.proj').forEach(function (x) { x.classList.remove('drop-before', 'drop-after'); });
+      el.classList.toggle('drop-before', before);
+      el.classList.toggle('drop-after', !before);
+    });
+    root.addEventListener('dragleave', function (e) {
+      if (!e.relatedTarget || !root.contains(e.relatedTarget)) {
+        root.querySelectorAll('.proj').forEach(function (el) { el.classList.remove('drop-before', 'drop-after'); });
+      }
+    });
+    root.addEventListener('drop', function (e) {
+      if (!_dragProjName) return;
+      var target = e.target.closest('.proj');
+      if (!target) return;
+      e.preventDefault();
+      var before = target.classList.contains('drop-before');
+      root.querySelectorAll('.proj').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging'); });
+      var names = Array.from(root.querySelectorAll('.proj')).map(function (el) { return el.dataset.proj; }).filter(Boolean);
+      var from = names.indexOf(_dragProjName);
+      var to = names.indexOf(target.dataset.proj);
+      if (from < 0 || to < 0 || from === to) return;
+      names.splice(from, 1);
+      names.splice(before ? to : to + (from < to ? 0 : 1), 0, _dragProjName);
+      // reorder S.projects immediately (optimistic)
+      var byName = {};
+      S.projects.forEach(function (p) { byName[p.name] = p; });
+      S.projects = names.map(function (n) { return byName[n]; }).filter(Boolean);
+      S.projects = S.projects.concat(Object.values(byName).filter(function (p) { return names.indexOf(p.name) < 0; }));
+      renderProjects();
+      api('PUT', 'projects/order', { order: names }).catch(fail);
+    });
   }
 
   function projEl(p) {
@@ -2714,7 +2770,8 @@
     var more = h('button', { class: 'icon-btn', title: 'More', onclick: function (e) { e.stopPropagation(); projectMenu(p, more); } }, '⋯');
     var tip = [p.title ? 'name: ' + p.name : '', p.remote ? 'server: ' + p.remote : '', p.local ? 'local: ' + p.local : '',
       sync ? 'sync: ' + sync.label + (sync.conflicts ? ', ' + plural(sync.conflicts, 'conflict') : '') : ''].filter(Boolean).join('\n');
-    el.append(h('div', { class: 'proj-head', title: tip, onclick: function () {
+    el.dataset.proj = p.name;
+    el.append(h('div', { class: 'proj-head', draggable: 'true', title: tip, onclick: function () {
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
       localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
       el.classList.toggle('open');

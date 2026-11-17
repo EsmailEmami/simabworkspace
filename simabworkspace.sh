@@ -41,6 +41,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.38.0 2026-11-17  Sync: disconnect toast + Reconnect button (mutagen resume) in Sync details;
+#                       sidebar project drag-drop reorder (saved to db, persists on restart);
+#                       sync progress bar: size-first format, "items" instead of "files".
 #    1.37.0 2026-11-17  Skills Registry: add GitHub repos as skill sources, browse .md skills
 #                       and install them per-project (.claude/skills/); commit history tab in
 #                       the Git dialog with per-hunk staging; Git dialog discard selected files;
@@ -290,7 +293,7 @@
 
 set -u -o pipefail
 
-VERSION="1.37.0"
+VERSION="1.38.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

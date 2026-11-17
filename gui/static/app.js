@@ -3844,7 +3844,7 @@
   window.SW = {
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
     closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
-    confirmDlg: confirmDlg, promptDlg: promptDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab,
+    confirmDlg: confirmDlg, promptDlg: promptDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,

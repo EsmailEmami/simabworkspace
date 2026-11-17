@@ -342,6 +342,8 @@
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
     this.pane.addEventListener('mouseenter', function () { self.hover = true; self.updateAway(); });
     this.pane.addEventListener('mouseleave', function () { self.hover = false; });
+    // a tap on the chat makes it the active one: its message box comes back at once
+    this.pane.addEventListener('pointerdown', function () { setTimeout(function () { self.updateAway(); }, 0); });
     this.applyInfo();
     this.connect();
   }
@@ -417,6 +419,11 @@
         self.sessionId = '';                       // a new conversation: the old one is gone from this tab
         if (self.info.spec) delete self.info.spec.resume;
         self.prefillStarter();
+      } else if (m.t === 'title') {
+        // Claude named the conversation (or it was renamed): the tab shows that name, like in VS Code
+        self.info.title = m.title;
+        self.applyInfo();
+        if (SW.renderTitle) SW.renderTitle();
       } else if (m.t === 'gone') {
         self.gone = true;
       }
@@ -637,11 +644,14 @@
 
   // The message box hides when you are not working in this chat for 3 seconds (another tab or
   // section is active, or the window is in the background) and the mouse is not over it.
-  // It comes back at once when you return. Not on touch screens / phones.
+  // It comes back at once when you return. Tablets too (only the active chat keeps its box;
+  // a touch screen has no hover); not on phones — one section, the chat you see is the active one.
   P.isPresent = function () {
     var S = SW.S, b = document.body;
-    if (this.touch || (b && b.classList.contains('compact'))) return true;
-    if (this.hover || this.composerEl.contains(document.activeElement)) return true;
+    if (b && b.classList.contains('compact')) return true;
+    if (this.composerEl.contains(document.activeElement)) return true;
+    if (this.touch) return S.active === this && !document.hidden;
+    if (this.hover) return true;
     var focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
     return S.active === this && focused;
   };

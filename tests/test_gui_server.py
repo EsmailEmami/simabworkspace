@@ -756,13 +756,29 @@ import sys, json
 def out(o):
     sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 SID = "11111111-2222-3333-4444-555555555555"
+def control(m):
+    r = m["request"]
+    if r["subtype"] == "initialize":
+        out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"],
+             "response": {"commands": [{"name": "compact", "description": "x"}]}}})
+    elif r["subtype"] == "generate_session_title":
+        out({"type": "seen_title", "args": r})
+        t = "" if r["description"] == "no title" else "Title: " + r["description"][:20]
+        out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"],
+             "response": {"title": t or None}}})
+    elif r["subtype"] == "rename_session":
+        out({"type": "seen_control", "subtype": r["subtype"], "args": r})
+        out({"type": "system", "subtype": "session_title_changed", "title": r["title"], "session_id": SID})
+        out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"]}})
+    else:
+        return False
+    return True
 for line in sys.stdin:
     m = json.loads(line)
     if m.get("type") == "control_request":
         r = m["request"]
-        if r["subtype"] == "initialize":
-            out({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"],
-                 "response": {"commands": [{"name": "compact", "description": "x"}]}}})
+        if control(m):
+            pass
         else:
             out({"type": "seen_control", "subtype": r["subtype"], "args": r})
     elif m.get("type") == "user":
@@ -771,7 +787,10 @@ for line in sys.stdin:
         out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}, "session_id": SID})
         out({"type": "control_request", "request_id": "perm-1", "request": {"subtype": "can_use_tool",
              "tool_name": "Bash", "input": {"command": "ls"}, "permission_suggestions": [{"type": "addRules"}]}})
-        ans = json.loads(sys.stdin.readline())
+        while True:
+            ans = json.loads(sys.stdin.readline())
+            if not (ans.get("type") == "control_request" and control(ans)):
+                break
         out({"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "answer:" + json.dumps(ans["response"]["response"])}]}, "session_id": SID})
         out({"type": "result", "subtype": "success", "session_id": SID, "total_cost_usd": 0.01})
 '''
@@ -893,6 +912,140 @@ class ChatProtocol(unittest.TestCase):
         self.assertTrue(wait_for(lambda: s.exit_code == 3))
         self.assertIn("_exit", self.types(s))
         self.assertTrue(wait_for(lambda: any(e.get("text") == "boom" for e in s.events)))
+
+    # Claude names the conversation, like in the VS Code extension -------------------------
+    def answer_perm(self, s):
+        self.assertTrue(wait_for(lambda: "perm-1" in s.pending))
+        s.handle({"t": "perm", "id": "perm-1", "allow": True})
+        self.assertTrue(wait_for(lambda: not s.busy))
+
+    def test_claude_names_a_new_conversation(self):
+        s, _, changes = self.make()
+        sent = []
+        fake = mock.Mock()
+        fake.send_json = sent.append
+        s.attach(fake)
+        s.handle({"t": "send", "content": "fix the login page please"})
+        self.answer_perm(s)
+        self.assertTrue(wait_for(lambda: s.title == "Title: fix the login page p"))
+        req = next(e for e in s.events if e.get("type") == "seen_title")["args"]
+        self.assertEqual(req, {"subtype": "generate_session_title", "description": "fix the login page please", "persist": True})
+        self.assertEqual(s.spec["named"], "ai")
+        self.assertIn({"t": "title", "title": "Title: fix the login page p"}, sent)
+        self.assertIs(changes[-1], s)                          # the tab list keeps the new name
+        self.assertEqual(s.info()["title"], "Title: fix the login page p")
+        s.handle({"t": "send", "content": "and the signup page"})   # named: not asked again
+        self.answer_perm(s)
+        self.assertEqual(self.types(s).count("seen_title"), 1)
+
+    def test_no_title_is_asked_again_three_times_at_most(self):
+        s, _, _ = self.make()
+        for _ in range(4):
+            s.handle({"t": "send", "content": "no title"})
+            self.answer_perm(s)
+        self.assertTrue(wait_for(lambda: self.types(s).count("seen_title") == 3))
+        self.assertEqual(s.title, "Claude · p")
+        self.assertNotIn("named", s.spec)
+        self.assertNotIn("_error", self.types(s))
+
+    def test_slash_commands_do_not_name_it(self):
+        s, _, _ = self.make()
+        s.handle({"t": "send", "content": "/compact"})
+        self.answer_perm(s)
+        self.assertNotIn("seen_title", self.types(s))
+
+    def test_rename_tab_renames_the_conversation_in_claude(self):
+        s, _, _ = self.make()
+        s.handle({"t": "send", "content": "hello"})
+        self.answer_perm(s)
+        self.assertTrue(wait_for(lambda: s.spec.get("named") == "ai"))
+        s.rename("My own name")
+        self.assertTrue(wait_for(lambda: "seen_control" in self.types(s)))
+        req = next(e for e in s.events if e.get("type") == "seen_control")["args"]
+        self.assertEqual(req, {"subtype": "rename_session", "title": "My own name", "source": "host",
+                               "session_id": "11111111-2222-3333-4444-555555555555"})
+        self.assertEqual((s.title, s.spec["named"]), ("My own name", "custom"))
+        self.assertNotIn("session_title_changed", [e.get("subtype") for e in s.events])   # handled, not shown
+
+    def test_renamed_before_claude_runs_is_told_later(self):
+        built = {"make_argv": lambda *a: [sys.executable, "-c", FAKE_CLAUDE], "cwd": "/tmp", "title": "t",
+                 "resume": "11111111-2222-3333-4444-555555555555", "spec": {"kind": "chat", "project": "", "where": "server"}}
+        s = sw.ChatSession("r", built)
+        s.rename("Later")
+        self.assertEqual(s.rename_later, "Later")
+        s.start()
+        self.addCleanup(s.kill, True)
+        self.assertTrue(wait_for(lambda: "seen_control" in self.types(s)))
+        self.assertEqual(s.rename_later, "")
+
+    def test_session_title_changed_from_elsewhere(self):
+        s, _, _ = self.make()
+        s._handle_event({"type": "system", "subtype": "session_title_changed", "title": "  From\n /rename  "})
+        self.assertEqual((s.title, s.spec["named"]), ("From /rename", "custom"))
+
+    def test_resumed_conversation_shows_its_title(self):
+        h = {"total": 0, "start": 0, "entries": [], "title": "Claude's name", "custom": False, "first": "x"}
+        built = {"make_argv": lambda *a: ["/bin/true"], "cwd": "/tmp", "title": "Claude · first words", "resume": "",
+                 "history": h, "spec": {"kind": "chat", "project": "", "where": "server"}}
+        s = sw.ChatSession("h1", built)
+        self.assertEqual((s.title, s.spec["named"]), ("Claude's name", "ai"))
+        built["history"] = dict(h, custom=True)
+        self.assertEqual(sw.ChatSession("h2", built).spec["named"], "custom")
+
+    def test_old_untitled_conversation_is_named_after_its_first_message(self):
+        built = {"make_argv": lambda *a: [sys.executable, "-c", FAKE_CLAUDE], "cwd": "/tmp", "title": "t", "resume": "",
+                 "history": {"total": 1, "start": 0, "entries": [], "title": "", "first": "the first question"},
+                 "spec": {"kind": "chat", "project": "", "where": "server"}}
+        s = sw.ChatSession("o", built)
+        s.start()
+        self.addCleanup(s.kill, True)
+        s.handle({"t": "send", "content": "go on"})
+        self.answer_perm(s)
+        self.assertTrue(wait_for(lambda: s.title == "Title: the first question"))
+
+    def test_new_chat_forgets_the_name(self):
+        s, _, _ = self.make()
+        s.handle({"t": "send", "content": "hello"})
+        self.answer_perm(s)
+        self.assertTrue(wait_for(lambda: s.spec.get("named") == "ai"))
+        s.restart(fresh=True)
+        self.assertEqual(s.title, "Claude · p")
+        self.assertNotIn("named", s.spec)
+
+
+class TranscriptTitles(unittest.TestCase):
+    """REMOTE_LIST_PY / REMOTE_HISTORY_PY read the names Claude writes into its transcripts."""
+    def run_py(self, code, *args):
+        home = self.home
+        out = subprocess.run([sys.executable, "-c", code, *args], env=dict(os.environ, HOME=home),
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home)
+        d = os.path.join(self.home, ".claude", "projects", "-p")
+        os.makedirs(d)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "first question"}},
+            {"type": "ai-title", "aiTitle": "AI name", "sessionId": "x"},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}},
+        ]
+        self.f = os.path.join(d, "11111111-2222-3333-4444-555555555555.jsonl")
+        with open(self.f, "w") as fh:
+            fh.write("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in lines))
+
+    def test_ai_title_then_custom_title_wins(self):
+        conv = "11111111-2222-3333-4444-555555555555"
+        h = self.run_py(sw.REMOTE_HISTORY_PY, "-p", conv)
+        self.assertEqual((h["title"], h["custom"], h["first"], h["total"]), ("AI name", False, "first question", 2))
+        self.assertEqual(self.run_py(sw.REMOTE_LIST_PY, "-p")[0]["title"], "AI name")
+        with open(self.f, "a") as fh:
+            fh.write(json.dumps({"type": "custom-title", "customTitle": "Mine", "sessionId": "x"}, separators=(",", ":")) + "\n")
+            fh.write(json.dumps({"type": "ai-title", "aiTitle": "AI again", "sessionId": "x"}, separators=(",", ":")) + "\n")
+        h = self.run_py(sw.REMOTE_HISTORY_PY, "-p", conv)
+        self.assertEqual((h["title"], h["custom"]), ("Mine", True))
+        self.assertEqual(self.run_py(sw.REMOTE_LIST_PY, "-p")[0]["title"], "Mine")
 
 
 class ProjectFiles(unittest.TestCase):
@@ -2004,7 +2157,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.34.1"', text)
+        self.assertIn('VERSION="1.35.0"', text)
 
 
 if __name__ == "__main__":

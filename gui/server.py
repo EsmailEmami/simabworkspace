@@ -53,7 +53,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.34.1"
+VERSION = "1.35.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2008,6 +2008,13 @@ def chat_relay_command(mode: str, key: str, offset: int = 0, script: str = "", c
 
 
 RELAY_KEY_RE = re.compile(r"[0-9a-f]{16}")
+# how a chat tab got its name: "ai" = Claude named the conversation, "custom" = renamed by the user
+CHAT_NAMED = ("ai", "custom")
+TITLE_TRIES = 3          # ask Claude for a title on at most this many messages (like the VS Code extension)
+
+
+def clean_title(t) -> str:
+    return " ".join(t.split())[:80] if isinstance(t, str) else ""
 
 
 # Small Python programs run on the server (python3 is there) to read Claude's
@@ -2017,19 +2024,21 @@ import sys, os, json, glob
 d = os.path.expanduser("~/.claude/projects/" + sys.argv[1])
 out = []
 for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:40]:
-    title = first = last = ""
+    title = custom = first = last = ""
     n = 0
     try:
         with open(f, encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if '"ai-title"' not in line and '"last-prompt"' not in line and '"type":"user"' not in line:
+                if '-title"' not in line and '"last-prompt"' not in line and '"type":"user"' not in line:
                     continue
                 try:
                     e = json.loads(line)
                 except Exception:
                     continue
                 t = e.get("type")
-                if t == "ai-title":
+                if t == "custom-title":
+                    custom = e.get("customTitle") or custom
+                elif t == "ai-title":
                     title = e.get("aiTitle") or title
                 elif t == "last-prompt":
                     last = e.get("lastPrompt") or last
@@ -2042,7 +2051,7 @@ for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:
                         first = first or c
     except OSError:
         continue
-    out.append({"id": os.path.basename(f)[:-6], "mtime": os.path.getmtime(f), "title": title,
+    out.append({"id": os.path.basename(f)[:-6], "mtime": os.path.getmtime(f), "title": custom or title,
                 "first": first[:300], "last": last[:300], "prompts": n, "size": os.path.getsize(f)})
 print(json.dumps(out))
 '''
@@ -2158,13 +2167,20 @@ LIM = 8000
 def cut(s):
     return s if len(s) <= LIM else s[:LIM] + "\n…"
 out = []
+ai = custom = first = ""
 with open(f, encoding="utf-8", errors="replace") as fh:
     for line in fh:
-        if '"type":"user"' not in line and '"type":"assistant"' not in line:
+        if '"type":"user"' not in line and '"type":"assistant"' not in line and '-title"' not in line:
             continue
         try:
             e = json.loads(line)
         except Exception:
+            continue
+        if e.get("type") == "ai-title":
+            ai = e.get("aiTitle") or ai
+            continue
+        if e.get("type") == "custom-title":
+            custom = e.get("customTitle") or custom
             continue
         if e.get("type") not in ("user", "assistant") or e.get("isSidechain"):
             continue
@@ -2193,6 +2209,9 @@ with open(f, encoding="utf-8", errors="replace") as fh:
             c = cut(c)
         if e.get("isMeta"):
             continue
+        if not first and e["type"] == "user":
+            first = c if isinstance(c, str) else " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+            first = "" if first.lstrip().startswith("<") else first.strip()
         out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c},
                     **{k: e[k] for k in ("isSynthetic", "origin") if k in e}})
 total = len(out)
@@ -2204,7 +2223,7 @@ while k > 0 and k > start - 10 and not (out[k]["type"] == "user" and isinstance(
         and any((isinstance(b, dict) and b.get("type") == "text") for b in (out[k]["message"]["content"] if isinstance(out[k]["message"]["content"], list) else [{"type": "text"}]))):
     k -= 1
 start = k if k > 0 and out[k]["type"] == "user" else start
-print(json.dumps({"total": total, "start": start, "entries": out[start:end]}))
+print(json.dumps({"total": total, "start": start, "entries": out[start:end], "title": (custom or ai)[:200], "custom": bool(custom), "first": first[:2000]}))
 '''
 
 
@@ -2440,6 +2459,14 @@ class ChatSession:
         h = built.get("history")
         if isinstance(h, list):                        # old format: a plain list
             h = {"total": len(h), "start": 0, "entries": h}
+        self.title_tries = 0
+        self.rename_later = ""        # renamed while Claude was not running: told when it starts
+        self.title_hint = ""          # an old conversation without a title: named after its first message
+        if isinstance(h, dict) and clean_title(h.get("title")):
+            self.title = clean_title(h["title"])          # the name Claude (or /rename) gave this conversation
+            self.spec["named"] = "custom" if h.get("custom") else "ai"
+        elif isinstance(h, dict) and isinstance(h.get("first"), str):
+            self.title_hint = h["first"]
         if h and h.get("entries"):
             self.events.append({"type": "_history", "entries": h["entries"], "start": h.get("start", 0), "total": h.get("total", 0)})
         elif built.get("history_error"):
@@ -2625,6 +2652,12 @@ class ChatSession:
             if kind == "initialize" and resp.get("subtype") == "success":
                 self.init = resp.get("response") or {}
                 self._log({"type": "_init", "info": self.init})
+                self._send_rename()
+            elif kind in ("generate_session_title", "rename_session"):
+                t = clean_title((resp.get("response") or {}).get("title"))
+                if kind == "generate_session_title" and resp.get("subtype") == "success" and t \
+                        and self.spec.get("named") not in CHAT_NAMED:
+                    self.set_title(t, "ai")
             elif resp.get("subtype") == "error":
                 self._log({"type": "_error", "text": str(resp.get("error") or "")[:500]})
             return
@@ -2657,6 +2690,10 @@ class ChatSession:
         elif t == "system" and ev.get("subtype") == "init":
             if ev.get("permissionMode") in CHAT_MODES:
                 self.mode = ev["permissionMode"]
+        elif t == "system" and ev.get("subtype") == "session_title_changed":
+            if clean_title(ev.get("title")):                # /rename, or a rename from another client
+                self.set_title(clean_title(ev["title"]), "custom")
+            return
         elif t == "keep_alive":
             return
         self._log(ev)
@@ -2708,6 +2745,8 @@ class ChatSession:
                                 "message": {"role": "user", "content": content}, "parent_tool_use_id": None}):
                 self.busy = False
                 self._log({"type": "_error", "text": "message not sent — Claude is not running"})
+                return
+            self._ask_title(content)
         elif t == "perm":
             self.answer_permission(m.get("id"), m.get("allow") is True, m.get("always") is True,
                                    m.get("message") if isinstance(m.get("message"), str) else "",
@@ -2733,6 +2772,41 @@ class ChatSession:
                 self.remember(self.spec.get("project"), effort=self.effort)
             self._request({"subtype": "apply_flag_settings", "settings": {"effortLevel": self.effort}})
             self._log({"type": "_effort", "effort": self.effort})
+
+    def _ask_title(self, content):
+        """Like the VS Code extension: Claude names the conversation from the first message
+        (and writes it into the transcript, so every Claude client shows the same name)."""
+        if self.spec.get("named") in CHAT_NAMED or self.title_tries >= TITLE_TRIES:
+            return
+        txt = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text").strip()
+        txt = self.title_hint or txt
+        if not txt or txt.startswith("/"):
+            return
+        self.title_tries += 1
+        self._request({"subtype": "generate_session_title", "description": txt[:4000], "persist": True})
+
+    def set_title(self, title: str, how: str):
+        with self.lock:
+            changed = title != self.title or self.spec.get("named") != how
+            self.title = title
+            self.spec["named"] = how
+            if changed:
+                self._broadcast({"t": "title", "title": title})
+        if changed and self.on_change:
+            self.on_change(self)
+
+    def rename(self, title: str):
+        """The user renamed the tab: the conversation gets the same name in Claude (custom-title)."""
+        self.title = title
+        self.spec["named"] = "custom"
+        self.rename_later = title
+        self._send_rename()
+
+    def _send_rename(self):
+        if self.rename_later and self.alive and self.session_id:
+            if self._request({"subtype": "rename_session", "title": self.rename_later, "source": "host",
+                              "session_id": self.session_id}):
+                self.rename_later = ""
 
     def answer_permission(self, rid, allow: bool, always: bool, message: str, new_input=None, permissions=None):
         """allow/deny a tool. new_input: answers to AskUserQuestion (questions + answers);
@@ -2841,7 +2915,13 @@ class ChatSession:
                 self.events.clear()
                 self.session_id = ""
                 self.spec.pop("resume", None)
+                self.spec.pop("named", None)
+                self.title_tries, self.title_hint = 0, ""
+                self.title = "Claude · " + (self.spec.get("project") or "home")
             self._broadcast({"t": "clear"})
+            self._broadcast({"t": "title", "title": self.title})
+            if self.on_change:
+                self.on_change(self)
         else:
             self._log({"type": "_restart"})
         self.start()
@@ -3005,7 +3085,8 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
             "resume": resume, "mode": mode, "model": model, "effort": effort, "conf": c, "rpath": rpath,
             "relay": relay or secrets.token_hex(8), "relay_restored": bool(relay),
             "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new",
-                     "slot": 0, **({"resume": resume} if resume else {})}}
+                     "slot": 0, **({"resume": resume} if resume else {}),
+                     **({"named": spec["named"]} if spec.get("named") in CHAT_NAMED else {})}}
 
 
 
@@ -4994,7 +5075,11 @@ class App:
 
     def rename(self, sid: str, title):
         s = self.get(sid)
-        s.title = clean_str(title, 80, "title", required=True)
+        t = clean_str(title, 80, "title", required=True)
+        if isinstance(s, ChatSession):
+            s.rename(t)
+        else:
+            s.title = t
         self._remember()
         return s.info()
 

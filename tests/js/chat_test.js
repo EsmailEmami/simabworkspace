@@ -54,6 +54,18 @@ const tests = {
     feed({ t: 'e', e: { type: '_effort', effort: 'xhigh' } });
     assert.strictEqual(tab.effortSel.value, 'xhigh');
   },
+  'the tab shows the name Claude gave the conversation'() {
+    const { tab, feed } = newTab();
+    feed({ t: 's', events: [], state: { alive: true, busy: false } });
+    let renders = 0;
+    global.SW.renderTitle = () => { renders++; };
+    feed({ t: 'title', title: 'Login page focus on Safari' });
+    assert.strictEqual(tab.info.title, 'Login page focus on Safari');
+    assert.strictEqual(tab.ttlEl.textContent, 'Login page focus on Safari');
+    assert.ok(tab.el.title.indexOf('Login page focus on Safari') === 0);
+    assert.strictEqual(renders, 1);
+    delete global.SW.renderTitle;
+  },
   'reply of a real stream is shown once'() {
     const { tab, feed } = newTab();
     const stream = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/chat_stream_fa.json'), 'utf8'));
@@ -407,12 +419,23 @@ const tests = {
     tab.awaySince = Date.now() - 9000;
     tab.updateAway();
     assert.ok(!tab.pane.classList.contains('away'));
-    // never on touch screens
+    // tablet (touch): only the active chat keeps its box — a tap leaves "hover" on, it must not count
     document.activeElement = null;
     tab.touch = true;
+    tab.hover = true;
+    tab.awaySince = Date.now() - 9000;
+    tab.updateAway();
+    assert.ok(tab.pane.classList.contains('away'), 'inactive chat on a tablet: hidden');
+    S.active = tab;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'), 'the active chat on a tablet: shown');
+    // phone (one section): never hidden
+    S.active = { other: true };
+    document.body.classList.add('compact');
     tab.awaySince = Date.now() - 9000;
     tab.updateAway();
     assert.ok(!tab.pane.classList.contains('away'));
+    document.body.classList.remove('compact');
     delete document.hasFocus;
   },
 

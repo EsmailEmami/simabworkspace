@@ -41,6 +41,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.35.0 2026-11-17  Chat tabs show the name Claude gives the conversation (like the VS Code
+#                       extension; saved in Claude's transcript); renaming a chat tab renames the
+#                       conversation in Claude too. Tablet: the message box of chats you are not
+#                       in hides too.
 #    1.34.0 2026-11-16  Rail (activity bar) on the left beside the projects; Files panel in the
 #                       sidebar shows the active project's files; drag files from your OS into a
 #                       folder to upload them; create, rename, copy/cut/paste, delete and edit
@@ -266,7 +270,7 @@
 
 set -u -o pipefail
 
-VERSION="1.34.1"
+VERSION="1.35.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

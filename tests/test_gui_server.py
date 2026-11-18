@@ -587,7 +587,17 @@ class ZshOnTheServer(TmpHome):
             folders = {f["name"]: f["git"] for f in self.app.server_folders()}
             self.assertEqual(folders, {"empty-project": "", "repo": "repo", "mono": "repos inside"})
             p = {"name": "mono", "remote": str(self.home / "mono"), "local": "", "localExists": False, "endpoint": {}}
+            self.assertEqual(sw.git_repos(self.app, p), {"where": "server", "repos": []}, "an empty .git is no repository")
+            mono = self.home / "mono"
+            REAL_RUN(["git", "init", "-q", str(mono / "api")], check=True)
+            (mono / "broken" / ".git").mkdir(parents=True)
             self.assertEqual(sw.git_repos(self.app, p), {"where": "server", "repos": ["api"]})
+            # the user's case: a stray `git init` in the project folder, over the real repositories
+            REAL_RUN(["git", "init", "-q", str(mono)], check=True)
+            self.assertEqual(sw.git_repos(self.app, p), {"where": "server", "repos": ["api"]})
+            g = ["git", "-C", str(mono), "-c", "user.name=t", "-c", "user.email=t@t"]
+            REAL_RUN(g + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            self.assertEqual(sw.git_repos(self.app, p), {"where": "server", "repos": ["", "api"]}, "a real one is kept")
 
     def test_posix_sh_keeps_the_command_intact(self):
         cmd = 'x="a b"; for f in "$HOME"/nothing-*/; do echo "$f"; done; printf "%s|" "$x" \'q\''
@@ -1264,6 +1274,12 @@ class GitFlow(TmpHome):
         with self.assertRaises(sw.ApiError):
             sw.GitRepo(self.app, p, "../etc")
         self.assertEqual(sw.find_local_repos(self.a), [""])                  # the project itself
+        # an empty .git, and a stray `git init` (no commits) over the repositories: not listed
+        os.makedirs(os.path.join(proj, "docs", ".git"))
+        subprocess.run(["git", "init", "-q", proj], check=True)
+        self.assertEqual(sw.git_repos(self.app, p), {"where": "local", "repos": ["api", "web"]})
+        subprocess.run(["git", "-C", proj, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        self.assertEqual(sw.git_repos(self.app, p)["repos"], ["", "api", "web"])
 
     def test_git_summary_for_badges(self):
         repo = sw.GitRepo(self.app, self.p)
@@ -2240,7 +2256,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.42.0"', text)
+        self.assertIn('VERSION="1.42.1"', text)
 
 
 if __name__ == "__main__":

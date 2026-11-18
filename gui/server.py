@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.42.0"
+VERSION = "1.42.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -3338,14 +3338,46 @@ def find_local_repos(root: str, depth: int = 3) -> list:
     return out
 
 
+# Every folder with a .git, then only the real repositories: git must say the folder is its own top
+# (an empty or broken .git would make git use a repository further up). "nohead:" = no commits yet.
 REMOTE_FIND_REPOS = ("find . -maxdepth 4 \\( -name node_modules -o -name vendor -o -name dist -o -name docker \\) -prune "
-                     "-o -name .git -print 2>/dev/null | sed -e 's|/\\.git$||' -e 's|^\\.$||' -e 's|^\\./||' | sort")
+                     "-o -name .git -print 2>/dev/null | sed -e 's|/\\.git$||' -e 's|^\\.$||' -e 's|^\\./||' | sort | "
+                     "while IFS= read -r d; do t=$(git -C \"./$d\" rev-parse --show-toplevel 2>/dev/null) || continue; "
+                     "[ \"$(cd \"./$d\" && pwd -P)\" = \"$(cd \"$t\" && pwd -P)\" ] || continue; "
+                     "git -C \"./$d\" rev-parse -q --verify HEAD >/dev/null 2>&1 || printf nohead:; printf '%s\\n' \"$d\"; done")
+
+
+def real_repos(found: list) -> list:
+    """found = (path, has commits). The project folder itself is left out when it has no commits
+    but holds the real repositories: a stray `git init` there would list them all as new files."""
+    paths = [p for p, _ in found]
+    return [p for p, head in found if not (p == "" and not head and len(paths) > 1)]
+
+
+def local_repo_ok(root: str, rel: str):
+    """None = not a repository of its own; else True/False = has commits."""
+    git = which("git")
+    d = os.path.join(root, rel) if rel else root
+    if not git:
+        return True
+    env = dict(os.environ, PATH=tool_path(), **GIT_ENV)
+    try:
+        r = subprocess.run([git, "-C", d, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=15, env=env)
+        if r.returncode != 0 or os.path.realpath(r.stdout.strip()) != os.path.realpath(d):
+            return None
+        h = subprocess.run([git, "-C", d, "rev-parse", "-q", "--verify", "HEAD"], capture_output=True, timeout=15, env=env)
+        return h.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 def git_repos(app, project: dict) -> dict:
     """Where git runs for this project and which repositories it has. Local copy first
     (your own git setup); the server when the local copy has no repositories."""
     local = find_local_repos(project["local"]) if project.get("localExists") else []
+    if local:
+        checked = [(r, local_repo_ok(project["local"], r)) for r in local]
+        local = real_repos([(r, ok) for r, ok in checked if ok is not None])
     if local:
         return {"where": "local", "repos": local}
     if project.get("remote") and app.conf.configured:
@@ -3356,10 +3388,15 @@ def git_repos(app, project: dict) -> dict:
         try:
             r = subprocess.run(ssh_base(conf, multiplex=bool(app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)],
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
-            remote = [x.strip() for x in r.stdout.decode("utf-8", "replace").splitlines()]
-            remote = [x for x in remote if x == "" or git_path_ok(x)]
+            found = []
+            for x in r.stdout.decode("utf-8", "replace").splitlines():
+                x = x.strip()
+                head = not x.startswith("nohead:")
+                x = x[len("nohead:"):] if not head else x
+                if (x == "" or git_path_ok(x)) and x not in [f[0] for f in found]:
+                    found.append((x, head))
             # the root shows up as "" once; keep order stable
-            remote = sorted(set(remote), key=lambda x: (x != "", x))
+            remote = sorted(real_repos(found), key=lambda x: (x != "", x))
             if r.returncode == 0 and (remote or r.stdout.strip()):
                 return {"where": "server", "repos": remote}
         except (OSError, subprocess.SubprocessError):

@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.42.1 2026-11-18  Git: a folder is a repository only if git says so (an empty/broken .git is
+#                       skipped); a stray `git init` with no commits over the real repositories is not listed.
 #    1.42.0 2026-11-18  Tasks is a board: Backlog / To do / In progress / Done; drag cards between
 #                       columns (touch: press and hold); + New task and a click on a card open a dialog.
 #    1.41.0 2026-11-18  Tasks: your to-do list in the rail (✓ Tasks), kept on the server so the
@@ -302,7 +304,7 @@
 
 set -u -o pipefail
 
-VERSION="1.42.0"
+VERSION="1.42.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

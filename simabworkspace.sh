@@ -41,6 +41,10 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.43.0 2026-11-18  Dictation: a mic in the chat box (before Send) and a small round mic beside
+#                       every free-text field on focus + hover (pages and dialogs); Chrome/Edge speech
+#                       recognition, Persian by default, right-click the mic for English. Live text
+#                       shows at once; only final words go into the field; long dictation keeps going.
 #    1.42.1 2026-11-18  Git: a folder is a repository only if git says so (an empty/broken .git is
 #                       skipped); a stray `git init` with no commits over the real repositories is not listed.
 #                       History: Claude conversations show Claude's title, then what you wrote.
@@ -305,7 +309,7 @@
 
 set -u -o pipefail
 
-VERSION="1.42.1"
+VERSION="1.43.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

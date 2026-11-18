@@ -26,6 +26,14 @@ function makeSW() {
 }
 global.apiImpl = () => Promise.resolve({});
 global.SW = makeSW();
+// dictation: a fake Chrome recognizer
+const recs = [];
+global.webkitSpeechRecognition = class {
+  constructor() { this.started = 0; this.aborted = 0; recs.push(this); }
+  start() { this.started++; } stop() { if (this.onend) this.onend(); } abort() { this.aborted++; }
+  say(text, fin) { const r = [{ transcript: text }]; r.isFinal = fin; this.onresult({ resultIndex: 0, results: [r] }); }
+};
+require(path.join(ROOT, 'gui/static/voice.js'));
 require(path.join(ROOT, 'gui/static/chat.js'));
 const { ChatTab } = global.SWChat;
 global.SWChat.instant = true;     // no typewriter delay in most tests
@@ -39,6 +47,32 @@ function newTab() {
 const byClass = (el, c) => el.querySelectorAll('.' + c);
 
 const tests = {
+  'composer mic: dictation fills the message box, sending stops it'() {
+    const { tab, feed, ws } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    ws.onopen && ws.onopen();
+    const mic = tab.composerEl.querySelector('.cb-mic');
+    assert.ok(mic, 'a mic in the composer bar');
+    assert.strictEqual(mic.nextElementSibling, tab.actionBtn, 'right before Send');
+    assert.strictEqual(tab.ta.getAttribute('data-voice-to-text'), '1', 'no second floating mic on the chat box');
+    tab.ta.value = 'متن';
+    mic.click();
+    const rec = recs[recs.length - 1];
+    assert.strictEqual(rec.lang, 'fa-IR');
+    assert.ok(mic.classList.contains('vtt-rec'));
+    tab.ta.scrollHeight = 80;
+    rec.say('سلام کلود', false);
+    assert.strictEqual(tab.ta.value, 'متن سلام کلود', 'live text in the box');
+    assert.strictEqual(tab.ta.style.height, '82px', 'the box grows with it');
+    rec.say('سلام کلود', true);
+    tab.submit();
+    const sent = ws.sent.filter((m) => m.t === 'send').pop();
+    assert.strictEqual(sent.content[0].text, 'متن سلام کلود');
+    assert.strictEqual(tab.ta.value, '', 'nothing written back after sending');
+    assert.ok(!mic.classList.contains('vtt-rec'), 'stopped');
+    assert.strictEqual(rec.aborted, 1);
+    tab.dispose();
+  },
   'model: Opus 5.5 by default, no vague "default model"; effort medium'() {
     const { tab, feed, ws } = newTab();
     feed({ t: 's', events: [], state: { alive: true, busy: false, model: '', effort: 'medium' } });

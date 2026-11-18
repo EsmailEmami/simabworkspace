@@ -295,6 +295,12 @@
     this.ta.addEventListener('dragleave', function () { self.ta.classList.remove('drag-over'); });
     this.ta.addEventListener('drop', function (e) { self.ta.classList.remove('drag-over'); if (!hasImages(e)) return; e.preventDefault(); self.addFiles(e.dataTransfer.files); });
     this.attachEl = h('div', { class: 'attach hidden' });
+    // dictation: its own mic in the composer bar (voice.js); the live text grows the box
+    this.micBtn = window.SWVoice ? h('button', { class: 'cb-mic' }) : null;
+    if (this.micBtn) {
+      this.voice = window.SWVoice.attach(this.ta, { button: this.micBtn, notify: function (m) { toast(m, 'warn'); },
+        onWrite: function () { self.autosize(); self._updateActionBtn(); } });
+    }
     this.slashEl = h('div', { class: 'slash hidden' });
     this.modeSel = h('select', { class: 'mini-sel mode', title: 'Permission mode (Shift+Tab)', onchange: function () { self.send({ t: 'mode', mode: self.modeSel.value }); } },
       MODES.map(function (m) { return h('option', { value: m[0], title: m[2] }, m[1]); }));
@@ -337,7 +343,7 @@
           h('span', { class: 'grow' }),
           h('button', { class: 'link cb-hist', title: 'Past conversations', onclick: function () { self.historyMenu(); } }, h('span', { class: 'lbl' }, 'history'), h('span', { class: 'ico' }, '⟲')),
           h('button', { class: 'link cb-new', title: 'Start a new conversation in this tab', onclick: function () { self.newChat(); } }, h('span', { class: 'lbl' }, 'new'), h('span', { class: 'ico' }, '✎')),
-          this.actionBtn)));
+          this.micBtn, this.actionBtn)));
 
     this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
@@ -1713,6 +1719,7 @@
     (this.echoes = this.echoes || []).push({ text: text, el: el });
     if (text) { this.history.push(text); this.histPos = -1; }
     this.ta.value = '';
+    if (this.voice) this.voice.abort();      // sent (with the live text): dictation is done
     this.attachments = [];
     this.renderAttach();
     this.autosize();
@@ -1773,6 +1780,7 @@
   P.dispose = function () {
     this.closed = true;
     clearInterval(this.timer);
+    if (this.voice) this.voice.destroy();
     if (this.ws) try { this.ws.close(); } catch (e) { /* ignore */ }
     this.el.remove();
     this.pane.remove();

@@ -926,7 +926,7 @@
   Tab.prototype.openSearch = function () {
     var self = this;
     if (this.searchEl) { this.searchEl.querySelector('input').focus(); return; }
-    var inp = h('input', { placeholder: 'Find', dir: 'auto' });
+    var inp = h('input', { placeholder: 'Find', dir: 'auto', 'data-voice-to-text': 'off' });
     function go(prev) {
       if (!inp.value) return;
       var found = prev ? self.search.findPrevious(inp.value) : self.search.findNext(inp.value);
@@ -2267,7 +2267,7 @@
   // Switch branch: local branches, branches only on the remote (GitHub…), or a new one.
   function branchPicker(p, repo, where, done) {
     var data = null, busy = false;
-    var filter = h('input', { class: 'inp', placeholder: 'Find or create a branch', dir: 'auto', spellcheck: 'false', autofocus: true });
+    var filter = h('input', { class: 'inp', placeholder: 'Find or create a branch', dir: 'auto', spellcheck: 'false', autofocus: true, 'data-voice-to-text': 'off' });
     var list = h('div', { class: 'blist' }, h('div', { class: 'muted' }, 'Loading branches…'));
     var path = 'git/' + encodeURIComponent(p.name) + '/';
     var md = openModal({ title: 'Branch — ' + p.name + (repo ? ' / ' + repo : ''), size: 'sm', body: [filter, list],
@@ -2338,7 +2338,7 @@
   function skillsDialog(p) {
     var skRepos = [], skills = [], installed = [], selRepo = null;
     var repoList = h('div', { class: 'sk-repos' });
-    var repoInput = h('input', { class: 'inp', placeholder: 'https://github.com/owner/repo', style: 'flex:1', autofocus: true });
+    var repoInput = h('input', { class: 'inp', placeholder: 'https://github.com/owner/repo', style: 'flex:1', autofocus: true, 'data-voice-to-text': 'off' });
     var skillList = h('div', { class: 'sk-skills' });
     var instList = h('div', { class: 'sk-inst' });
     var statusEl = h('div', { class: 'sk-status hidden' });
@@ -4536,6 +4536,8 @@
 
   function start() {
     wire();
+    // dictation: a mic beside every free-text field, in pages and dialogs (voice.js)
+    if (window.SWVoice) S.voice = window.SWVoice.attachAll(document.body, { notify: function (m) { toast(m, 'warn'); } });
     var take = TAKE.length ? Promise.all(TAKE.map(function (sid) {
       return api('POST', 'sessions/' + sid + '/win', { win: WID }).catch(function () { return null; });
     })) : WID ? api('POST', 'windows/' + WID).catch(function () {}) : Promise.resolve();

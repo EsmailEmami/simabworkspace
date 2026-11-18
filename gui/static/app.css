@@ -1075,3 +1075,14 @@ body.compact .tk-col { min-width: 84vw; max-width: none; scroll-snap-align: cent
 .htext.titled { display: flex; align-items: baseline; gap: 10px; }
 .httl { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; color: var(--text); unicode-bidi: plaintext; }
 .hsaid { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--faint); font-size: 12px; unicode-bidi: plaintext; }
+
+/* dictation (voice.js): a small round mic beside free-text fields, and one in the chat composer */
+.vtt-btn { position: fixed; z-index: 200; width: 28px; height: 28px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line2, #2a303b); background: var(--bg3, #1a1e26); color: var(--muted, #8a93a3); box-shadow: 0 4px 14px #0008; cursor: pointer; }
+.vtt-btn:hover { color: var(--text, #d6dbe3); border-color: var(--accent, #7aa2f7); }
+.vtt-btn.vtt-rec, .cb-mic.vtt-rec { background: var(--err, #f7768e); border-color: var(--err, #f7768e); color: #0c0e12; animation: vtt-pulse 1.4s ease-out infinite; }
+.vtt-btn.vtt-unsup, .cb-mic.vtt-unsup { opacity: .6; }
+.cb-mic { width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--faint); display: inline-flex; align-items: center; justify-content: center; }
+.cb-mic:hover { color: var(--text); }
+@keyframes vtt-pulse { 0% { box-shadow: 0 0 0 0 #f7768e88; } 70% { box-shadow: 0 0 0 8px #f7768e00; } 100% { box-shadow: 0 0 0 0 #f7768e00; } }
+@media (prefers-reduced-motion: reduce) { .vtt-btn.vtt-rec, .cb-mic.vtt-rec { animation: none; } }

@@ -46,6 +46,7 @@ const state = {
   ]
 };
 let offline = false;
+let extraSessions = [];
 const CONV_VS = '11111111-aaaa-bbbb-cccc-000000000001', CONV_OLD = '11111111-aaaa-bbbb-cccc-000000000002';
 let fakeRunning = { cheshmeh: [{ pid: 4242, sessionId: CONV_VS, cwd: '/home/esi/cheshmeh', status: 'busy', owner: 'vscode', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 600, updated: Date.now() / 1000 - 5 }] };
 const winOf = {};
@@ -150,7 +151,7 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/claude-running')) res = { projects: fakeRunning, t: 0 };
   else if (url.startsWith('/api/claude-sessions/cheshmeh')) res = { sessions: [
     { id: CONV_VS, mtime: Date.now() / 1000, title: 'Fix the payment page', first: 'fix it', last: '', prompts: 4 },
-    { id: CONV_OLD, mtime: Date.now() / 1000 - 9000, title: 'Old work', first: 'x', last: '', prompts: 2 }] };
+    { id: CONV_OLD, mtime: Date.now() / 1000 - 9000, title: 'Old work', first: 'x', last: '', prompts: 2 }].concat(extraSessions) };
   else if (url.startsWith('/api/git/cheshmeh/log')) res = { upstream: 'origin/main', ahead: 1, behind: 1, commits: [
     { hash: 'b'.repeat(40), short: 'bbbbbbb', author: 'Sara', date: Date.now() / 1000 - 120, refs: ['origin/main'], merge: false, subject: 'from GitHub', state: 'pull' },
     { hash: 'a'.repeat(40), short: 'aaaaaaa', author: 'Me', date: Date.now() / 1000 - 600, refs: ['HEAD -> main'], merge: false, subject: 'my change', state: 'push' },
@@ -470,15 +471,23 @@ const tests = {
   },
 
   async 'history lists what you did and can continue a chat'() {
+    extraSessions = [{ id: '11111111-2222-3333-4444-555555555555', mtime: 1, title: 'Payment page bug', first: '', last: '', prompts: 1 }];
     document.body.querySelector('#btn-history').click();
     await settle();
+    extraSessions = [];
     const modal = document.body.querySelector('.modal');
     const rows = q('.hrow', modal);
     assert.strictEqual(rows.length, 3);
+    // Claude's title for the conversation first, what was written after it
+    assert.strictEqual(q('.httl', rows[0])[0].textContent, 'Payment page bug');
+    assert.strictEqual(q('.hsaid', rows[0])[0].textContent, 'باگ پرداخت را درست کن');
+    assert.ok(calls.some((c) => c.url === '/api/claude-sessions/cheshmeh'));
     assert.deepStrictEqual(q('.hday', modal).map((d) => d.textContent).slice(0, 1), ['Today']);
     assert.ok(rows[1].classList.contains('fail'), 'failed run is marked');
     assert.match(rows[2].textContent, /commit: payment bug/);
     const search = modal.querySelector('input');
+    search.value = 'page bug'; search.dispatch('input');
+    assert.strictEqual(q('.hrow', modal).length, 1, 'the title is searched too');
     search.value = 'پرداخت'; search.dispatch('input');
     assert.strictEqual(q('.hrow', modal).length, 1);
     const btns = q('.btn', q('.hrow', modal)[0]).map((b) => b.textContent);
@@ -488,6 +497,7 @@ const tests = {
     const posts = () => calls.filter((c) => c.url === '/api/sessions' && c.method === 'POST');
     const post = posts().pop();
     assert.deepStrictEqual([post.body.kind, post.body.resume], ['chat', '11111111-2222-3333-4444-555555555555']);
+    assert.strictEqual(post.body.title, 'Claude · Payment page bug');
     // opening the same conversation again focuses its tab instead of a second copy
     const n = posts().length;
     document.body.querySelector('#btn-history').click();

@@ -2127,7 +2127,7 @@
     var claude = it.kind === 'prompt' || it.kind === 'chat' || it.kind === 'claude-tui';
     if (claude && it.session) {
       out.push({ label: 'Open', title: 'Open this conversation here, with its messages, and continue it', fn: function () {
-        openSession({ kind: 'chat', project: it.project, resume: it.session, title: 'Claude · ' + it.text.slice(0, 40) });
+        openSession({ kind: 'chat', project: it.project, resume: it.session, title: 'Claude · ' + (it.title || it.text).slice(0, 40) });
       } });
     } else if (claude && p && hasRemote(p)) {
       out.push({ label: 'Open', title: 'Continue the last conversation of this project', fn: function () { resumeLatest(it.project); } });
@@ -2147,11 +2147,12 @@
       S.projects.map(function (p) { return h('option', { value: p.name }, p.name); }));
     proj.value = onlyProject || '';
     var items = [];
+    var titles = {};          // conversation id -> the title Claude gave it (as in Claude sessions)
     function render() {
       var text = q.value.trim().toLowerCase();
       var shown = items.filter(function (it) {
         return (!proj.value || it.project === proj.value) &&
-          (!text || (it.text + ' ' + it.project + ' ' + (it.cmd || '') + ' ' + (it.repo || '')).toLowerCase().indexOf(text) >= 0);
+          (!text || (it.text + ' ' + it.project + ' ' + (it.cmd || '') + ' ' + (it.repo || '') + ' ' + (titles[it.session] || '')).toLowerCase().indexOf(text) >= 0);
       });
       if (!shown.length) { list.replaceChildren(h('div', { class: 'muted', style: 'padding:10px' }, items.length ? 'Nothing matches' : 'Nothing yet — what you do from now on shows up here.')); return; }
       var out = [], lastDay = '';
@@ -2162,13 +2163,17 @@
         var ok = it.kind !== 'run-exit' ? null : it.code === 0;
         var detail = it.kind === 'run-exit' ? (ok ? 'ok' : 'exit ' + it.code) + ' · ' + (it.seconds < 60 ? it.seconds + 's' : Math.round(it.seconds / 60) + 'm')
           : it.kind === 'run' ? it.cmd : it.repo ? it.repo : it.images ? it.images + ' image(s)' : '';
-        var acts = historyActions(it);
+        var acts = historyActions(it.session && titles[it.session] ? Object.assign({}, it, { title: titles[it.session] }) : it);
         var c = it.project ? projectColor(it.project) : '';
+        var ttl = it.session && titles[it.session];
+        var said = it.kind === 'prompt' ? it.text : '';            // what you wrote, after the title
         out.push(h('div', { class: 'hrow' + (ok === false ? ' fail' : '') },
           h('span', { class: 'htime mono' }, new Date(it.t * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })),
           h('span', { class: 'hk', title: k[1] }, k[0]),
           it.project ? h('span', { class: 'hproj mono', style: 'color:' + c }, it.project) : h('span', { class: 'hproj muted' }, 'home'),
-          h('span', { class: 'htext', dir: 'auto', title: it.text }, (it.kind.indexOf('git-') === 0 ? k[1] + (it.text ? ': ' : '') : '') + (it.text || k[1])),
+          ttl ? h('span', { class: 'htext titled', title: ttl + (said ? '\n' + said : '') },
+            h('span', { class: 'httl', dir: 'auto' }, ttl), said ? h('span', { class: 'hsaid', dir: 'auto' }, said) : null)
+            : h('span', { class: 'htext', dir: 'auto', title: it.text }, (it.kind.indexOf('git-') === 0 ? k[1] + (it.text ? ': ' : '') : '') + (it.text || k[1])),
           detail ? h('span', { class: 'hdetail mono', title: detail }, detail) : null,
           acts.map(function (a) { return h('button', { class: 'btn sm', title: a.title || '', onclick: function () { md.close(); a.fn(); } }, a.label); })));
       });
@@ -2177,8 +2182,23 @@
     q.addEventListener('input', render);
     proj.addEventListener('change', render);
     var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, proj), list] });
-    api('GET', 'activity?limit=2000').then(function (d) { items = d.items || []; render(); })
+    api('GET', 'activity?limit=2000').then(function (d) { items = d.items || []; render(); loadTitles(); })
       .catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
+    // the titles come from the server, one list per project that has conversations here
+    function loadTitles() {
+      var names = [];
+      items.forEach(function (it) {
+        if (it.session && /^(prompt|chat|claude-tui)$/.test(it.kind) && names.indexOf(it.project || '') < 0 &&
+            (!it.project || hasRemote(project(it.project) || {}))) names.push(it.project || '');
+      });
+      names.slice(0, 15).forEach(function (n) {
+        api('GET', 'claude-sessions/' + encodeURIComponent(n)).then(function (r) {
+          var any = false;
+          (r.sessions || []).forEach(function (c) { if (c.title && titles[c.id] !== c.title) { titles[c.id] = c.title; any = true; } });
+          if (any && list.isConnected !== false) render();
+        }).catch(function () { /* no titles: the prompts stay */ });
+      });
+    }
   }
 
   // ------------------------------------------------------------------ git badges

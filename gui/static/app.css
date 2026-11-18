@@ -1071,3 +1071,7 @@ body.compact .tk-col { min-width: 84vw; max-width: none; scroll-snap-align: cent
   .tk-new, .tk-filter { height: 34px; }
   .tk-card { cursor: default; }
 }
+/* History: Claude's title for the conversation, then what you wrote (dimmed) */
+.htext.titled { display: flex; align-items: baseline; gap: 10px; }
+.httl { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; color: var(--text); unicode-bidi: plaintext; }
+.hsaid { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--faint); font-size: 12px; unicode-bidi: plaintext; }

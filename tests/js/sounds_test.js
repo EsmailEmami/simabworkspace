@@ -35,19 +35,21 @@ function test(name, fn) {
   try { fn(); results.push('ok   ' + name); } catch (e) { results.push('FAIL ' + name); console.log(e.stack); process.exitCode = 1; }
 }
 
-test('defaults: a sound for every kind, English voice; saved per device', () => {
+test('defaults: an English voice for every kind; saved per device', () => {
+  localStorage._d['sw-sounds'] = JSON.stringify({ done: 'chime' });          // saved by 1.43.0: not used
   const s = SS.get();
   assert.deepStrictEqual(SS.KINDS.map((k) => k[0]), ['done', 'question', 'permission', 'plan', 'error']);
-  SS.KINDS.forEach((k) => assert.strictEqual(s[k[0]], 'chime'));
+  SS.KINDS.forEach((k) => assert.strictEqual(s[k[0]], 'voice'));
   assert.strictEqual(s.lang, 'en');
-  SS.set({ done: 'voice', question: 'off', lang: 'fa', junk: 'x' });
-  assert.deepStrictEqual(JSON.parse(localStorage._d['sw-sounds']), { done: 'voice', question: 'off', permission: 'chime', plan: 'chime', error: 'chime', lang: 'fa' });
-  assert.strictEqual(SS.get().done, 'voice');
-  localStorage._d['sw-sounds'] = '{broken';
-  assert.strictEqual(SS.get().done, 'chime', 'a broken value falls back to the defaults');
+  SS.set({ done: 'chime', question: 'off', lang: 'fa', junk: 'x' });
+  assert.deepStrictEqual(JSON.parse(localStorage._d['sw-sounds-2']), { done: 'chime', question: 'off', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa' });
+  assert.strictEqual(SS.get().done, 'chime');
+  localStorage._d['sw-sounds-2'] = '{broken';
+  assert.strictEqual(SS.get().done, 'voice', 'a broken value falls back to the defaults');
 });
 
 test('each kind has its own tune', () => {
+  SS.set({ done: 'chime', question: 'chime', permission: 'chime', plan: 'chime', error: 'chime' });
   const tunes = SS.KINDS.map((k) => {
     notes = []; SS._reset();
     assert.strictEqual(SS.play(k[0], 'shop'), 'chime');
@@ -63,28 +65,30 @@ test('each kind has its own tune', () => {
 });
 
 test('two chats at once: the second tune waits for the first', () => {
-  SS.play('done'); SS.play('question');
+  SS.play('done', '', { mode: 'chime' }); SS.play('question', '', { mode: 'chime' });
   const firstEnd = Math.max(...notes.slice(0, 2).map((n) => n.t));
   assert.ok(notes[2].t > firstEnd + 0.2, 'no overlap');
 });
 
 test('voice says the project and what happened; Persian when there is a Persian voice', () => {
-  SS.set({ done: 'voice', question: 'voice' });
   assert.strictEqual(SS.play('done', 'avahesab-backend'), 'voice');
-  assert.strictEqual(spoken[0].text, 'avahesab backend: task done');
+  assert.strictEqual(spoken[0].text, 'Your task in avahesab backend is done');
   assert.strictEqual(spoken[0].lang, 'en-US');
   assert.strictEqual(notes.length, 0, 'no tone with the voice');
   SS.set({ lang: 'fa' });
   voiceList = [{ lang: 'en-US', name: 'E' }, { lang: 'fa-IR', name: 'Dilara' }];
   SS.play('question', 'shop');
-  assert.strictEqual(spoken[1].text, 'shop: کلود سؤال داره');
+  assert.strictEqual(spoken[1].text, 'کلود توی shop ازت سؤال داره');
   assert.strictEqual(spoken[1].lang, 'fa-IR'); assert.strictEqual(spoken[1].voice.name, 'Dilara');
   assert.ok(SS.hasVoice('fa'));
   voiceList = [{ lang: 'en-US', name: 'E' }];                 // no Persian voice on this device
   SS.play('question', 'shop');
-  assert.strictEqual(spoken[2].text, 'shop: Claude has a question'); assert.strictEqual(spoken[2].voice.name, 'E');
+  assert.strictEqual(spoken[2].text, 'Claude has a question for you in shop'); assert.strictEqual(spoken[2].voice.name, 'E');
   assert.ok(!SS.hasVoice('fa'));
-  assert.strictEqual(SS.phrase('plan', '', 'en'), 'the plan is ready');
+  assert.strictEqual(SS.phrase('plan', '', 'en'), 'Your plan is ready');
+  assert.strictEqual(SS.phrase('done', '', 'en'), 'Your task is done');
+  assert.strictEqual(SS.phrase('permission', 'shop', 'en'), 'Claude needs your permission in shop');
+  assert.strictEqual(SS.phrase('error', 'shop', 'en'), 'Your task in shop stopped with an error');
 });
 
 test('off is quiet; no speech in the browser → the tone; trying a choice before saving', () => {
@@ -104,7 +108,7 @@ test('the first touch on the page wakes the audio up', () => {
   assert.strictEqual(winL.pointerdown.length, 1);
   winL.pointerdown[0]();
   assert.strictEqual(winL.pointerdown.length, 0, 'only once');
-  SS.play('done');
+  SS.play('done', '', { mode: 'chime' });
   assert.ok(notes.length);
 });
 

@@ -14,8 +14,8 @@
   ];
   var MODES = [['off', 'Off'], ['chime', 'Sound'], ['voice', 'Voice']];
   var LANGS = [['en', 'English'], ['fa', 'Persian']];
-  var DEFAULTS = { done: 'chime', question: 'chime', permission: 'chime', plan: 'chime', error: 'chime', lang: 'en' };
-  var KEY = 'sw-sounds';
+  var DEFAULTS = { done: 'voice', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'en' };
+  var KEY = 'sw-sounds-2';         // 1.43.1: voice by default — choices saved by 1.43.0 (tunes) are not kept
 
   // [frequency Hz, start s, length s] — each kind its own little tune
   var TUNES = {
@@ -26,12 +26,14 @@
     error: { wave: 'triangle', notes: [[440, 0, 0.18], [330, 0.2, 0.32]] }                       // down
   };
 
+  // {in} = " in <project>" (or nothing)
   var PHRASES = {
-    en: { done: 'task done', question: 'Claude has a question', permission: 'Claude needs permission',
-      plan: 'the plan is ready', error: 'stopped with an error' },
-    fa: { done: 'کار تموم شد', question: 'کلود سؤال داره', permission: 'کلود اجازه می‌خواد',
-      plan: 'پلن آماده‌ست', error: 'با خطا متوقف شد' }
+    en: { done: 'Your task{in} is done', question: 'Claude has a question for you{in}', permission: 'Claude needs your permission{in}',
+      plan: 'Your plan{in} is ready', error: 'Your task{in} stopped with an error' },
+    fa: { done: 'کارت{in} تموم شد', question: 'کلود{in} ازت سؤال داره', permission: 'کلود{in} اجازه می‌خواد',
+      plan: 'پلن{in} آماده‌ست', error: 'کارت{in} با خطا متوقف شد' }
   };
+  var IN = { en: ' in ', fa: ' توی ' };
 
   function get() {
     var out = {};
@@ -102,9 +104,10 @@
   function speakable(name) { return String(name || '').replace(/[-_./]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 
   function phrase(kind, name, lang) {
-    var p = (PHRASES[lang] || PHRASES.en)[kind] || kind;
+    if (!PHRASES[lang]) lang = 'en';
+    var p = PHRASES[lang][kind] || kind;
     name = speakable(name);
-    return name ? name + ': ' + p : p;
+    return p.replace('{in}', name ? IN[lang] + name : '');
   }
 
   function say(kind, name, lang) {

@@ -614,23 +614,24 @@ const tests = {
       ['Task done', 'Claude has a question', 'Claude needs permission', 'Plan ready', 'Stopped with an error', 'Voice language']);
     const modes = q('.snd-mode', modal);
     assert.deepStrictEqual(modes[0].querySelectorAll('option').map((o) => o.textContent), ['Off', 'Sound', 'Voice']);
-    assert.strictEqual(modes[0].value, 'chime');
+    assert.strictEqual(modes[0].value, 'voice');
     const tried = [];
     const play = global.SWSound.play;
     global.SWSound.play = (...a) => tried.push(a);
     modes[1].value = 'voice';
     q('.snd-try', modal)[1].click();
+    modes[1].value = 'voice';
     assert.deepStrictEqual(tried[0], ['question', 'simab', { mode: 'voice', lang: 'en' }], '▶ tries the choice before saving');
     global.SWSound.play = play;
-    assert.ok(!localStorage.getItem('sw-sounds'), 'not saved yet');
+    assert.ok(!localStorage.getItem('sw-sounds-2'), 'not saved yet');
     q('.snd-lang', modal)[0].value = 'fa';
     modes[0].value = 'off';
     const keep = global.SW.S.settings;
     q('.btn.primary', modal).pop().click();
     await settle();
     global.SW.S.settings = keep;
-    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-sounds')),
-      { done: 'off', question: 'voice', permission: 'chime', plan: 'chime', error: 'chime', lang: 'fa' });
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-sounds-2')),
+      { done: 'off', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa' });
     assert.ok(!('done' in calls.filter((c) => c.url === '/api/settings').pop().body), 'not sent to the server');
     document.body.querySelector('#modal-root').replaceChildren();
   },

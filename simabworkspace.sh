@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.43.1 2026-11-18  Sounds speak by default, in plain English: "Your task in shop is done",
+#                       "Claude has a question for you in shop", "Claude needs your permission…".
 #    1.43.0 2026-11-18  Dictation: a mic in the chat box (before Send) and a small round mic beside
 #                       every free-text field on focus + hover (pages and dialogs); Chrome/Edge speech
 #                       recognition, Persian by default, right-click the mic for English. Live text
@@ -312,7 +314,7 @@
 
 set -u -o pipefail
 
-VERSION="1.43.0"
+VERSION="1.43.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

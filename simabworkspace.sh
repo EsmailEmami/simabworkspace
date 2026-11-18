@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.42.0 2026-11-18  Tasks is a board: Backlog / To do / In progress / Done; drag cards between
+#                       columns (touch: press and hold); + New task and a click on a card open a dialog.
 #    1.41.0 2026-11-18  Tasks: your to-do list in the rail (✓ Tasks), kept on the server so the
 #                       app and the web version show the same list; done, project, priority,
 #                       drag or Move up/down to reorder, Sort by priority, Ask Claude.
@@ -300,7 +302,7 @@
 
 set -u -o pipefail
 
-VERSION="1.41.0"
+VERSION="1.42.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

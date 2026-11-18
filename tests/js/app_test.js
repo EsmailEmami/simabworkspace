@@ -73,12 +73,13 @@ function tasksOp(op) {
   const T = fakeTasks, find = (id) => T.tasks.find((t) => t.id === id);
   if (!op) return { tasks: T.tasks.map((t) => Object.assign({}, t)), rev: T.rev };
   const t = find(op.id);
-  if (op.op === 'add') T.tasks.push({ id: 'a' + String(++T.n).padStart(11, '0'), text: op.text, project: op.project || '', prio: op.prio || 2, done: false, at: 1, doneAt: 0 });
-  else if (op.op === 'update' && t) { Object.assign(t, op); delete t.op; if ('done' in op) t.doneAt = op.done ? Date.now() / 1000 : 0; }
+  const setSt = (x, st) => { if (st && st !== x.status) { x.status = st; x.done = st === 'done'; x.doneAt = x.done ? Date.now() / 1000 : 0; } };
+  if (op.op === 'add') { T.tasks.push({ id: 'a' + String(++T.n).padStart(11, '0'), text: op.text, project: op.project || '', prio: op.prio || 2, status: 'todo', done: false, at: 1, doneAt: 0 }); setSt(T.tasks[T.tasks.length - 1], op.status); }
+  else if (op.op === 'update' && t) { ['text', 'project', 'prio'].forEach((k) => { if (k in op) t[k] = op[k]; }); setSt(t, op.status || ('done' in op ? (op.done ? 'done' : 'todo') : null)); }
   else if (op.op === 'delete' && t) T.tasks.splice(T.tasks.indexOf(t), 1);
-  else if (op.op === 'move' && t) { const ref = find(op.before || op.after); T.tasks.splice(T.tasks.indexOf(t), 1); T.tasks.splice(ref ? T.tasks.indexOf(ref) + (op.after ? 1 : 0) : T.tasks.length, 0, t); }
+  else if (op.op === 'move' && t) { setSt(t, op.status); const ref = find(op.before || op.after); T.tasks.splice(T.tasks.indexOf(t), 1); T.tasks.splice(ref ? T.tasks.indexOf(ref) + (op.after ? 1 : 0) : T.tasks.length, 0, t); }
   else if (op.op === 'order') { const want = op.ids.map(find); const slots = want.map((x) => T.tasks.indexOf(x)).sort((a, b) => a - b); slots.forEach((at, i) => { T.tasks[at] = want[i]; }); }
-  else if (op.op === 'clear') T.tasks = T.tasks.filter((x) => !(x.done && (op.project === undefined || x.project === op.project)));
+  else if (op.op === 'clear') T.tasks = T.tasks.filter((x) => !(x.status === 'done' && (op.project === undefined || x.project === op.project)));
   T.rev++;
   return tasksOp(null);
 }
@@ -1195,7 +1196,7 @@ const tests = {
     SW.closeTab(tab, true); await settle();
   },
 
-  async 'Tasks: add, tick, project, priority, reorder, filter, ask Claude'() {
+  async 'Tasks board: + dialog, columns, drag between columns, edit, filter, ask Claude'() {
     const SW = global.SW, S = SW.S;
     for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
     const rc = new Element('b'); rc.className = 'rcount'; document.body.querySelector('#btn-tasks').append(rc);
@@ -1205,100 +1206,119 @@ const tests = {
     assert.strictEqual(calls.filter((c) => c.url === '/api/sessions' && c.body.kind === 'tasks').pop().body.title, 'Tasks');
     document.body.querySelector('#btn-tasks').click(); await settle();
     assert.strictEqual(S.tabs.filter((t) => t.isTasks).length, 1, 'one Tasks tab, reused');
-    const pane = tab.pane;
-    const rows = () => q('.tk-row', tab.list);
-    const texts = () => rows().map((r) => q('.tk-text', r)[0].textContent);
-    assert.strictEqual(tab.note.textContent, 'Nothing to do.');
-    // add three: Enter in the box; project and priority from the pickers
-    const add = (text, proj, prio) => { tab.input.value = text; tab.projSel.value = proj || ''; tab.prioSel.value = String(prio || 2);
-      tab.input.dispatch('keydown', { key: 'Enter' }); };
-    add('fix login', 'cheshmeh', 1);
-    assert.deepStrictEqual(texts(), ['fix login'], 'shown at once');
-    assert.ok(rows()[0].classList.contains('pending'));
+    // four columns, in this order
+    assert.deepStrictEqual(q('.tk-cname', tab.board).map((e) => e.textContent), ['Backlog', 'To do', 'In progress', 'Done']);
+    const cards = (st) => q('.tk-card', tab.cols[st].list);
+    const texts = (st) => cards(st).map((c) => q('.tk-ctext', c)[0].textContent);
+    assert.strictEqual(q('.tk-empty', tab.cols.todo.list).length, 1, 'an empty column says where tasks go');
+    const modal = () => q('.modal').pop();
+    // + New task: a dialog
+    q('.tk-new', tab.pane)[0].click();
+    let d = tab.dialog;
+    assert.ok(d && modal(), 'the dialog opens');
+    assert.strictEqual(d.status.value, 'todo');
+    d.save();
+    assert.match(q('.add-err', modal())[0].textContent, /Write the task first/);
+    d.text.value = 'fix login'; d.project.value = 'cheshmeh'; d.prio.value = '1';
+    d.text.dispatch('keydown', { key: 'Enter' });
+    assert.strictEqual(tab.dialog, null, 'Enter adds and closes');
+    assert.deepStrictEqual(texts('todo'), ['fix login'], 'shown at once');
+    assert.ok(cards('todo')[0].classList.contains('pending'));
     await settle();
-    add('صفحه پرداخت', 'shop'); await settle();
-    add('call Sara'); await settle();
-    assert.deepStrictEqual(texts(), ['fix login', 'صفحه پرداخت', 'call Sara']);
-    assert.strictEqual(tab.input.value, '');
-    assert.strictEqual(q('.tk-prio', rows()[0]).length, 1, 'high priority is marked');
-    assert.strictEqual(q('.tk-proj', rows()[0])[0].textContent, 'cheshmeh');
-    assert.strictEqual(q('.tk-text', rows()[1])[0].getAttribute('dir'), 'auto', 'Persian reads right');
+    // + of a column adds into that column
+    q('.tk-cadd', tab.cols.backlog.el)[0].click();
+    d = tab.dialog; assert.strictEqual(d.status.value, 'backlog');
+    d.text.value = 'صفحه پرداخت'; d.project.value = 'shop'; d.save(); await settle();
+    q('.tk-cadd', tab.cols.todo.el)[0].click();
+    d = tab.dialog; d.text.value = 'call Sara'; d.save(); await settle();
+    assert.deepStrictEqual(texts('backlog'), ['صفحه پرداخت']);
+    assert.deepStrictEqual(texts('todo'), ['fix login', 'call Sara']);
+    const c0 = cards('todo')[0];
+    assert.strictEqual(q('.tk-pill', c0)[0].textContent, 'High');
+    assert.strictEqual(q('.tk-cproj', c0)[0].textContent, 'cheshmeh');
+    assert.strictEqual(q('.tk-ctext', cards('backlog')[0])[0].getAttribute('dir'), 'auto', 'Persian reads right');
     assert.strictEqual(tab.countEl.textContent, '3 open');
-    assert.strictEqual(document.body.querySelector('#btn-tasks').querySelector('.rcount').textContent, '3');
-    assert.deepStrictEqual(fakeTasks.tasks.map((t) => [t.project, t.prio]), [['cheshmeh', 1], ['shop', 2], ['', 2]]);
-    // tick done: goes to the folded Done list
-    q('.tk-check', rows()[1])[0].click(); await settle();
-    assert.deepStrictEqual(texts(), ['fix login', 'call Sara']);
-    assert.strictEqual(fakeTasks.tasks[1].done, true);
-    assert.strictEqual(tab.doneHead.textContent, '▸ Done · 1');
-    tab.doneHead.click();
-    assert.strictEqual(q('.tk-row', tab.doneList).length, 1);
-    q('.tk-check', q('.tk-row', tab.doneList)[0])[0].click(); await settle();
-    assert.deepStrictEqual(texts(), ['fix login', 'صفحه پرداخت', 'call Sara'], 'back where it was');
-    // reorder from the ⋯ menu (works on touch too)
+    assert.strictEqual(rc.textContent, '3');
+    // drag a card into another column: onto a card (before / after it) or onto the empty column
+    const hit = (el) => { global.document.elementFromPoint = () => el; };
+    tab.dragStart(tab.find(fakeTasks.tasks[2].id), cards('todo')[1], 10, 10);
+    assert.ok(cards('todo')[1].classList.contains('dragging'));
+    assert.strictEqual(q('.tk-ghost').length, 1, 'a copy follows the pointer');
+    hit(q('.tk-empty', tab.cols.doing.list)[0]); tab.dragMove(100, 100);
+    assert.ok(tab.cols.doing.el.classList.contains('drop'));
+    tab.dragEnd(); await settle();
+    assert.strictEqual(q('.tk-ghost').length, 0);
+    assert.deepStrictEqual(texts('doing'), ['call Sara']);
+    assert.strictEqual(fakeTasks.tasks.find((t) => t.text === 'call Sara').status, 'doing');
+    tab.dragStart(tab.find(fakeTasks.tasks[0].id), cards('todo')[0], 10, 10);
+    hit(q('.tk-ctext', cards('doing')[0])[0]); tab.dragMove(100, 100);         // lower half of the card: after it
+    assert.ok(cards('doing')[0].classList.contains('drop-before'));
+    tab.dragMove(100, 590);
+    assert.ok(cards('doing')[0].classList.contains('drop-after'));
+    tab.dragEnd(); await settle();
+    assert.deepStrictEqual(texts('doing'), ['call Sara', 'fix login']);
+    assert.deepStrictEqual(texts('todo'), []);
+    // drop on itself: nothing sent
+    const n0 = calls.length;
+    tab.dragStart(tab.find(fakeTasks.tasks[0].id), cards('doing')[1], 10, 10);
+    hit(cards('doing')[1]); tab.dragMove(100, 100); tab.dragEnd(); await settle();
+    assert.strictEqual(calls.filter((c, i) => i >= n0 && c.method === 'POST' && c.url === '/api/tasks').length, 0);
+    // to Done from the ⋯ menu (also the touch way)
     const menuBtn = (label) => q('button', document.body.querySelector('#menu-root')).find((b) => b.textContent.indexOf(label) === 0);
-    q('.tk-more', rows()[2])[0].click();
-    assert.ok(menuBtn('Move down').disabled, 'the last cannot go down');
+    q('.tk-cmore', cards('doing')[0])[0].click();
+    assert.ok(!menuBtn('In progress'), 'its own column is not offered');
+    menuBtn('Done').click(); await settle();
+    assert.deepStrictEqual(texts('done'), ['call Sara']);
+    assert.strictEqual(fakeTasks.tasks.find((t) => t.text === 'call Sara').done, true);
+    assert.strictEqual(rc.textContent, '2');
+    // Move up inside a column
+    q('.tk-cadd', tab.cols.doing.el)[0].click(); d = tab.dialog; d.text.value = 'deploy'; d.save(); await settle();
+    assert.deepStrictEqual(texts('doing'), ['fix login', 'deploy']);
+    q('.tk-cmore', cards('doing')[1])[0].click();
+    assert.ok(menuBtn('Move down').disabled);
     menuBtn('Move up').click(); await settle();
-    assert.deepStrictEqual(texts(), ['fix login', 'call Sara', 'صفحه پرداخت']);
-    q('.tk-more', rows()[2])[0].click(); menuBtn('Move to top').click(); await settle();
-    assert.deepStrictEqual(fakeTasks.tasks.map((t) => t.text), ['صفحه پرداخت', 'fix login', 'call Sara']);
-    // drag and drop (desktop)
-    const r0 = rows()[0], r2 = rows()[2];
-    r0.dispatch('dragstart', { dataTransfer: { setData() {} } });
-    r2.dispatch('dragover', { clientY: 590 });
-    assert.ok(r2.classList.contains('drop-after'));
-    r2.dispatch('drop'); await settle();
-    assert.deepStrictEqual(texts(), ['fix login', 'call Sara', 'صفحه پرداخت']);
-    // priority from the menu, then sort by priority
-    q('.tk-more', rows()[2])[0].click(); menuBtn('High').click(); await settle();
-    q('.tk-more', rows()[0])[0].click(); menuBtn('Low').click(); await settle();
-    tab.menu(0, 0); menuBtn('Sort by priority').click(); await settle();
-    assert.deepStrictEqual(texts(), ['صفحه پرداخت', 'call Sara', 'fix login']);
-    assert.strictEqual(calls.filter((c) => c.url === '/api/tasks' && c.body && c.body.op === 'order').length, 1, 'one change');
-    // edit by clicking the text
-    q('.tk-text', rows()[1])[0].click();
-    const ed = q('.tk-edit', tab.list)[0];
-    ed.value = 'call Sara at 5';
-    ed.dispatch('keydown', { key: 'Enter' }); await settle();
-    assert.strictEqual(texts()[1], 'call Sara at 5');
-    // project: from the menu; the filter shows one project, and new tasks go into it
-    q('.tk-more', rows()[1])[0].click(); menuBtn('Project…').click();
-    menuBtn('shop').click(); await settle();
-    assert.strictEqual(fakeTasks.tasks.find((t) => t.text === 'call Sara at 5').project, 'shop');
-    q('.tk-proj', rows()[0])[0].click();
-    assert.strictEqual(tab.filterSel.value, 'shop');
-    assert.deepStrictEqual(texts(), ['صفحه پرداخت', 'call Sara at 5']);
-    assert.strictEqual(q('.tk-proj', tab.list).length, 0, 'no project label when one project is shown');
-    assert.strictEqual(tab.projSel.value, 'shop');
-    // the project ⋯ menu has Tasks with the count
-    tab.setFilter(''); assert.strictEqual(texts().length, 3);
-    // done + clear (only the shown project)
-    q('.tk-check', rows()[0])[0].click(); await settle();          // صفحه پرداخت (shop)
-    q('.tk-check', rows()[1])[0].click(); await settle();          // fix login (cheshmeh)
-    tab.setFilter('shop');
-    if (!tab.showDone) tab.doneHead.click();
-    tab.clearBtn.click(); await settle();
-    const ok = q('.btn', document.body.querySelector('#modal-root')).find((b) => b.textContent === 'Remove');
-    ok.click(); await settle();
-    assert.deepStrictEqual(fakeTasks.tasks.map((t) => t.text).sort(), ['call Sara at 5', 'fix login'].sort());
+    assert.deepStrictEqual(texts('doing'), ['deploy', 'fix login']);
+    // click a card: edit in the same dialog (text, status, project) — not right after a drag
+    cards('doing')[1].click();
+    assert.strictEqual(tab.dialog, null, 'the click that ends a drag does not open it');
+    tab.justDragged = 0;
+    cards('doing')[1].click();
+    d = tab.dialog;
+    assert.strictEqual(d.text.value, 'fix login');
+    assert.strictEqual(d.status.value, 'doing');
+    d.text.value = 'fix login page'; d.status.value = 'backlog'; d.save(); await settle();
+    assert.deepStrictEqual(texts('backlog'), ['fix login page', 'صفحه پرداخت'], 'on top of the new column');
+    // filter one project: the + dialog takes that project
+    tab.filterSel.value = 'shop'; tab.filterSel.dispatch('change');
+    assert.deepStrictEqual(texts('backlog'), ['صفحه پرداخت']);
+    assert.strictEqual(q('.tk-cproj', tab.board).length, 0, 'no project label when one project is shown');
+    q('.tk-new', tab.pane)[0].click();
+    assert.strictEqual(tab.dialog.project.value, 'shop');
+    tab.dialog.close();
     tab.setFilter('');
-    // ask Claude: a new chat in the task's project with the task in its box
-    q('.tk-more', rows()[0])[0].click(); menuBtn('Ask Claude').click(); await settle();
+    // clear done
+    q('.tk-hbtn', tab.cols.done.el)[0].click(); await settle();
+    q('.btn', document.body.querySelector('#modal-root')).find((b) => b.textContent === 'Remove').click(); await settle();
+    assert.deepStrictEqual(texts('done'), []);
+    assert.ok(!fakeTasks.tasks.some((t) => t.text === 'call Sara'));
+    // ask Claude from the dialog: a new chat in the task's project with the task in its box
+    cards('backlog')[1].click();
+    q('.btn', modal()).find((b) => b.textContent === 'Ask Claude').click(); await settle();
     const chat = S.active;
     assert.ok(chat.isChat);
     assert.strictEqual(chat.info.spec.project, 'shop');
-    assert.strictEqual(chat.ta.value, 'call Sara at 5');
+    assert.strictEqual(chat.ta.value, 'صفحه پرداخت');
     SW.closeTab(chat, true); await settle();
-    // another device changed the list: seen on the next look
-    fakeTasks.tasks.push({ id: 'b00000000001', text: 'from the phone', project: '', prio: 2, done: false });
+    // another device changed the board: seen on the next look
+    fakeTasks.tasks.push({ id: 'b00000000001', text: 'from the phone', project: '', prio: 2, status: 'doing', done: false });
     fakeTasks.rev++;
     SW.activate(tab); tab.ensureOpen(); await settle();
-    assert.ok(texts().indexOf('from the phone') >= 0);
-    // delete
-    q('.tk-more', rows()[rows().length - 1])[0].click(); menuBtn('Delete').click(); await settle();
+    assert.ok(texts('doing').indexOf('from the phone') >= 0);
+    // delete from the dialog
+    cards('doing').find((c) => c.textContent.indexOf('from the phone') === 0).click();
+    q('.btn', modal()).find((b) => b.textContent === 'Delete').click(); await settle();
     assert.ok(!fakeTasks.tasks.some((t) => t.text === 'from the phone'));
-    assert.ok(pane);
+    delete global.document.elementFromPoint;
     SW.closeTab(tab, true); await settle();
     assert.ok(!S.tabs.some((t) => t.isTasks));
   },

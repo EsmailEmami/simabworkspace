@@ -78,6 +78,33 @@ class Tasks(base.TmpHome):
         f = Path(self.server_home.name, ".config", "simabworkspace", "tasks.json")
         self.assertEqual(json.loads(f.read_text(encoding="utf-8"))["rev"], r["rev"])
 
+    def test_board_columns(self):
+        r = self.app.tasks({"op": "add", "text": "idea", "status": "backlog"})
+        self.assertEqual((r["tasks"][0]["status"], r["tasks"][0]["done"]), ("backlog", False))
+        r = self.app.tasks({"op": "add", "text": "next"})
+        self.assertEqual(r["tasks"][1]["status"], "todo", "To do by default")
+        a, b = (x["id"] for x in r["tasks"])
+        # dragged into In progress, before nothing (end of the column)
+        r = self.app.tasks({"op": "move", "id": a, "status": "doing"})
+        self.assertEqual([(x["text"], x["status"]) for x in r["tasks"]], [("next", "todo"), ("idea", "doing")])
+        # dragged into Done, above another card
+        r = self.app.tasks({"op": "move", "id": b, "status": "done", "before": a})
+        self.assertEqual([(x["text"], x["status"], x["done"]) for x in r["tasks"]], [("next", "done", True), ("idea", "doing", False)])
+        self.assertGreater(r["tasks"][0]["doneAt"], 0)
+        r = self.app.tasks({"op": "update", "id": b, "status": "todo"})
+        self.assertEqual((r["tasks"][0]["done"], r["tasks"][0]["doneAt"]), (False, 0))
+        r = self.app.tasks({"op": "update", "id": b, "done": True})            # 1.41.0 clients
+        self.assertEqual(r["tasks"][0]["status"], "done")
+        with self.assertRaises(sw.ApiError):
+            self.app.tasks({"op": "move", "id": a, "status": "later"})
+
+    def test_lists_from_1_41_0_get_a_status(self):
+        d = Path(self.server_home.name, ".config", "simabworkspace")
+        d.mkdir(parents=True)
+        (d / "tasks.json").write_text(json.dumps({"rev": 3, "tasks": [
+            {"id": "a" * 12, "text": "x", "done": True}, {"id": "b" * 12, "text": "y", "done": False}]}))
+        self.assertEqual([t["status"] for t in self.app.tasks()["tasks"]], ["done", "todo"])
+
     def test_clear_done_of_one_project(self):
         ids = [self.app.tasks({"op": "add", "text": n, "project": p})["tasks"][-1]["id"]
                for n, p in (("a", "shop"), ("b", "cheshmeh"), ("c", ""), ("d", "shop"))]

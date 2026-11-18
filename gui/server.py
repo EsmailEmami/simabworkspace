@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.41.0"
+VERSION = "1.42.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4561,28 +4561,42 @@ try:
 except (OSError, ValueError):
     data = {}
 tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+for t in tasks:                      # lists from 1.41.0 had no status
+    if t.get("status") not in ("backlog", "todo", "doing", "done"):
+        t["status"] = "done" if t.get("done") else "todo"
 kind, now = op.get("op") or "list", time.time()
 by = {t["id"]: t for t in tasks}
 t = by.get(op.get("id"))
 changed = False
+def set_status(t, st):
+    if st != t.get("status"):
+        t["status"], t["done"] = st, st == "done"
+        t["doneAt"] = now if st == "done" else 0
+if "status" not in op and "done" in op:
+    op["status"] = "done" if op["done"] else "todo"
 if kind == "add":
     if len(tasks) >= 2000:
         print(json.dumps({"error": "too many tasks (2000) — clear the done ones"})); sys.exit()
     t = {"id": secrets.token_hex(6), "text": op["text"], "project": op.get("project") or "",
-         "prio": op.get("prio") or 2, "done": False, "at": now, "doneAt": 0}
+         "prio": op.get("prio") or 2, "status": "todo", "done": False, "at": now, "doneAt": 0}
+    set_status(t, op.get("status") or "todo")
     tasks.insert(0 if op.get("top") else len(tasks), t)
     changed = True
 elif kind == "update" and t:
     for k in ("text", "project", "prio"):
         if k in op:
             t[k] = op[k]
-    if "done" in op and bool(op["done"]) != bool(t.get("done")):
-        t["done"], t["doneAt"] = bool(op["done"]), now if op["done"] else 0
+    if op.get("status"):
+        set_status(t, op["status"])
     changed = True
 elif kind == "delete" and t:
     tasks.remove(t)
     changed = True
 elif kind == "move" and t:
+    # to another column (status) and/or another place: before / after a task, else at the end
+    if op.get("status"):
+        set_status(t, op["status"])
+        changed = True
     ref = by.get(op.get("before") or op.get("after") or "")
     if ref is not t:
         tasks.remove(t)
@@ -4615,6 +4629,7 @@ print(json.dumps({"tasks": tasks, "rev": rev}))
 
 TASK_OPS = ("list", "add", "update", "delete", "move", "order", "clear")
 TASK_ID_RE = re.compile(r"[0-9a-f]{12}")
+TASK_STATUSES = ("backlog", "todo", "doing", "done")
 
 
 def clean_task_op(b) -> dict:
@@ -4639,6 +4654,10 @@ def clean_task_op(b) -> dict:
         out["prio"] = b["prio"]
     if "done" in b:
         out["done"] = bool(b["done"])
+    if b.get("status") is not None:
+        if b["status"] not in TASK_STATUSES:
+            raise ApiError(400, "invalid status")
+        out["status"] = b["status"]
     if b["op"] == "order":
         ids = b.get("ids")
         if not (isinstance(ids, list) and len(ids) <= 2000 and all(isinstance(i, str) and TASK_ID_RE.fullmatch(i) for i in ids)

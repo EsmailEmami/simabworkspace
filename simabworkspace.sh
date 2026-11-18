@@ -45,6 +45,9 @@
 #                       every free-text field on focus + hover (pages and dialogs); Chrome/Edge speech
 #                       recognition, Persian by default, right-click the mic for English. Live text
 #                       shows at once; only final words go into the field; long dictation keeps going.
+#                       Sounds: Settings → Sounds, per device — a tune (or a voice: "shop: task done")
+#                       when a chat you are not looking at finishes, asks, needs permission, has a plan
+#                       or stops with an error; a different tune per kind, Off / Sound / Voice each.
 #    1.42.1 2026-11-18  Git: a folder is a repository only if git says so (an empty/broken .git is
 #                       skipped); a stray `git init` with no commits over the real repositories is not listed.
 #                       History: Claude conversations show Claude's title, then what you wrote.

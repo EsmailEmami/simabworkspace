@@ -1524,7 +1524,7 @@ class FrontendJs(unittest.TestCase):
         node = find_node()
         if not node:
             self.skipTest("node not found")
-        for f in ("app.js", "chat.js", "files.js", "tasks.js", "voice.js"):
+        for f in ("app.js", "chat.js", "files.js", "tasks.js", "voice.js", "sounds.js"):
             r = subprocess.run([node, "--check", str(ROOT / "gui" / "static" / f)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -1560,6 +1560,13 @@ class FrontendJs(unittest.TestCase):
         if not node:
             self.skipTest("node not found")
         r = subprocess.run([node, str(ROOT / "tests" / "js" / "voice_test.js")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_sounds(self):
+        node = find_node()
+        if not node:
+            self.skipTest("node not found")
+        r = subprocess.run([node, str(ROOT / "tests" / "js" / "sounds_test.js")], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_chat_panel(self):

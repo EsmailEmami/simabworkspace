@@ -1941,6 +1941,46 @@
     try { new Notification(title, { body: body, icon: 'icon.svg' }); } catch (e) { /* ignore */ }
   }
 
+  // a sound (or a voice: "shop: task done") when a chat you are not looking at changes state (sounds.js)
+  function sound(kind, tab) {
+    if (!window.SWSound) return;
+    var pr = tab && tab.info && tab.info.spec && tab.info.spec.project ? project(tab.info.spec.project) : null;
+    window.SWSound.play(kind, pr ? (pr.title || pr.name) : '');
+  }
+
+  // Settings → Sounds: one choice per kind, kept on this device only (saved with Save)
+  function soundRows() {
+    var SS = window.SWSound;
+    if (!SS) return { el: null, save: function () {} };
+    var cur = SS.get(), sels = {};
+    var langSel = h('select', { class: 'inp snd-lang' }, SS.LANGS.map(function (l) { return h('option', { value: l[0] }, l[1]); }));
+    langSel.value = cur.lang;
+    var hint = h('small', { class: 'muted snd-hint' });
+    function paintHint() {
+      hint.textContent = langSel.value === 'fa' && !SS.hasVoice('fa') ? 'No Persian voice on this device — English is used.' : '';
+    }
+    langSel.addEventListener('change', paintHint);
+    paintHint();
+    var rows = SS.KINDS.map(function (k) {
+      var sel = sels[k[0]] = h('select', { class: 'inp snd-mode' }, SS.MODES.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
+      sel.value = cur[k[0]];
+      return h('div', { class: 'snd-row' }, h('span', { class: 'snd-name' }, k[1]), sel,
+        h('button', { class: 'btn sm snd-try', title: 'Try it', onclick: function () {
+          SS.unlock();
+          SS.play(k[0], 'simab', { mode: sel.value === 'off' ? 'chime' : sel.value, lang: langSel.value });
+        } }, '▶'));
+    });
+    var el = h('div', { class: 'snd' },
+      h('div', { class: 'sec' }, 'Sounds'),
+      h('div', { class: 'muted snd-help' }, 'On this device, when a chat you are not looking at finishes or needs you.'),
+      rows, h('div', { class: 'snd-row' }, h('span', { class: 'snd-name' }, 'Voice language'), langSel, hint));
+    return { el: el, save: function () {
+      var s = { lang: langSel.value };
+      Object.keys(sels).forEach(function (k) { s[k] = sels[k].value; });
+      SS.set(s);
+    } };
+  }
+
   function openEditor(p, where) {
     api('POST', 'editor', { project: p.name, where: where }).then(function () { toast('Opening VS Code…', 'ok'); }).catch(fail);
   }
@@ -3170,6 +3210,7 @@
   // ------------------------------------------------------------------ settings
   function settingsDialog() {
     var s = S.settings, f = {};
+    var snd = soundRows();
     function inp(k, attrs) { f[k] = h('input', Object.assign({ class: 'inp', value: s[k] === undefined ? '' : String(s[k]) }, attrs || {})); return f[k]; }
     function sel(k, opts) { f[k] = h('select', { class: 'inp' }, opts.map(function (o) { return h('option', { value: o[0] }, o[1]); })); f[k].value = s[k]; return f[k]; }
     function chk(k, label, help) { f[k] = h('input', { type: 'checkbox', checked: !!s[k] }); return h('label', { class: 'check' }, f[k], h('span', null, label, help ? h('small', null, help) : null)); }
@@ -3240,6 +3281,7 @@
       chk('copyOnSelect', 'Copy on select'),
       chk('persianView', 'Show the Persian reading view automatically', 'When Persian text appears in a terminal.'),
       chk('bellNotify', 'Notification when a tab needs you'),
+      snd.el,
       chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
       h('div', { class: 'sec' }, 'In the installed app'),
       h('div', { class: 'app-only' },
@@ -3292,6 +3334,7 @@
         chk('copyOnSelect', 'Copy on select'),
         chk('persianView', 'Show the Persian reading view automatically', 'When Persian text appears in a terminal.'),
         chk('bellNotify', 'Desktop notification when a tab needs you'),
+        snd.el,
         chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
@@ -3301,6 +3344,7 @@
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: function () {
           var patch = {};
+          snd.save();
           Object.keys(f).forEach(function (k) {
             var el = f[k];
             if (k === 'persianView') patch[k] = el.checked ? 'auto' : 'off';
@@ -4435,7 +4479,7 @@
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
     closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, promptDlg: promptDlg, openModal: openModal, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
-    notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
+    notify: notify, sound: sound, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,

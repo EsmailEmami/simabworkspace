@@ -1086,3 +1086,12 @@ body.compact .tk-col { min-width: 84vw; max-width: none; scroll-snap-align: cent
 .cb-mic:hover { color: var(--text); }
 @keyframes vtt-pulse { 0% { box-shadow: 0 0 0 0 #f7768e88; } 70% { box-shadow: 0 0 0 8px #f7768e00; } 100% { box-shadow: 0 0 0 0 #f7768e00; } }
 @media (prefers-reduced-motion: reduce) { .vtt-btn.vtt-rec, .cb-mic.vtt-rec { animation: none; } }
+
+/* Settings → Sounds */
+.snd-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.snd-name { flex: 0 0 190px; color: var(--muted); }
+.snd-row .inp { flex: 0 0 120px; width: 120px; }
+.snd-try { flex: none; }
+.snd-hint { flex: 1; }
+body.compact .snd-name { flex-basis: 140px; }
+.snd-help { font-size: 12px; margin: -4px 0 6px; }

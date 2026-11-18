@@ -186,6 +186,7 @@ async function settle() { for (let i = 0; i < 8; i++) await tick(); }
 const q = (sel, root) => (root || document.body).querySelectorAll(sel);
 const byText = (sel, text) => q(sel).find((e) => e.textContent.trim() === text);
 
+require(path.join(ROOT, 'gui/static/sounds.js'));
 require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 global.SW && require(path.join(ROOT, 'gui/static/files.js'));
@@ -599,6 +600,38 @@ const tests = {
     assert.ok(calls.some((c) => c.url === '/api/prereqs/jq' && c.method === 'POST'));
     assert.ok(q('input', modal).some((i) => i.value === 'esi'), 'connection loaded');
     assert.ok(q('button', modal).some((b) => b.textContent === 'Uninstall…'));
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'settings: a sound or a voice per chat state, kept on this device'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.body.querySelector('#btn-settings').click();
+    q('button').find((b) => b.textContent.trim() === 'Settings…').click();
+    await settle();
+    const modal = q('.modal').pop();
+    const rows = q('.snd-row', modal);
+    assert.deepStrictEqual(rows.map((r) => r.querySelector('.snd-name').textContent),
+      ['Task done', 'Claude has a question', 'Claude needs permission', 'Plan ready', 'Stopped with an error', 'Voice language']);
+    const modes = q('.snd-mode', modal);
+    assert.deepStrictEqual(modes[0].querySelectorAll('option').map((o) => o.textContent), ['Off', 'Sound', 'Voice']);
+    assert.strictEqual(modes[0].value, 'chime');
+    const tried = [];
+    const play = global.SWSound.play;
+    global.SWSound.play = (...a) => tried.push(a);
+    modes[1].value = 'voice';
+    q('.snd-try', modal)[1].click();
+    assert.deepStrictEqual(tried[0], ['question', 'simab', { mode: 'voice', lang: 'en' }], '▶ tries the choice before saving');
+    global.SWSound.play = play;
+    assert.ok(!localStorage.getItem('sw-sounds'), 'not saved yet');
+    q('.snd-lang', modal)[0].value = 'fa';
+    modes[0].value = 'off';
+    const keep = global.SW.S.settings;
+    q('.btn.primary', modal).pop().click();
+    await settle();
+    global.SW.S.settings = keep;
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-sounds')),
+      { done: 'off', question: 'voice', permission: 'chime', plan: 'chime', error: 'chime', lang: 'fa' });
+    assert.ok(!('done' in calls.filter((c) => c.url === '/api/settings').pop().body), 'not sent to the server');
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

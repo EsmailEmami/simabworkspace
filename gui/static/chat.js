@@ -1185,6 +1185,7 @@
       var self = this;
       toast('Claude finished in ' + this.info.title, err ? 'err' : 'ok', { onclick: function () { SW.activate(self); } });
       SW.notify('Claude finished', this.info.title);
+      if (SW.sound) SW.sound(err ? 'error' : 'done', this);
     }
   };
 
@@ -1208,8 +1209,8 @@
     if (req.subtype !== 'can_use_tool') return;
     var name = req.tool_name;
     var rid = e.request_id;
-    if (name === 'AskUserQuestion') { this.questionCard(rid, req.input || {}); this.alertUser('Claude has a question'); return; }
-    if (name === 'ExitPlanMode') { this.planCard(rid, req.input || {}); this.alertUser('Claude’s plan is ready'); return; }
+    if (name === 'AskUserQuestion') { this.questionCard(rid, req.input || {}); this.alertUser('Claude has a question', 'question'); return; }
+    if (name === 'ExitPlanMode') { this.planCard(rid, req.input || {}); this.alertUser('Claude’s plan is ready', 'plan'); return; }
     var reason = h('input', { class: 'inp deny-msg hidden', dir: 'auto', placeholder: 'Why not, or what to do instead (optional)' });
     var actions = h('div', { class: 'perm-actions' },
       h('button', { class: 'btn primary sm', onclick: function () { self.answer(rid, true, false); } }, 'Allow  1'),
@@ -1233,6 +1234,7 @@
     if (this.mark('bell')) {
       toast('Claude needs permission in ' + this.info.title, 'warn', { onclick: function () { SW.activate(self); } });
       SW.notify('Claude needs permission', (TOOL_FA[name] || name) + ' — ' + this.info.title);
+      if (SW.sound) SW.sound('permission', this);
     }
   };
 
@@ -1243,13 +1245,14 @@
     this.send(m);
   };
 
-  P.alertUser = function (text) {
+  P.alertUser = function (text, kind) {
     this.stick = true;
     this.scrollEnd();
     if (!this.mark('bell')) return;
     var self = this;
     toast(text + ' — «' + this.info.title + '»', 'warn', { onclick: function () { SW.activate(self); } });
     SW.notify(text, this.info.title);
+    if (SW.sound && kind) SW.sound(kind, this);
   };
 
   // Claude asks the user (AskUserQuestion), like Claude Code itself: one question at a time,

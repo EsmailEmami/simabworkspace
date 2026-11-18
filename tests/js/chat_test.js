@@ -47,6 +47,27 @@ function newTab() {
 const byClass = (el, c) => el.querySelectorAll('.' + c);
 
 const tests = {
+  'sounds: a different one per state, only for a chat you are not looking at'() {
+    const played = [];
+    global.SW.sound = (kind, tab) => played.push([kind, tab.info.spec.project]);
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'x' } });
+    assert.deepStrictEqual(played, [], 'in view: quiet');
+    global.SW.S.active = null;                                    // looking at another tab
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'x' } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'error_during_execution', is_error: true } });
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'b1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'ls' } } } });
+    feed({ t: 'e', e: { type: '_perm_done', request_id: 'b1', allow: true } });
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'q9', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+      input: { questions: [{ question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }] } } } });
+    feed({ t: 'e', e: { type: '_perm_done', request_id: 'q9', allow: true } });
+    feed({ t: 'e', e: { type: 'control_request', request_id: 'p9', request: { subtype: 'can_use_tool', tool_name: 'ExitPlanMode', input: { plan: 'x' } } } });
+    assert.deepStrictEqual(played.map((x) => x[0]), ['done', 'error', 'permission', 'question', 'plan']);
+    assert.strictEqual(played[0][1], 'p');
+    delete global.SW.sound;
+    tab.dispose();
+  },
   'composer mic: dictation fills the message box, sending stops it'() {
     const { tab, feed, ws } = newTab();
     feed({ t: 's', state: { alive: true }, events: [] });

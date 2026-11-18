@@ -41,6 +41,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.41.0 2026-11-18  Tasks: your to-do list in the rail (✓ Tasks), kept on the server so the
+#                       app and the web version show the same list; done, project, priority,
+#                       drag or Move up/down to reorder, Sort by priority, Ask Claude.
 #    1.40.0 2026-11-17  Add project: "First copy" N at once (--paused; the window copies over N ssh
 #                       tar streams, then resumes the sync); Files: drop-upload fixed (sent twice, crashed)
 #    1.39.0 2026-11-17  Add project: edit the "Not synced" list before the first sync (--ignores);
@@ -297,7 +300,7 @@
 
 set -u -o pipefail
 
-VERSION="1.40.0"
+VERSION="1.41.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-claude', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-claude', 'btn-tasks', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -67,6 +67,21 @@ const containers = [
 let tunnels = [{ project: 'cheshmeh', id: 't1', name: 'db', localPort: 5432, remoteHost: '127.0.0.1', remotePort: 5432, on: true, http: false, state: 'up', error: '' }];
 const usage = { limits: { windows: { five_hour: { used: 0.38, resetsAt: now + 3600 }, seven_day: { used: 0.12, resetsAt: now + 3 * 86400 } }, status: 'allowed', updated: now },
   today: 1.5, week: 7.25, days: [{ day: '2026-11-14', projects: { cheshmeh: 1.2, shop: 0.3 }, total: 1.5 }] };
+// the task list on the "server": the same operations as TASKS_PY
+const fakeTasks = { tasks: [], rev: 0, n: 0 };
+function tasksOp(op) {
+  const T = fakeTasks, find = (id) => T.tasks.find((t) => t.id === id);
+  if (!op) return { tasks: T.tasks.map((t) => Object.assign({}, t)), rev: T.rev };
+  const t = find(op.id);
+  if (op.op === 'add') T.tasks.push({ id: 'a' + String(++T.n).padStart(11, '0'), text: op.text, project: op.project || '', prio: op.prio || 2, done: false, at: 1, doneAt: 0 });
+  else if (op.op === 'update' && t) { Object.assign(t, op); delete t.op; if ('done' in op) t.doneAt = op.done ? Date.now() / 1000 : 0; }
+  else if (op.op === 'delete' && t) T.tasks.splice(T.tasks.indexOf(t), 1);
+  else if (op.op === 'move' && t) { const ref = find(op.before || op.after); T.tasks.splice(T.tasks.indexOf(t), 1); T.tasks.splice(ref ? T.tasks.indexOf(ref) + (op.after ? 1 : 0) : T.tasks.length, 0, t); }
+  else if (op.op === 'order') { const want = op.ids.map(find); const slots = want.map((x) => T.tasks.indexOf(x)).sort((a, b) => a - b); slots.forEach((at, i) => { T.tasks[at] = want[i]; }); }
+  else if (op.op === 'clear') T.tasks = T.tasks.filter((x) => !(x.done && (op.project === undefined || x.project === op.project)));
+  T.rev++;
+  return tasksOp(null);
+}
 global.fetch = (url, opts) => {
   if (offline) return Promise.reject(new TypeError('Failed to fetch'));
   const method = (opts && opts.method) || 'GET';
@@ -125,6 +140,7 @@ global.fetch = (url, opts) => {
     res = p.endsWith('.png') ? { path: p, size: 9, image: 'data:image/png;base64,AA==' } : { path: p, size: 12, text: 'line one\nسلام\n' };
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
+  else if (url === '/api/tasks') res = tasksOp(method === 'POST' ? body : null);
   else if (url === '/api/tabs' || url === '/api/tabs?vis=1') res = fakeTabs;
   else if (url.startsWith('/api/server-stats')) res = Object.assign({ cpu: 92.4, cores: 8, load: [7.1, 5, 3], memTotal: 16e9, memUsed: 12.4e9, swapTotal: 0, swapUsed: 0,
     diskTotal: 500e9, diskUsed: 120e9, diskFree: 380e9, diskPath: '/home/esi' }, url.indexOf('top=1') > 0 ? {
@@ -171,6 +187,7 @@ const byText = (sel, text) => q(sel).find((e) => e.textContent.trim() === text);
 require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 global.SW && require(path.join(ROOT, 'gui/static/files.js'));
+global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
 
 const tests = {
   'local paths: ~ shown as the real folder (Windows and Linux)'() {
@@ -1176,6 +1193,114 @@ const tests = {
     const dc = calls.filter((c) => c.url === '/api/git/cheshmeh/discard').pop();
     assert.deepStrictEqual(dc.body.files, ['api/main.go']);
     SW.closeTab(tab, true); await settle();
+  },
+
+  async 'Tasks: add, tick, project, priority, reorder, filter, ask Claude'() {
+    const SW = global.SW, S = SW.S;
+    for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    const rc = new Element('b'); rc.className = 'rcount'; document.body.querySelector('#btn-tasks').append(rc);
+    document.body.querySelector('#btn-tasks').click(); await settle();
+    const tab = S.active;
+    assert.ok(tab && tab.isTasks, 'the rail button opens the Tasks tab');
+    assert.strictEqual(calls.filter((c) => c.url === '/api/sessions' && c.body.kind === 'tasks').pop().body.title, 'Tasks');
+    document.body.querySelector('#btn-tasks').click(); await settle();
+    assert.strictEqual(S.tabs.filter((t) => t.isTasks).length, 1, 'one Tasks tab, reused');
+    const pane = tab.pane;
+    const rows = () => q('.tk-row', tab.list);
+    const texts = () => rows().map((r) => q('.tk-text', r)[0].textContent);
+    assert.strictEqual(tab.note.textContent, 'Nothing to do.');
+    // add three: Enter in the box; project and priority from the pickers
+    const add = (text, proj, prio) => { tab.input.value = text; tab.projSel.value = proj || ''; tab.prioSel.value = String(prio || 2);
+      tab.input.dispatch('keydown', { key: 'Enter' }); };
+    add('fix login', 'cheshmeh', 1);
+    assert.deepStrictEqual(texts(), ['fix login'], 'shown at once');
+    assert.ok(rows()[0].classList.contains('pending'));
+    await settle();
+    add('صفحه پرداخت', 'shop'); await settle();
+    add('call Sara'); await settle();
+    assert.deepStrictEqual(texts(), ['fix login', 'صفحه پرداخت', 'call Sara']);
+    assert.strictEqual(tab.input.value, '');
+    assert.strictEqual(q('.tk-prio', rows()[0]).length, 1, 'high priority is marked');
+    assert.strictEqual(q('.tk-proj', rows()[0])[0].textContent, 'cheshmeh');
+    assert.strictEqual(q('.tk-text', rows()[1])[0].getAttribute('dir'), 'auto', 'Persian reads right');
+    assert.strictEqual(tab.countEl.textContent, '3 open');
+    assert.strictEqual(document.body.querySelector('#btn-tasks').querySelector('.rcount').textContent, '3');
+    assert.deepStrictEqual(fakeTasks.tasks.map((t) => [t.project, t.prio]), [['cheshmeh', 1], ['shop', 2], ['', 2]]);
+    // tick done: goes to the folded Done list
+    q('.tk-check', rows()[1])[0].click(); await settle();
+    assert.deepStrictEqual(texts(), ['fix login', 'call Sara']);
+    assert.strictEqual(fakeTasks.tasks[1].done, true);
+    assert.strictEqual(tab.doneHead.textContent, '▸ Done · 1');
+    tab.doneHead.click();
+    assert.strictEqual(q('.tk-row', tab.doneList).length, 1);
+    q('.tk-check', q('.tk-row', tab.doneList)[0])[0].click(); await settle();
+    assert.deepStrictEqual(texts(), ['fix login', 'صفحه پرداخت', 'call Sara'], 'back where it was');
+    // reorder from the ⋯ menu (works on touch too)
+    const menuBtn = (label) => q('button', document.body.querySelector('#menu-root')).find((b) => b.textContent.indexOf(label) === 0);
+    q('.tk-more', rows()[2])[0].click();
+    assert.ok(menuBtn('Move down').disabled, 'the last cannot go down');
+    menuBtn('Move up').click(); await settle();
+    assert.deepStrictEqual(texts(), ['fix login', 'call Sara', 'صفحه پرداخت']);
+    q('.tk-more', rows()[2])[0].click(); menuBtn('Move to top').click(); await settle();
+    assert.deepStrictEqual(fakeTasks.tasks.map((t) => t.text), ['صفحه پرداخت', 'fix login', 'call Sara']);
+    // drag and drop (desktop)
+    const r0 = rows()[0], r2 = rows()[2];
+    r0.dispatch('dragstart', { dataTransfer: { setData() {} } });
+    r2.dispatch('dragover', { clientY: 590 });
+    assert.ok(r2.classList.contains('drop-after'));
+    r2.dispatch('drop'); await settle();
+    assert.deepStrictEqual(texts(), ['fix login', 'call Sara', 'صفحه پرداخت']);
+    // priority from the menu, then sort by priority
+    q('.tk-more', rows()[2])[0].click(); menuBtn('High').click(); await settle();
+    q('.tk-more', rows()[0])[0].click(); menuBtn('Low').click(); await settle();
+    tab.menu(0, 0); menuBtn('Sort by priority').click(); await settle();
+    assert.deepStrictEqual(texts(), ['صفحه پرداخت', 'call Sara', 'fix login']);
+    assert.strictEqual(calls.filter((c) => c.url === '/api/tasks' && c.body && c.body.op === 'order').length, 1, 'one change');
+    // edit by clicking the text
+    q('.tk-text', rows()[1])[0].click();
+    const ed = q('.tk-edit', tab.list)[0];
+    ed.value = 'call Sara at 5';
+    ed.dispatch('keydown', { key: 'Enter' }); await settle();
+    assert.strictEqual(texts()[1], 'call Sara at 5');
+    // project: from the menu; the filter shows one project, and new tasks go into it
+    q('.tk-more', rows()[1])[0].click(); menuBtn('Project…').click();
+    menuBtn('shop').click(); await settle();
+    assert.strictEqual(fakeTasks.tasks.find((t) => t.text === 'call Sara at 5').project, 'shop');
+    q('.tk-proj', rows()[0])[0].click();
+    assert.strictEqual(tab.filterSel.value, 'shop');
+    assert.deepStrictEqual(texts(), ['صفحه پرداخت', 'call Sara at 5']);
+    assert.strictEqual(q('.tk-proj', tab.list).length, 0, 'no project label when one project is shown');
+    assert.strictEqual(tab.projSel.value, 'shop');
+    // the project ⋯ menu has Tasks with the count
+    tab.setFilter(''); assert.strictEqual(texts().length, 3);
+    // done + clear (only the shown project)
+    q('.tk-check', rows()[0])[0].click(); await settle();          // صفحه پرداخت (shop)
+    q('.tk-check', rows()[1])[0].click(); await settle();          // fix login (cheshmeh)
+    tab.setFilter('shop');
+    if (!tab.showDone) tab.doneHead.click();
+    tab.clearBtn.click(); await settle();
+    const ok = q('.btn', document.body.querySelector('#modal-root')).find((b) => b.textContent === 'Remove');
+    ok.click(); await settle();
+    assert.deepStrictEqual(fakeTasks.tasks.map((t) => t.text).sort(), ['call Sara at 5', 'fix login'].sort());
+    tab.setFilter('');
+    // ask Claude: a new chat in the task's project with the task in its box
+    q('.tk-more', rows()[0])[0].click(); menuBtn('Ask Claude').click(); await settle();
+    const chat = S.active;
+    assert.ok(chat.isChat);
+    assert.strictEqual(chat.info.spec.project, 'shop');
+    assert.strictEqual(chat.ta.value, 'call Sara at 5');
+    SW.closeTab(chat, true); await settle();
+    // another device changed the list: seen on the next look
+    fakeTasks.tasks.push({ id: 'b00000000001', text: 'from the phone', project: '', prio: 2, done: false });
+    fakeTasks.rev++;
+    SW.activate(tab); tab.ensureOpen(); await settle();
+    assert.ok(texts().indexOf('from the phone') >= 0);
+    // delete
+    q('.tk-more', rows()[rows().length - 1])[0].click(); menuBtn('Delete').click(); await settle();
+    assert.ok(!fakeTasks.tasks.some((t) => t.text === 'from the phone'));
+    assert.ok(pane);
+    SW.closeTab(tab, true); await settle();
+    assert.ok(!S.tabs.some((t) => t.isTasks));
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

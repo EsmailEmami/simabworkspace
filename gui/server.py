@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.40.0"
+VERSION = "1.41.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4540,6 +4540,116 @@ class FilesSession:
         pass
 
 
+# ----------------------------------------------------------------------------- tasks
+# The user's own to-do list. It lives on the SERVER (~/.config/simabworkspace/tasks.json), not
+# in this app's database, so the installed app on every laptop and the web version all see the
+# same list. Every change is one small operation applied under a file lock (never "save the
+# whole list"), so two devices editing at once do not undo each other.
+TASKS_PY = r"""
+import json, os, sys, time, secrets, fcntl
+d = os.path.expanduser("~/.config/simabworkspace")
+os.makedirs(d, exist_ok=True)
+f = os.path.join(d, "tasks.json")
+op = json.loads(sys.stdin.read() or "{}")
+lk = open(f + ".lock", "a")
+fcntl.flock(lk, fcntl.LOCK_EX)
+try:
+    with open(f, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        data = {}
+except (OSError, ValueError):
+    data = {}
+tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+kind, now = op.get("op") or "list", time.time()
+by = {t["id"]: t for t in tasks}
+t = by.get(op.get("id"))
+changed = False
+if kind == "add":
+    if len(tasks) >= 2000:
+        print(json.dumps({"error": "too many tasks (2000) — clear the done ones"})); sys.exit()
+    t = {"id": secrets.token_hex(6), "text": op["text"], "project": op.get("project") or "",
+         "prio": op.get("prio") or 2, "done": False, "at": now, "doneAt": 0}
+    tasks.insert(0 if op.get("top") else len(tasks), t)
+    changed = True
+elif kind == "update" and t:
+    for k in ("text", "project", "prio"):
+        if k in op:
+            t[k] = op[k]
+    if "done" in op and bool(op["done"]) != bool(t.get("done")):
+        t["done"], t["doneAt"] = bool(op["done"]), now if op["done"] else 0
+    changed = True
+elif kind == "delete" and t:
+    tasks.remove(t)
+    changed = True
+elif kind == "move" and t:
+    ref = by.get(op.get("before") or op.get("after") or "")
+    if ref is not t:
+        tasks.remove(t)
+        if ref is None:
+            tasks.append(t)
+        else:
+            tasks.insert(tasks.index(ref) + (1 if op.get("after") else 0), t)
+        changed = True
+elif kind == "order":
+    # these tasks, in this order, in the places they already take (the others stay put)
+    want = [by[i] for i in op.get("ids") or [] if i in by]
+    slots = sorted(tasks.index(x) for x in want)
+    for i, x in zip(slots, want):
+        tasks[i] = x
+    changed = bool(want)
+elif kind == "clear":
+    p = op.get("project")
+    tasks = [x for x in tasks if not (x.get("done") and (p is None or (x.get("project") or "") == p))]
+    changed = True
+rev = int(data.get("rev") or 0)
+if changed:
+    rev += 1
+    data.update({"tasks": tasks, "rev": rev})
+    tmp = f + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    os.replace(tmp, f)
+print(json.dumps({"tasks": tasks, "rev": rev}))
+"""
+
+TASK_OPS = ("list", "add", "update", "delete", "move", "order", "clear")
+TASK_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
+def clean_task_op(b) -> dict:
+    """One change to the task list, checked here (the script on the server trusts it)."""
+    if not isinstance(b, dict) or b.get("op") not in TASK_OPS:
+        raise ApiError(400, "unknown task operation")
+    out = {"op": b["op"]}
+    for k in ("id", "before", "after"):
+        if b.get(k) is not None:
+            if not (isinstance(b[k], str) and TASK_ID_RE.fullmatch(b[k])):
+                raise ApiError(400, f"invalid {k}")
+            out[k] = b[k]
+    if b["op"] in ("update", "delete", "move") and "id" not in out:
+        raise ApiError(400, "id is required")
+    if "text" in b or b["op"] == "add":
+        out["text"] = clean_str(b.get("text"), 1000, "text", required=True)
+    if "project" in b and b["op"] != "clear" or b["op"] == "clear" and b.get("project") is not None:
+        out["project"] = clean_str(b.get("project"), 200, "project")
+    if "prio" in b:
+        if b["prio"] not in (1, 2, 3):
+            raise ApiError(400, "priority must be 1, 2 or 3")
+        out["prio"] = b["prio"]
+    if "done" in b:
+        out["done"] = bool(b["done"])
+    if b["op"] == "order":
+        ids = b.get("ids")
+        if not (isinstance(ids, list) and len(ids) <= 2000 and all(isinstance(i, str) and TASK_ID_RE.fullmatch(i) for i in ids)
+                and len(set(ids)) == len(ids)):
+            raise ApiError(400, "invalid ids")
+        out["ids"] = ids
+    if b.get("top"):
+        out["top"] = True
+    return out
+
+
 # ----------------------------------------------------------------------------- activity history
 class Activity:
     """What you did (newest first when listed), in the activity table."""
@@ -5347,6 +5457,19 @@ class App:
         finally:
             self._shared_busy.discard(p["name"])
 
+    def tasks(self, op: dict = None) -> dict:
+        """The task list on the server (see TASKS_PY); op = one change, None = just read it."""
+        if not self.conf.configured:
+            raise ApiError(400, "the server is not configured")
+        body = clean_task_op(op) if op is not None else {"op": "list"}
+        res = remote_python(self.conf, TASKS_PY, [], stdin=json.dumps(body).encode(),
+                            multiplex=bool(self.store.settings.get("sshMultiplex")))
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer while reading the tasks")
+        if res.get("error"):
+            raise ApiError(400, str(res["error"]))
+        return {"tasks": res.get("tasks") or [], "rev": res.get("rev") or 0}
+
     def _shared_call(self, p: dict, op: str, stdin: bytes = None) -> dict:
         side = self._shared_side(p)
         if side == "local":
@@ -5501,6 +5624,15 @@ class App:
                 if not (p.get("remote") or (p.get("localExists") and not self.web)):
                     raise ApiError(400, "this project has no folder to show")
                 s = FilesSession(sid, p["name"], title[:80])
+            with self.lock:
+                self.sessions[sid] = s
+            self._remember()
+            return s.info()
+        if body.get("kind") == "tasks":
+            if not self.conf.configured:
+                raise ApiError(400, "the server is not configured")
+            title = body.get("title") if isinstance(body.get("title"), str) and body.get("title").strip() else "Tasks"
+            s = FilesSession(sid, "", title[:80], kind="tasks")
             with self.lock:
                 self.sessions[sid] = s
             self._remember()
@@ -6515,7 +6647,7 @@ class App:
     # A restart (update, the web service restarted) must not cost the open tabs: chats (Claude
     # keeps running on the server under its relay), watched chats and Files tabs come back with
     # the SAME ids, so browsers simply reconnect. Terminals cannot: their process is gone.
-    LIVE_KINDS = ("chat", "files", "changes")
+    LIVE_KINDS = ("chat", "files", "changes", "tasks")
     LIVE_MAX_AGE = 600              # installed app: only right after a restart, not the next morning
 
     def _save_live(self):
@@ -7867,6 +7999,10 @@ class Handler(BaseHTTPRequestHandler):
             return fs_upload_call(app, p, query, data)
         if route == ("POST", "fs") and len(parts) == 3:
             return fs_change_call(app, fs_project(app, parts[1]), parts[2], self._body())
+        if route == ("GET", "tasks") and len(parts) == 1:
+            return app.tasks()
+        if route == ("POST", "tasks") and len(parts) == 1:
+            return app.tasks(self._body())
         if route == ("GET", "files") and len(parts) == 2:
             return {"files": app.project_files(parts[1])}
         if parts and parts[0] == "git" and len(parts) >= 3:

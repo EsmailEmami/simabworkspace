@@ -79,6 +79,7 @@ const q = (sel, root) => (root || document.body).querySelectorAll(sel);
 require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 global.SW && require(path.join(ROOT, 'gui/static/files.js'));
+global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
 
 const tests = {
   async 'not signed in: the sign-in page, with the one allowed server shown'() {
@@ -123,10 +124,11 @@ const tests = {
     skeleton();
     // this time: a phone (narrow touch screen)
     global.matchMedia = (q) => ({ matches: true, media: q, addEventListener() {} });
-    for (const f of ['app.js', 'chat.js', 'files.js']) delete require.cache[require.resolve(path.join(ROOT, 'gui/static', f))];
+    for (const f of ['app.js', 'chat.js', 'files.js', 'tasks.js']) delete require.cache[require.resolve(path.join(ROOT, 'gui/static', f))];
     require(path.join(ROOT, 'gui/static/app.js'));
     require(path.join(ROOT, 'gui/static/chat.js'));
     require(path.join(ROOT, 'gui/static/files.js'));
+    require(path.join(ROOT, 'gui/static/tasks.js'));
     await settle();
     assert.strictEqual(q('.login').length, 0);
     // phone, nothing open yet: buttons instead of "press Ctrl+Shift+P"

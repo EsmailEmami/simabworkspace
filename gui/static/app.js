@@ -438,6 +438,7 @@
     if (spec.kind === 'sync-info' || spec.kind === 'sync-monitor') return ['⇅', ''];
     if (spec.kind === 'docker') return ['▣', 'server'];
     if (spec.kind === 'files') return ['▤', 'files'];
+    if (spec.kind === 'tasks') return ['✓', 'files'];
     return ['›', spec.where === 'server' ? 'server' : 'local'];
   }
 
@@ -1553,7 +1554,8 @@
     if (had) return had;
     var tab = info.spec.kind === 'chat' ? new window.SWChat.ChatTab(info)
       : info.spec.kind === 'files' ? new window.SWFiles.FilesTab(info)
-      : info.spec.kind === 'changes' ? new window.SWFiles.ChangesTab(info) : new Tab(info, estimateSize());
+      : info.spec.kind === 'changes' ? new window.SWFiles.ChangesTab(info)
+      : info.spec.kind === 'tasks' && window.SWTasks ? new window.SWTasks.TasksTab(info) : new Tab(info, estimateSize());
     var g = group || L.focused || L.groups[0];
     paintTab(tab);
     tab.group = g;
@@ -1632,6 +1634,10 @@
     if (spec.kind === 'files') {
       var fx = S.tabs.find(function (t) { return t.isFiles && !t.isChanges && !t.gone && (t.info.spec.project || '') === (spec.project || ''); });
       if (fx) { activate(fx); return Promise.resolve(fx); }
+    }
+    if (spec.kind === 'tasks') {
+      var tk = S.tabs.find(function (t) { return t.isTasks && !t.gone; });
+      if (tk) { activate(tk); return Promise.resolve(tk); }
     }
     if (spec.kind === 'changes') {
       var cx = S.tabs.find(function (t) { return t.isChanges && !t.gone && t.project === spec.project; });
@@ -2036,6 +2042,7 @@
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
       { label: 'Changes — review, commit', disabled: !r && !p.localExists, action: function () { openSession({ kind: 'changes', project: p.name }); } },
+      { label: 'Tasks', k: taskCount(p.name), action: function () { openTasks(p.name); } },
       { label: 'Server terminal', disabled: !r, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
       { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
@@ -3954,7 +3961,9 @@
       var gs = S.git[n];
       if (gs && gs.repos === 1) items.push({ id: n + ': switch branch', label: n + ': switch branch' + (gs.branch ? ' (now ' + gs.branch + ')' : '') + '…', grp: n, action: function () { branchPicker(p, gs.repo, gs.where, function () {}); } });
       items.push({ label: n + ': edit run commands', grp: n, action: function () { editCommands(p); } });
+      items.push({ label: n + ': tasks', grp: n, action: function () { openTasks(n); } });
     });
+    items.push({ label: 'Tasks — your to-do list', grp: 'app', action: function () { openTasks(); } });
     items.push({ label: 'Go to file…', grp: 'app', action: function () { setTimeout(function () { quickOpen(); }, 0); } });
     items.push({ label: 'Claude (no project, home folder)', grp: 'app', action: function () { openSession({ kind: 'chat' }); } });
     items.push({ label: 'Claude sessions — all projects', grp: 'app', action: function () { claudeSessionsDialog(null); } });
@@ -4118,6 +4127,7 @@
       if (hasRemote(cur)) items.push({ label: 'Server terminal', action: function () { openSession({ kind: 'shell', where: 'server', project: cur.name }); } });
       if (cur.localExists) items.push({ label: 'Local terminal', action: function () { openSession({ kind: 'shell', where: 'local', project: cur.name }); } });
     }
+    items.push({ label: 'Tasks', action: function () { openTasks(); } });
     items.push({ header: 'Home' });
     items.push({ label: 'Server terminal', disabled: !serverReady(), action: function () { openSession({ kind: 'shell', where: 'server' }); } });
     items.push({ label: 'Local terminal', action: function () { openSession({ kind: 'shell', where: 'local' }); } });
@@ -4318,6 +4328,8 @@
 
   function serverTerminal() { return openSession({ kind: 'shell', where: 'server', title: 'Server terminal' }); }
   function serverFiles() { return openSession({ kind: 'files', title: 'Files · server' }); }
+  function openTasks(project) { return window.SWTasks ? window.SWTasks.open(project) : Promise.resolve(null); }
+  function taskCount(project) { var n = window.SWTasks ? window.SWTasks.openCount(project) : 0; return n ? n + ' open' : ''; }
 
   function quitApp() {
     confirmDlg('Quit? Every terminal, Claude chat and running command is stopped. (Closing the window instead keeps them running.)', 'Quit', true).then(function (ok) {
@@ -4404,7 +4416,7 @@
     closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, promptDlg: promptDlg, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
-    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, serverTerminal: serverTerminal, serverFiles: serverFiles,
+    claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
@@ -4424,6 +4436,8 @@
     if (bt) bt.addEventListener('click', serverTerminal);
     var bf = $('#btn-files');
     if (bf) bf.addEventListener('click', serverFiles);
+    var btk = $('#btn-tasks');
+    if (btk) btk.addEventListener('click', function () { openTasks(); });
     $('#btn-settings').addEventListener('click', function (e) {
       menuAt(e.currentTarget, webItems([
         { label: 'Claude sessions — all projects…', k: runningTotal() ? runningTotal() + ' running' : '', action: function () { claudeSessionsDialog(null); } },

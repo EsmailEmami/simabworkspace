@@ -377,14 +377,26 @@
     return false;
   };
 
+  // a socket that is no longer the tab's own: it must not deliver anything or reconnect
+  function retireWs(ws) {
+    if (!ws) return;
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    try { ws.close(); } catch (e) { /* already closed */ }
+  }
+
   P.connect = function () {
     var self = this;
     if (this.closed || this.gone) return;
+    // only ONE socket per tab: two reconnect paths (the onclose timer and "connection back")
+    // could both open one, and every event then showed twice in the chat
+    if (this.ws && !this.ws.swDead && this.ws.readyState <= 1) return;
+    retireWs(this.ws);
     var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(SW.token));
     this.ws = ws;
-    ws.onopen = function () { self.retry = 0; self.lastRx = Date.now(); self.pingAt = 0; self.conn = 'online'; self.renderStatus(); };
+    ws.onopen = function () { if (self.ws !== ws) return; self.retry = 0; self.lastRx = Date.now(); self.pingAt = 0; self.conn = 'online'; self.renderStatus(); };
     ws.onmessage = function (ev) {
       var m;
+      if (self.ws !== ws) { retireWs(ws); return; }
       self.lastRx = Date.now();
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       try { self.onMessage(m); } catch (err) { self.reportError(err, m.e || m); }
@@ -437,12 +449,15 @@
       }
     };
     ws.onclose = function () {
-      if (self.closed || self.gone) return;
+      ws.swDead = true;
+      if (self.closed || self.gone || self.ws !== ws) return;
       self.conn = 'offline';
       self.renderStatus();
       self.retry++;
       setTimeout(function () {
+        if (self.ws !== ws) return;               // another path already reconnected
         api('GET', 'state').then(function (st) {
+          if (self.ws !== ws) return;
           if (st.sessions.some(function (s) { return s.id === self.id; })) self.connect();
           else self.reopen();
         }).catch(function () { self.connect(); });

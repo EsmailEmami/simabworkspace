@@ -774,9 +774,17 @@
   Tab.prototype.connect = function () {
     var self = this;
     if (this.closed || this.gone) return;
+    // only ONE socket per tab (see ChatTab.connect): otherwise output is written twice
+    if (this.ws && !this.ws.swDead && this.ws.readyState <= 1) return;
+    if (this.ws) {
+      var old = this.ws;
+      old.onopen = old.onmessage = old.onclose = old.onerror = null;
+      try { old.close(); } catch (e) { /* already closed */ }
+    }
     var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?id=' + encodeURIComponent(this.id) + '&t=' + encodeURIComponent(token));
     this.ws = ws;
     ws.onopen = function () {
+      if (self.ws !== ws) return;
       self.retry = 0;
       self.lastRx = Date.now();
       self.pingAt = 0;
@@ -785,6 +793,7 @@
     };
     ws.onmessage = function (ev) {
       var msg;
+      if (self.ws !== ws) return;
       self.lastRx = Date.now();
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (msg.t === 'o') { self.term.write(msg.d); self.onOutput(); if (self.info.spec.kind === 'run' && !self.foundUrl) self.scanUrl(msg.d); }
@@ -799,10 +808,11 @@
       else if (msg.t === 'gone') self.gone = true;
     };
     ws.onclose = function () {
-      if (self.closed || self.gone) return;
+      ws.swDead = true;
+      if (self.closed || self.gone || self.ws !== ws) return;
       self.retry++;
       if (self.retry > 2) self.setBanner('reconnecting…', 'fail', true);
-      setTimeout(function () { self.reconnect(); }, Math.min(5000, 300 * self.retry));
+      setTimeout(function () { if (self.ws === ws) self.reconnect(); }, Math.min(5000, 300 * self.retry));
     };
   };
 

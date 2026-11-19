@@ -329,6 +329,26 @@ const tests = {
     global.apiImpl = () => Promise.resolve({});
   },
 
+  async 'a dropped connection reconnects with ONE socket: no message or tool shows twice'() {
+    const { tab, ws } = newTab();
+    ws.onopen();
+    global.apiImpl = (m, u) => Promise.resolve(u === 'state' ? { sessions: [{ id: 'c1' }] } : {});
+    const before = global.sockets.length;
+    ws.readyState = 3;
+    ws.onclose();                         // the tab's own reconnect is scheduled…
+    tab.connect();                        // …and "connection back" reconnects at once
+    tab.connect();
+    await new Promise((r) => setTimeout(r, 450));
+    assert.strictEqual(global.sockets.length - before, 1, 'one new socket only');
+    const ws2 = global.sockets[global.sockets.length - 1];
+    ws2.onopen();
+    const user = { type: 'user', message: { role: 'user', content: 'hello there' } };
+    ws2.onmessage({ data: JSON.stringify({ t: 's', state: { alive: true }, events: [user] }) });
+    if (ws.onmessage) ws.onmessage({ data: JSON.stringify({ t: 'e', e: user }) });   // a late frame from the old one
+    assert.strictEqual((tab.msgs.textContent.match(/hello there/g) || []).length, 1);
+    global.apiImpl = () => Promise.resolve({});
+  },
+
   async 'a new chat with no conversation yet just ends after an app restart'() {
     const { tab, ws } = newTab();
     ws.onopen();

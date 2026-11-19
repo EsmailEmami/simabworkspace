@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.43.2 2026-11-19  Chat/terminal: a dropped connection reconnects with one socket only (two
+#                       could open, then every message and tool showed twice)
 #    1.43.1 2026-11-18  Sounds speak by default, in plain English: "Your task in shop is done",
 #                       "Claude has a question for you in shop", "Claude needs your permission…".
 #    1.43.0 2026-11-18  Dictation: a mic in the chat box (before Send) and a small round mic beside
@@ -314,7 +316,7 @@
 
 set -u -o pipefail
 
-VERSION="1.43.1"
+VERSION="1.43.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

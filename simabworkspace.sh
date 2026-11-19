@@ -43,6 +43,9 @@
 #  Changelog:
 #    1.44.0 2026-11-19  Chat: "▶ read" under each answer reads it aloud (Persian or English, code
 #                       skipped); "Read aloud" in the chat menu for one message
+#                       Dictation keeps going: a guess Chrome never finishes is kept, short
+#                       network drops are retried, English tech words said in Persian are
+#                       written in English ("ری اکت" → React)
 #    1.43.2 2026-11-19  Chat/terminal: a dropped connection reconnects with one socket only (two
 #                       could open, then every message and tool showed twice)
 #    1.43.1 2026-11-18  Sounds speak by default, in plain English: "Your task in shop is done",

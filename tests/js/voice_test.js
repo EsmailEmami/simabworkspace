@@ -302,9 +302,75 @@ test('speech: rebuilds from all results; preferLatin picks the Latin alternative
   out = collect(sp.start({ preferLatin: true }));
   last().say([['ری اکت', true, 'React', 'ریکت']]);
   assert.strictEqual(out[out.length - 1].final, 'React');
-  out = collect(sp.start());
+  out = collect(sp.start({ techWords: false }));
   last().say([['ری اکت', true, 'React']]);
   assert.strictEqual(out[out.length - 1].final, 'ری اکت');
+});
+
+test('tech words: English terms the Persian recognizer spelled in Persian letters become English', () => {
+  assert.strictEqual(V.techWords('این کامپوننت ری اکت رو کامیت کن و پوش کن به گیت هاب'), 'این component React رو commit کن و push کن به GitHub');
+  assert.strictEqual(V.techWords('ری‌اکت و داکر کامپوز، اند پوینت API'), 'React و docker compose، endpoint API');
+  assert.strictEqual(V.techWords('پوشه گیتی پولی'), 'پوشه گیتی پولی', 'never inside a longer Persian word');
+  assert.strictEqual(V.techWords('سرور و فایل و باگ'), 'سرور و فایل و باگ', 'Persian loanwords stay');
+  assert.strictEqual(V.techWords('hello git'), 'hello git');
+  const sp = newSpeech();
+  let out = collect(sp.start());
+  last().say([['دیتابیس پستگرس رو ریستارت کن', true]]);
+  assert.strictEqual(out[out.length - 1].final, 'database Postgres رو ریستارت کن');
+  out = collect(sp.start({ lang: 'en-US' }));
+  last().say([['git push', true]]);
+  assert.strictEqual(out[out.length - 1].final, 'git push');
+});
+
+test('speech: a guess that never becomes final is kept, and listening goes on', () => {
+  const sp = newSpeech();
+  const out = collect(sp.start());
+  last().say([['سلام', true], ['اینو با ری', false]]);       // an English word: Chrome hangs on its guess
+  tick(V.STALL_MS - 1);
+  assert.strictEqual(recs.length, 1);
+  tick(1);
+  assert.deepStrictEqual(out[out.length - 1], { final: 'سلام اینو با ری', interim: '' });
+  assert.ok(sp.active);
+  tick(300);
+  assert.strictEqual(recs.length, 2, 'listening again');
+  last().say([['ادامه', true]]);
+  assert.strictEqual(out[out.length - 1].final, 'سلام اینو با ری ادامه');
+  tick(10000);
+  assert.strictEqual(recs.length, 2, 'finals only: no stall restart');
+  last().say([['ادامه', true], ['یه چیز', false]]);
+  last().end();                                              // Chrome ended with only a guess: kept
+  assert.strictEqual(out[out.length - 1].final, 'سلام اینو با ری ادامه یه چیز');
+});
+
+test('speech: a network drop after words were heard is retried, not the end of dictation', () => {
+  const sp = newSpeech();
+  const out = collect(sp.start());
+  last().say([['یک', true]]);
+  for (let i = 0; i < 3; i++) {
+    last().fail('network');
+    assert.ok(sp.active, 'drop ' + (i + 1) + ' retried');
+    assert.ok(!out[out.length - 1].ended);
+    tick(2000);
+  }
+  last().fail('network');                                  // 4th in a row with nothing heard between
+  assert.ok(out[out.length - 1].ended);
+  assert.strictEqual(out[out.length - 1].error.code, 'network');
+  assert.strictEqual(out[out.length - 1].final, 'یک');
+  // a word between the drops resets the count
+  const o2 = collect(sp.start());
+  last().say([['الف', true]]);
+  for (let i = 0; i < 6; i++) { last().fail('network'); tick(2000); last().say([['ب' + i, true]]); }
+  assert.ok(sp.active);
+  assert.ok(!o2[o2.length - 1].ended);
+});
+
+test('speech: Android repeating earlier finals inside the next one is not doubled', () => {
+  const sp = newSpeech();
+  const out = collect(sp.start());
+  last().say([['سلام', true], ['سلام خوبی', true], ['سلام خوبی چطوری', true]]);
+  assert.strictEqual(out[out.length - 1].final, 'سلام خوبی چطوری');
+  last().say([['یک', true], ['دو', true]]);
+  assert.strictEqual(out[out.length - 1].final, 'یک دو');
 });
 
 test('join keeps one space and a trailing newline', () => {
@@ -339,15 +405,15 @@ test('field: appends with a space; live text without events; finals fire input +
   assert.strictEqual(f.value, 'نوشته قبلی سلام خوبی');
   assert.deepStrictEqual(f.fired, ['input', 'change']);
   assert.strictEqual(f.selStart, f.value.length, 'caret at the end');
-  last().end(); tick(300);                          // Chrome restarts: nothing lost, nothing doubled
-  assert.strictEqual(f.value, 'نوشته قبلی سلام');
-  last().say([['خوبی', true]]);
+  last().end(); tick(300);                          // Chrome restarts: the last guess is kept, nothing doubled
   assert.strictEqual(f.value, 'نوشته قبلی سلام خوبی');
+  last().say([['چطوری', true]]);
+  assert.strictEqual(f.value, 'نوشته قبلی سلام خوبی چطوری');
   a.btn.emit('click');                               // stop
   last().end();
   assert.ok(!a.recording); assert.ok(!a.btn.classList.contains('vtt-rec'));
-  assert.strictEqual(f.value, 'نوشته قبلی سلام خوبی');
-  assert.strictEqual(f.count('input'), 2);
+  assert.strictEqual(f.value, 'نوشته قبلی سلام خوبی چطوری');
+  assert.strictEqual(f.count('input'), 3);
 });
 
 test('field: append=false replaces; a field cleared by the page is not refilled', () => {

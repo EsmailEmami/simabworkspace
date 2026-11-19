@@ -120,12 +120,12 @@ const tests = {
     assert.ok(mic.classList.contains('vtt-rec'));
     tab.ta.scrollHeight = 80;
     rec.say('سلام کلود', false);
-    assert.strictEqual(tab.ta.value, 'متن سلام کلود', 'live text in the box');
+    assert.strictEqual(tab.ta.value, 'متن سلام Claude', 'live text in the box');
     assert.strictEqual(tab.ta.style.height, '82px', 'the box grows with it');
     rec.say('سلام کلود', true);
     tab.submit();
     const sent = ws.sent.filter((m) => m.t === 'send').pop();
-    assert.strictEqual(sent.content[0].text, 'متن سلام کلود');
+    assert.strictEqual(sent.content[0].text, 'متن سلام Claude');
     assert.strictEqual(tab.ta.value, '', 'nothing written back after sending');
     assert.ok(!mic.classList.contains('vtt-rec'), 'stopped');
     assert.strictEqual(rec.aborted, 1);

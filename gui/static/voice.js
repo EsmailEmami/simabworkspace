@@ -30,6 +30,67 @@
   };
   var FATAL = { 'not-allowed': 1, 'service-not-available': 1, 'network': 1, 'audio-capture': 1,
     'language-not-supported': 1, 'bad-grammar': 1, 'unsupported': 1 };
+  // the speech service dropped for a moment (a phone between networks, a slow link to Google):
+  // once something was heard, these are retried a few times before giving up
+  var FLAKY = { 'network': 1, 'service-not-available': 1 };
+  var FLAKY_TRIES = 3;
+  // Chrome sometimes shows a guess (interim) and then goes silent for good — typically after
+  // a word it cannot place, like an English term inside Persian speech. After this long the
+  // guess is kept as text and the recognizer is started again.
+  var STALL_MS = 4000;
+
+  // ------------------------------------------------------------------ tech words
+  // The Persian recognizer writes English terms in Persian letters ("ری اکت", "کامیت").
+  // Programmers want them in English. Only real English terms — Persian loanwords that are
+  // written in Persian anyway (سرور، فایل، باگ، تست…) are left alone.
+  var TECH = [
+    ['GitHub', 'گیت هاب|گیتهاب|گیت‌هاب'], ['GitLab', 'گیت لب|گیتلب'], ['git', 'گیت'],
+    ['pull request', 'پول ریکوئست|پول رکوئست|پول ریکوست'], ['commit', 'کامیت'], ['push', 'پوش'],
+    ['merge', 'مرج'], ['branch', 'برنچ'], ['rebase', 'ریبیس'], ['checkout', 'چک اوت|چک‌اوت'], ['stash', 'استش'],
+    ['deploy', 'دیپلوی'], ['build', 'بیلد'], ['release', 'ریلیز'], ['pipeline', 'پایپ لاین|پایپلاین|پایپ‌لاین'],
+    ['docker compose', 'داکر کامپوز'], ['Docker', 'داکر'], ['container', 'کانتینر'], ['Kubernetes', 'کوبرنتیز|کوبرنتیس|کوبرنیتیز'],
+    ['nginx', 'انجین ایکس|اینجین ایکس|انجینکس'], ['localhost', 'لوکال هاست|لوکالهاست'],
+    ['React', 'ری اکت|ریاکت|ری‌اکت'], ['Angular', 'انگولار|آنگولار|انگیولار'], ['Next.js', 'نکست جی اس'], ['NestJS', 'نست جی اس'],
+    ['Node.js', 'نود جی اس|نودجی اس'], ['npm', 'ان پی ام'], ['ng serve', 'ان جی سرو'],
+    ['JavaScript', 'جاوا اسکریپت|جاوااسکریپت'], ['TypeScript', 'تایپ اسکریپت|تایپ‌اسکریپت|تایپاسکریپت'],
+    ['Python', 'پایتون'], ['Golang', 'گولنگ'], ['Django', 'جنگو'], ['Laravel', 'لاراول'], ['PHP', 'پی اچ پی'],
+    ['Flutter', 'فلاتر'], ['Kotlin', 'کاتلین'], ['Tailwind', 'تیلویند|تیل ویند'],
+    ['API', 'ای پی آی|ای‌پی‌آی|ای پی ای'], ['endpoint', 'اند پوینت|اندپوینت|اند‌پوینت'],
+    ['backend', 'بک اند|بکند|بک‌اند'], ['frontend', 'فرانت اند|فرانتند|فرانت‌اند'],
+    ['database', 'دیتابیس|دیتا بیس'], ['PostgreSQL', 'پستگرس کیو ال|پوستگرس کیو ال'], ['Postgres', 'پستگرس|پوستگرس'],
+    ['MySQL', 'مای اس کیو ال'], ['SQL', 'اس کیو ال'], ['Redis', 'ردیس'], ['MongoDB', 'مانگو دی بی|مونگو دی بی'],
+    ['GraphQL', 'گراف کیو ال'], ['query', 'کوئری|کوئیری'], ['migration', 'مایگریشن'], ['schema', 'اسکیما'],
+    ['component', 'کامپوننت'], ['function', 'فانکشن'], ['interface', 'اینترفیس'], ['middleware', 'میدلور|میدل ور'],
+    ['callback', 'کال بک|کالبک'], ['promise', 'پرامیس'], ['async', 'ای سینک|اسینک'], ['await', 'اویت'],
+    ['null', 'نال'], ['undefined', 'آندیفایند|اندیفایند'], ['string', 'استرینگ'], ['object', 'آبجکت'],
+    ['boolean', 'بولین'], ['integer', 'اینتیجر'], ['state', 'استیت'], ['hook', 'هوک'], ['props', 'پراپس'],
+    ['framework', 'فریمورک|فریم ورک'], ['webhook', 'وب هوک|وبهوک'], ['WebSocket', 'وب سوکت|وبسوکت'],
+    ['refactor', 'ریفکتور|ری فکتور'], ['debug', 'دیباگ'], ['regex', 'رجکس|رگکس'],
+    ['JSON', 'جیسون|جی سان'], ['YAML', 'یامل'], ['HTML', 'اچ تی ام ال'], ['CSS', 'سی اس اس'], ['URL', 'یو آر ال'],
+    ['HTTPS', 'اچ تی تی پی اس'], ['HTTP', 'اچ تی تی پی'], ['SSH', 'اس اس اچ'], ['VS Code', 'وی اس کد'],
+    ['Claude', 'کلاد|کلود'], ['Opus', 'اوپوس'], ['prompt', 'پرامپت'], ['agent', 'ایجنت'],
+    ['issue', 'ایشو'], ['review', 'ریویو'], ['workspace', 'ورک اسپیس|ورکاسپیس']
+  ];
+  var TECH_RE = (function () {
+    var all = [];
+    TECH.forEach(function (t) { t[1].split('|').forEach(function (fa) { all.push([fa, t[0]]); }); });
+    all.sort(function (a, b) { return b[0].length - a[0].length; });          // longest first: "گیت هاب" before "گیت"
+    var map = {};
+    all.forEach(function (x) { map[x[0]] = x[1]; });
+    // a space in a term may also be a half-space (ZWNJ) or nothing at all
+    var alt = all.map(function (x) { return x[0].replace(/[ \u200c]/g, '[ \\u200c]?'); }).join('|');
+    var norm = function (w) { return w.replace(/[ \u200c]/g, ''); };
+    var byNorm = {};
+    all.forEach(function (x) { byNorm[norm(x[0])] = x[1]; });
+    // whole words only: not inside a longer Persian word (پوشه stays پوشه)
+    // letters only — the Persian comma/question mark (،؟) are in the same Unicode block
+    var L = '\\u0621-\\u065F\\u066E-\\u06D3\\u06FA-\\u06FF\\u200c';
+    return { re: new RegExp('(^|[^' + L + '])(' + alt + ')(?![' + L + '])', 'g'), byNorm: byNorm, norm: norm };
+  })();
+  function techWords(text) {
+    if (!text || !/[\u0600-\u06FF]/.test(text)) return text;
+    return text.replace(TECH_RE.re, function (m, pre, w) { return pre + (TECH_RE.byNorm[TECH_RE.norm(w)] || w); });
+  }
   var QUIET = { 'aborted': 1, 'no-speech': 1 };      // never worth a toast
   var BACKOFF = [300, 600, 1200, 2000];
   var STOP_GRACE = 1500;
@@ -84,6 +145,7 @@
     this.restartT = null;
     this.stopT = null;
     this.opts = null;
+    this.stallT = null;
   }
   var SP = Speech.prototype;
 
@@ -97,13 +159,16 @@
       continuous: !(opts && opts.continuous === false),
       interimResults: !(opts && opts.interimResults === false),
       maxAlternatives: (opts && opts.maxAlternatives) || 3,
-      preferLatin: !!(opts && opts.preferLatin)
+      preferLatin: !!(opts && opts.preferLatin),
+      techWords: !(opts && opts.techWords === false)
     };
     var stream = this.stream = new Stream();
     this.gen++;
     this.wanted = true;
     this.committed = this.sessionFinal = this.interim = '';
     this.tries = 0;
+    this.heard = false;      // something was recognised in this recording
+    this.flaky = 0;          // service drops in a row
     if (!this.isSupported()) this._finish(errorOf('unsupported'));
     else this._launch();
     return stream;
@@ -153,7 +218,9 @@
     if (this.opts.preferLatin) {
       for (var i = 0; i < r.length; i++) if (r[i] && /[A-Za-z]/.test(r[i].transcript || '')) { best = r[i]; break; }
     }
-    return ((best && best.transcript) || '').trim();
+    var t = ((best && best.transcript) || '').trim();
+    if (this.opts.techWords && /^fa/i.test(this.opts.lang)) t = techWords(t);
+    return t;
   };
 
   SP._result = function (e) {
@@ -162,26 +229,66 @@
     for (var i = 0; i < res.length; i++) {
       var t = this._pick(res[i]);
       if (!t) continue;
-      (res[i].isFinal ? fin : mid).push(t);
+      if (res[i].isFinal) {
+        // Chrome on Android may repeat the earlier finals inside the next one ("a", "a b"):
+        // keep only the longer one, never "a a b"
+        var prev = fin[fin.length - 1];
+        if (prev && t.indexOf(prev) === 0) fin[fin.length - 1] = t;
+        else if (!(prev && prev.indexOf(t) === 0 && prev.length >= t.length)) fin.push(t);
+      } else mid.push(t);
     }
     this.sessionFinal = fin.join(' ').replace(/\s+/g, ' ').trim();
     this.interim = mid.join(' ').replace(/\s+/g, ' ').trim();
     this.tries = 0;
+    this.flaky = 0;
+    if (this.sessionFinal || this.interim) this.heard = true;
+    this._armStall();
     this._emit();
+  };
+
+  // a guess that never becomes final: keep it and listen again (see STALL_MS)
+  SP._armStall = function () {
+    var self = this, gen = this.gen, rec = this.rec;
+    this._clearStall();
+    if (!this.interim || !this.wanted) return;
+    this.stallT = this.env.setTimeout(function () {
+      self.stallT = null;
+      if (gen !== self.gen || rec !== self.rec || !self.wanted || !self.interim) return;
+      self._keepSession();
+      self._drop(rec);
+      self._emit();
+      self._scheduleRestart();
+    }, STALL_MS);
+  };
+  SP._clearStall = function () { if (this.stallT != null) { this.env.clearTimeout(this.stallT); this.stallT = null; } };
+
+  // the session is over: its finals AND its last guess become text (a guess is better than losing words)
+  SP._keepSession = function () {
+    this.committed = join(join(this.committed, this.sessionFinal), this.interim);
+    this.sessionFinal = '';
+    this.interim = '';
   };
 
   SP._error = function (code) {
     code = code || 'unknown';
     if (QUIET[code]) return;                          // Chrome fires `end` next → restart
+    if (FLAKY[code] && this.heard && this.wanted && this.flaky < FLAKY_TRIES) {
+      this.flaky++;
+      this._clearStall();
+      this._keepSession();
+      this._drop(this.rec);
+      this._emit();
+      this._scheduleRestart();
+      return;
+    }
     var err = errorOf(code);
     if (err.fatal) { this._finish(err); return; }
     this._emit(err);
   };
 
   SP._ended = function () {
-    this.committed = join(this.committed, this.sessionFinal);
-    this.sessionFinal = '';
-    this.interim = '';
+    this._clearStall();
+    this._keepSession();
     this._drop(this.rec);
     if (this.wanted) { this._emit(); this._scheduleRestart(); }
     else this._finish();
@@ -225,6 +332,7 @@
     this.gen++;                          // late callbacks of this session are ignored from now on
     this.wanted = false;
     this._clearRestart();
+    this._clearStall();
     this.env.clearTimeout(this.stopT);
     this.stopT = null;
     this._drop(this.rec);
@@ -685,6 +793,6 @@
   root.SWVoice = {
     Speech: Speech, Attachment: Attachment, isEligible: isEligible, attachAll: attachAll, attach: attach,
     speech: shared, join: join, placeFor: placeFor, tokens: tokens, lang: savedLang, toggleLang: toggleLang,
-    SKIP_SELECTOR: SKIP_SELECTOR, MESSAGES: MESSAGES
+    SKIP_SELECTOR: SKIP_SELECTOR, MESSAGES: MESSAGES, techWords: techWords, STALL_MS: STALL_MS
   };
 })(typeof window !== 'undefined' ? window : this);

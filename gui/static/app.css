@@ -324,6 +324,9 @@ details.thinking.live summary { animation: pulse 1.4s infinite; }
 .sysline.err { text-align: left; color: #f7a1b0; background: #1c1013; border: 1px solid #5a2633; border-radius: 7px; padding: 7px 10px; font: 12.5px var(--ui); }
 .result-line { font: 11px var(--mono); color: var(--faint); }
 .result-line.err { color: var(--err); }
+.rl-read { font: 11px var(--mono); color: var(--faint); background: none; border: 0; padding: 2px 6px; margin-left: 8px; cursor: pointer; border-radius: 4px; }
+.rl-read:hover, .rl-read.on { color: var(--accent); }
+@media (pointer: coarse) { .rl-read { padding: 6px 10px; } }
 .chat-composer { flex: none; padding: 6px 16px 12px; position: relative; max-width: 900px; width: 100%; margin: 0 auto; }
 .cbox { border: 1px solid var(--line2); border-radius: 9px; background: var(--bg2); }
 .cbox:focus-within { border-color: #3d4a66; }

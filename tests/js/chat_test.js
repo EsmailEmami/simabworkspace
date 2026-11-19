@@ -47,6 +47,43 @@ function newTab() {
 const byClass = (el, c) => el.querySelectorAll('.' + c);
 
 const tests = {
+  'read aloud: ▶ read under an answer reads that turn (no tools, no code); again = stop; menu reads a message'() {
+    const read = [];
+    let stopped = 0, onEnd = null;
+    global.speechSynthesis = {};
+    global.SWSound = global.window.SWSound = { read(t, f) { read.push(t); onEnd = f; return ['x']; }, stopReading() { stopped++; if (onEnd) { const f = onEnd; onEnd = null; f(); } },
+      isReading: () => !!onEnd, langOf: () => 'en', hasVoice: () => true };
+    const { tab, feed } = newTab();
+    feed({ t: 's', state: { alive: true }, events: [] });
+    feed({ t: 'e', e: { type: 'user', message: { role: 'user', content: 'go' } } });
+    feed({ t: 'e', e: { type: 'assistant', message: { id: 'a1', content: [{ type: 'text', text: 'First part.' }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] } } });
+    feed({ t: 'e', e: { type: 'assistant', message: { id: 'a2', content: [{ type: 'thinking', thinking: 'hmm' }, { type: 'text', text: 'Second **part**.' }] } } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'Second part.', duration_ms: 1000 } });
+    const btn = byClass(tab.msgs, 'rl-read')[0];
+    assert.ok(btn, 'a read button on the result line');
+    btn.onclick();
+    assert.deepStrictEqual(read, ['First part.\n\nSecond **part**.']);
+    assert.strictEqual(btn.textContent, '■ stop');
+    btn.onclick();
+    assert.strictEqual(stopped, 1);
+    assert.strictEqual(btn.textContent, '▶ read');
+    // right click on one message: only that one
+    let items = null;
+    global.SW.showMenu = (x, y, it) => { items = it; };
+    const second = byClass(tab.msgs, 'amsg')[1];
+    tab.menu(0, 0, [], second.querySelector('.md') || second);
+    assert.strictEqual(items[0].label, 'Read aloud');
+    items[0].action();
+    assert.strictEqual(read[1], 'Second **part**.');
+    tab.menu(0, 0, [], null);
+    assert.strictEqual(items[0].label, 'Stop reading');
+    items[0].action();
+    tab.menu(0, 0, [], null);
+    assert.strictEqual(items[0].label, 'Read the last answer aloud');
+    global.SW.showMenu = () => {};
+    delete global.speechSynthesis; delete global.SWSound;
+  },
+
   'sounds: a different one per state, only for a chat you are not looking at'() {
     const played = [];
     global.SW.sound = (kind, tab) => played.push([kind, tab.info.spec.project]);

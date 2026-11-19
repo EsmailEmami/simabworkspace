@@ -112,5 +112,43 @@ test('the first touch on the page wakes the audio up', () => {
   assert.ok(notes.length);
 });
 
+test('read aloud: markdown to plain words, code not read, each piece in its own language', () => {
+  const md = '## Done\n\n**`ng serve`** must rebuild. See [the docs](https://x.y/z) or https://a.b/c\n\n```ts\nconst a = 1;\n```\n\n- item one\n\n| a | b |\n|---|---|\n\nاین‌جا نمی‌توانم کامپایل کنم. اگر خطایی آمد، متنش را بفرستید.';
+  const plain = SS.plainText(md);
+  assert.ok(!/const a|https|\*\*|`|##|\|/.test(plain), plain);
+  assert.match(plain, /ng serve must rebuild\. See the docs/);
+  voiceList = [{ lang: 'fa-IR', name: 'fa' }, { lang: 'en-US', name: 'en' }];
+  let ended = 0;
+  const pieces = SS.read(md, () => ended++);
+  assert.ok(pieces.length >= 3);
+  assert.strictEqual(spoken.length, pieces.length);
+  const fa = spoken.find((u) => /کامپایل/.test(u.text));
+  assert.strictEqual(fa.lang, 'fa-IR');
+  assert.strictEqual(fa.voice.name, 'fa');
+  assert.strictEqual(spoken.find((u) => /ng serve/.test(u.text)).lang, 'en-US');
+  assert.ok(SS.isReading());
+  spoken.forEach((u) => u.onend());
+  assert.strictEqual(ended, 1);
+  assert.ok(!SS.isReading());
+});
+
+test('read aloud: long text in short pieces; stop cancels and says it ended; no speech → false', () => {
+  const long = Array(40).fill('This is one sentence of a long answer.').join(' ');
+  assert.ok(SS.chunks(long).every((c) => c.length <= 220));
+  assert.strictEqual(SS.chunks(long).join(' ').length, long.length);
+  let cancelled = 0, ended = 0;
+  global.speechSynthesis.cancel = () => cancelled++;
+  SS.read(long, () => ended++);
+  SS.stopReading();
+  assert.ok(cancelled >= 1);
+  assert.strictEqual(ended, 1);
+  assert.ok(!SS.isReading());
+  spoken.forEach((u) => u.onend());
+  assert.strictEqual(ended, 1, 'late ends of a stopped reading change nothing');
+  const sp = global.speechSynthesis; delete global.speechSynthesis;
+  assert.strictEqual(SS.read('hi'), false);
+  global.speechSynthesis = sp;
+});
+
 console.log(results.join('\n'));
 if (results.some((r) => r.startsWith('FAIL'))) process.exitCode = 1;

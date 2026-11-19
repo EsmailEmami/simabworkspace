@@ -148,7 +148,90 @@
     root.addEventListener('keydown', first, true);
   }
 
-  root.SWSound = { KINDS: KINDS, MODES: MODES, LANGS: LANGS, DEFAULTS: DEFAULTS, TUNES: TUNES,
+  // ---- read a chat answer aloud (text to speech)
+  // markdown → plain sentences: code blocks are not read (too long, mostly symbols), links keep
+  // their words, URLs and table/heading/list marks go
+  function plainText(md) {
+    return String(md || '')
+      .replace(/```[\s\S]*?(```|$)/g, '\n')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/https?:\/\/\S+/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+      .replace(/^\s*\|?\s*:?-{3,}.*$/gm, '')
+      .replace(/[|*_~#]+/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{2,}/g, '\n')
+      .trim();
+  }
+
+  var FA_CH = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/g, LATIN = /[A-Za-z]/g;
+  function langOf(text) {
+    var fa = (text.match(FA_CH) || []).length, en = (text.match(LATIN) || []).length;
+    return fa && fa >= en / 3 ? 'fa' : 'en';
+  }
+
+  // Chrome stops long utterances after ~15 s: speak in short pieces, cut at sentence ends
+  function chunks(text, max) {
+    max = max || 220;
+    var out = [];
+    text.split(/\n+/).forEach(function (para) {
+      var parts = para.match(/[^.!?؟。\n]+[.!?؟。]*\s*/g) || [];
+      var cur = '';
+      parts.forEach(function (p) {
+        while (p.length > max) {                              // one very long sentence: at a comma or space
+          var cut = Math.max(p.lastIndexOf('، ', max), p.lastIndexOf(', ', max), p.lastIndexOf(' ', max));
+          if (cut < max / 3) cut = max;
+          if (cur) { out.push(cur); cur = ''; }
+          out.push(p.slice(0, cut + 1));
+          p = p.slice(cut + 1);
+        }
+        if ((cur + p).length > max && cur) { out.push(cur); cur = ''; }
+        cur += p;
+      });
+      if (cur) out.push(cur);
+    });
+    return out.map(function (c) { return c.trim(); }).filter(function (c) { return /[\w\u0600-\u06FF]/.test(c); });
+  }
+
+  var reading = null;            // {id, onEnd}
+  function stopReading() {
+    var r = reading;
+    reading = null;
+    var ss = root.speechSynthesis;
+    if (ss && ss.cancel) { try { ss.cancel(); } catch (e) { /* ignore */ } }
+    if (r && r.onEnd) r.onEnd();
+  }
+
+  // read(markdown, onEnd) → false when this browser cannot speak; otherwise the pieces read
+  // (each in its own language: a Persian answer with a few English words is read in Persian)
+  function read(md, onEnd) {
+    var ss = root.speechSynthesis, U = root.SpeechSynthesisUtterance;
+    stopReading();
+    if (!ss || !U) return false;
+    var list = chunks(plainText(md));
+    if (!list.length) { if (onEnd) onEnd(); return []; }
+    var me = { onEnd: onEnd };
+    reading = me;
+    var left = list.length;
+    list.forEach(function (c) {
+      var lang = langOf(c), u = new U(c);
+      u.lang = lang === 'fa' ? 'fa-IR' : 'en-US';
+      var v = voiceFor(lang);
+      if (v) u.voice = v;
+      u.rate = 1;
+      u.onend = u.onerror = function () {
+        if (--left === 0 && reading === me) { reading = null; if (onEnd) onEnd(); }
+      };
+      try { ss.speak(u); } catch (e) { /* ignore */ }
+    });
+    return list;
+  }
+
+  root.SWSound = {
+    read: read, stopReading: stopReading, isReading: function () { return !!reading; },
+    plainText: plainText, chunks: chunks, langOf: langOf, KINDS: KINDS, MODES: MODES, LANGS: LANGS, DEFAULTS: DEFAULTS, TUNES: TUNES,
     get: get, set: set, play: play, phrase: phrase, hasVoice: hasVoice, unlock: unlock,
     _reset: function () { ctx = null; nextFree = 0; } };
 })(typeof window !== 'undefined' ? window : this);

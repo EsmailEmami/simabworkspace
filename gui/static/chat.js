@@ -276,7 +276,7 @@
     this.scroller.addEventListener('contextmenu', function (e) {
       if (window.getSelection && String(window.getSelection())) return;      // keep the browser menu for copying
       e.preventDefault();
-      self.menu(e.clientX, e.clientY);
+      self.menu(e.clientX, e.clientY, undefined, e.target);
     });
     this.stick = true;
     this.jumpBtn = h('button', { class: 'jump hidden', title: 'Jump to the end', onclick: function () { self.stick = true; self.scrollEnd(); } }, '↓');
@@ -991,7 +991,14 @@
   };
 
   P.renderBlock = function (b) {
-    if (b.type === 'text') { if (b.text && b.text.trim()) { this.turnText = true; return markdown(b.text); } return null; }
+    if (b.type === 'text') {
+      if (!b.text || !b.text.trim()) return null;
+      this.turnText = true;
+      (this.turnSpeech = this.turnSpeech || []).push(b.text);
+      var md = markdown(b.text);
+      md._md = b.text;                                   // "Read aloud" reads the words, not the layout
+      return md;
+    }
     if (b.type === 'thinking') return b.thinking && b.thinking.trim() ? h('details', { class: 'thinking' }, h('summary', null, 'thought'), h('div', { class: 'think-body', dir: 'auto' }, b.thinking)) : null;
     if (b.type === 'tool_use') return this.toolCard(b);
     return null;
@@ -1104,6 +1111,7 @@
     }
     if (texts.length || images) {
       this.turnText = false;
+      this.turnSpeech = [];
       var echo = this.echoes && this.echoes[0];
       if (echo && !this.replaying && (e.isReplay || echo.text === texts.join('\n\n').trim())) {   // the message we already showed
         this.echoes.shift();
@@ -1185,14 +1193,19 @@
     this.draft = null;
     if (!this.turnText && e.result && typeof e.result === 'string' && e.result.trim() && !e.is_error) {
       this.add(h('div', { class: 'amsg' }, markdown(e.result)));     // safety net: always show the answer
+      this.turnSpeech = [e.result];
     }
     this.turnText = false;
+    var speech = (this.turnSpeech || []).join('\n\n');
+    this.turnSpeech = [];
+    if (speech.trim()) this.lastSpeech = speech;
     var parts = [];
     if (e.duration_ms) parts.push((e.duration_ms / 1000).toFixed(1) + 's');
     if (e.num_turns) parts.push(e.num_turns + (e.num_turns === 1 ? ' turn' : ' turns'));
     if (typeof e.total_cost_usd === 'number') parts.push('$' + e.total_cost_usd.toFixed(3));
     var err = e.is_error || (e.subtype && e.subtype !== 'success');
     var line = this.add(h('div', { class: 'result-line' + (err ? ' err' : '') }, (err ? '✗ ' : '✓ ') + parts.join(' · ')));
+    if (speech.trim() && window.SWSound && window.speechSynthesis) line.append(this.readBtn(speech));
     if (err && e.result) line.append(h('div', { dir: 'auto' }, String(e.result).slice(0, 500)));
     this.turnFilesLine();
     if (!Object.keys(this.perms).length) this.el.classList.remove('bell');      // nothing waits for you any more
@@ -1202,6 +1215,35 @@
       SW.notify('Claude finished', this.info.title);
       if (SW.sound) SW.sound(err ? 'error' : 'done', this);
     }
+  };
+
+  // ▶ read: Claude's answer of this turn read aloud (text to speech); again = stop
+  P.readBtn = function (text) {
+    var self = this;
+    var btn = h('button', { class: 'rl-read', title: 'Read the answer aloud' }, '▶ read');
+    btn.onclick = function () { self.readAloud(text, btn); };
+    return btn;
+  };
+  P.readAloud = function (text, btn) {
+    var S = window.SWSound;
+    if (!S) return;
+    if (btn && btn.classList.contains('on')) { S.stopReading(); return; }
+    var started = S.read(text, function () { if (btn) { btn.classList.remove('on'); btn.textContent = '▶ read'; } });
+    if (started === false) { toast('This browser cannot read aloud', 'warn'); return; }
+    if (btn && started.length) { btn.classList.add('on'); btn.textContent = '■ stop'; }
+    if (started.length && S.langOf(text) === 'fa' && !S.hasVoice('fa') && !this.faVoiceWarned) {
+      this.faVoiceWarned = true;
+      toast('No Persian voice on this device — the browser may read it badly', 'warn');
+    }
+  };
+
+  // the words of the message under the pointer (the text blocks of that Claude message)
+  P.speechAt = function (target) {
+    var g = target;
+    while (g && !(g.classList && g.classList.contains('amsg'))) g = g.parentNode;
+    if (!g) return '';
+    return Array.prototype.map.call(g.children, function (c) { return c._md || (c.classList.contains('md') ? c.textContent : ''); })
+      .filter(Boolean).join('\n\n');
   };
 
   // the files Claude wrote in this turn, with a link to review them in the Changes tab
@@ -1781,9 +1823,15 @@
     }, anchor);
   };
 
-  P.menu = function (x, y, extra) {
-    var self = this;
-    SW.showMenu(x, y, [
+  P.menu = function (x, y, extra, target) {
+    var self = this, Snd = window.SWSound, read = [];
+    if (Snd && window.speechSynthesis) {
+      var here = this.speechAt(target);
+      if (Snd.isReading()) read.push({ label: 'Stop reading', action: function () { Snd.stopReading(); } });
+      else if (here) read.push({ label: 'Read aloud', action: function () { self.readAloud(here); } });
+      else if (this.lastSpeech) read.push({ label: 'Read the last answer aloud', action: function () { self.readAloud(self.lastSpeech); } });
+    }
+    SW.showMenu(x, y, read.concat([
       { label: 'Rename…', action: function () { SW.renameTab(self); } },
       { label: 'New conversation', action: function () { self.newChat(); } },
       { label: 'Past conversations…', action: function () { self.historyMenu(); } },
@@ -1792,13 +1840,14 @@
       { label: 'Open in Claude’s text terminal (TUI)', action: function () { SW.claudeInTerminal(self.info.spec.project, self.sessionId || self.info.spec.resume || '', self.info.title.replace(/^Claude · /, '')); } },
       '-',
       { label: 'Close', k: 'Alt+W', action: function () { SW.closeTab(self); } }
-    ].concat(extra || SW.layoutItemsFor(self)));
+    ]).concat(extra || SW.layoutItemsFor(self)));
   };
 
   P.dispose = function () {
     this.closed = true;
     clearInterval(this.timer);
     if (this.voice) this.voice.destroy();
+    if (window.SWSound && window.SWSound.isReading() && this.msgs.querySelector('.rl-read.on')) window.SWSound.stopReading();
     if (this.ws) try { this.ws.close(); } catch (e) { /* ignore */ }
     this.el.remove();
     this.pane.remove();

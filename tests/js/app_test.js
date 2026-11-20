@@ -717,7 +717,9 @@ const tests = {
     const modal = q('.modal').pop();
     const rows = q('.snd-row', modal);
     assert.deepStrictEqual(rows.map((r) => r.querySelector('.snd-name').textContent),
-      ['Task done', 'Claude has a question', 'Claude needs permission', 'Plan ready', 'Stopped with an error', 'Voice language']);
+      ['Task done', 'Claude has a question', 'Claude needs permission', 'Plan ready', 'Stopped with an error', 'Voice language', 'Persian ▶ read']);
+    assert.deepStrictEqual(q('.snd-fa', modal)[0].querySelectorAll('option').map((o) => o.value), ['piper', 'edge', 'off']);
+    assert.strictEqual(q('.snd-fa', modal)[0].value, 'piper');
     const modes = q('.snd-mode', modal);
     assert.deepStrictEqual(modes[0].querySelectorAll('option').map((o) => o.textContent), ['Off', 'Sound', 'Voice']);
     assert.strictEqual(modes[0].value, 'voice');
@@ -732,12 +734,13 @@ const tests = {
     assert.ok(!localStorage.getItem('sw-sounds-2'), 'not saved yet');
     q('.snd-lang', modal)[0].value = 'fa';
     modes[0].value = 'off';
+    q('.snd-fa', modal)[0].value = 'edge';
     const keep = global.SW.S.settings;
     q('.btn.primary', modal).pop().click();
     await settle();
     global.SW.S.settings = keep;
     assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-sounds-2')),
-      { done: 'off', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa' });
+      { done: 'off', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa', faVoice: 'edge' });
     assert.ok(!('done' in calls.filter((c) => c.url === '/api/settings').pop().body), 'not sent to the server');
     document.body.querySelector('#modal-root').replaceChildren();
   },

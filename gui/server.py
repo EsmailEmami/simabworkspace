@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.46.0"
+VERSION = "1.47.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4860,6 +4860,153 @@ if changed:
 print(json.dumps({"tasks": tasks, "rev": rev}))
 """
 
+# Persian voice made on the server, for devices that have none (▶ read). One docker image with
+# Piper (offline, the text stays on the server) and edge-tts (Microsoft's voices: the text is sent
+# to Microsoft). A container keeps the model loaded and answers on a unix socket (no port);
+# the first call builds the image in the background and says "installing".
+TTS_IMAGE = "simab-tts:1"
+TTS_ENGINES = ("piper", "edge")
+TTS_EDGE_VOICES = ("fa-IR-DilaraNeural", "fa-IR-FaridNeural")
+TTS_MAX = 1500                    # characters per call: one piece of an answer (sounds.js cuts at 220)
+
+TTS_SERVE = r'''
+import asyncio, io, json, os, socketserver, wave
+from http.server import BaseHTTPRequestHandler
+from piper import PiperVoice
+SOCK = "/run/tts/tts.sock"
+piper = PiperVoice.load("/voices/fa.onnx")
+
+def speak_piper(text):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        piper.synthesize_wav(text, w)
+    return buf.getvalue(), "audio/wav"
+
+def speak_edge(text, voice):
+    import edge_tts
+    async def run():
+        out = b""
+        async for c in edge_tts.Communicate(text, voice).stream():
+            if c.get("type") == "audio":
+                out += c["data"]
+        return out
+    return asyncio.run(run()), "audio/mpeg"
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_POST(self):
+        try:
+            b = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            if b.get("engine") == "edge":
+                data, mime = speak_edge(b["text"], b.get("voice") or "fa-IR-DilaraNeural")
+            else:
+                data, mime = speak_piper(b["text"])
+            code = 200 if data else 502
+        except Exception as e:
+            data, mime, code = str(e)[:300].encode(), "text/plain", 500
+        self.send_response(code)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    def get_request(self):
+        req, _ = self.socket.accept()
+        return req, ("tts", 0)
+
+if os.path.exists(SOCK):
+    os.remove(SOCK)
+srv = S(SOCK, H)
+os.chmod(SOCK, 0o666)
+srv.serve_forever()
+'''
+
+TTS_DOCKERFILE = r'''FROM python:3.12-slim
+RUN pip install --no-cache-dir piper-tts==1.8.0 edge-tts==7.3.1
+RUN mkdir -p /voices /run/tts && python -c "import urllib.request as u; b='https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fa/fa_IR/gyro/medium/fa_IR-gyro-medium.onnx'; u.urlretrieve(b, '/voices/fa.onnx'); u.urlretrieve(b + '.json', '/voices/fa.onnx.json')"
+COPY serve.py /app/serve.py
+CMD ["python", "/app/serve.py"]
+'''
+
+TTS_PY = r"""
+import base64, http.client, json, os, socket, subprocess, sys, time
+IMAGE, NAME = sys.argv[1], "simab-tts"
+HOME = os.path.expanduser("~/.cache/simab-tts")
+RUN, BUILD = os.path.join(HOME, "run"), os.path.join(HOME, "build")
+SOCK = os.path.join(RUN, "tts.sock")
+req = json.loads(sys.stdin.read() or "{}")
+def out(o):
+    print(json.dumps(o)); sys.exit()
+def sh(args, timeout=60):
+    try:
+        return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+if sh(["docker", "version", "-f", "{{.Server.Version}}"], 20) is None:
+    out({"error": "the Persian voice needs docker on the server"})
+def running():
+    r = sh(["docker", "inspect", "-f", "{{.State.Running}} {{.Config.Image}}", NAME], 20)
+    return r is not None and r.returncode == 0 and r.stdout.decode().split() == ["true", IMAGE]
+def connect():
+    class C(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(90)
+            self.sock.connect(SOCK)
+    return C("tts")
+if not running():
+    img = sh(["docker", "image", "inspect", IMAGE], 20)
+    if img is None or img.returncode != 0:
+        log = os.path.join(HOME, "build.log")
+        busy = os.path.exists(log) and time.time() - os.path.getmtime(log) < 900
+        if not busy:
+            os.makedirs(BUILD, exist_ok=True)
+            with open(os.path.join(BUILD, "Dockerfile"), "w") as f: f.write(req.get("dockerfile", ""))
+            with open(os.path.join(BUILD, "serve.py"), "w") as f: f.write(req.get("serve", ""))
+            with open(log, "w") as lf:
+                subprocess.Popen(["docker", "build", "-t", IMAGE, BUILD], stdout=lf, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        out({"error": "installing", "installing": True})
+    os.makedirs(RUN, exist_ok=True)
+    sh(["docker", "rm", "-f", NAME], 30)
+    if os.path.exists(SOCK): os.remove(SOCK)
+    r = sh(["docker", "run", "-d", "--name", NAME, "--restart", "unless-stopped", "--memory", "1g",
+            "-v", RUN + ":/run/tts", IMAGE], 60)
+    if r is None or r.returncode != 0:
+        out({"error": "cannot start the Persian voice: " + (r.stdout.decode("utf-8", "replace").strip()[-200:] if r else "?")})
+    for _ in range(60):
+        if os.path.exists(SOCK): break
+        time.sleep(0.5)
+body = json.dumps({"engine": req.get("engine"), "text": req.get("text"), "voice": req.get("voice")}).encode()
+try:
+    c = connect()
+    c.request("POST", "/speak", body, {"Content-Type": "application/json"})
+    r = c.getresponse()
+    data = r.read()
+except OSError as e:
+    out({"error": "the Persian voice did not answer: " + str(e)})
+if r.status != 200:
+    out({"error": "the Persian voice failed: " + data.decode("utf-8", "replace")[:200]})
+out({"audio": base64.b64encode(data).decode(), "mime": r.getheader("Content-Type") or "audio/wav"})
+"""
+
+
+def clean_tts(b) -> dict:
+    """One piece to speak, checked here (the script on the server trusts it)."""
+    if not isinstance(b, dict) or b.get("engine") not in TTS_ENGINES:
+        raise ApiError(400, "unknown voice engine")
+    text = b.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError(400, "nothing to read")
+    if len(text) > TTS_MAX:
+        raise ApiError(400, "text too long")
+    voice = b.get("voice") if b.get("voice") in TTS_EDGE_VOICES else TTS_EDGE_VOICES[0]
+    return {"engine": b["engine"], "text": text.strip(), "voice": voice,
+            "dockerfile": TTS_DOCKERFILE, "serve": TTS_SERVE}
+
 TASK_OPS = ("list", "add", "update", "delete", "move", "order", "clear")
 TASK_ID_RE = re.compile(r"[0-9a-f]{12}")
 TASK_STATUSES = ("backlog", "todo", "doing", "done")
@@ -5739,6 +5886,21 @@ class App:
         if res.get("error"):
             raise ApiError(400, str(res["error"]))
         return {"tasks": res.get("tasks") or [], "rev": res.get("rev") or 0}
+
+    def tts(self, body: dict) -> dict:
+        """A Persian piece of an answer spoken on the server (see TTS_PY): {audio: base64, mime}."""
+        if not self.conf.configured:
+            raise ApiError(400, "the server is not configured")
+        req = clean_tts(body)
+        res = remote_python(self.conf, TTS_PY, [TTS_IMAGE], stdin=json.dumps(req).encode(), timeout=120,
+                            multiplex=bool(self.store.settings.get("sshMultiplex")))
+        if not isinstance(res, dict):
+            raise ApiError(502, "bad answer from the Persian voice")
+        if res.get("installing"):
+            return {"installing": True}
+        if res.get("error"):
+            raise ApiError(502, str(res["error"]))
+        return {"audio": res.get("audio") or "", "mime": res.get("mime") or "audio/wav"}
 
     # projects + open tabs shared with the other devices (see SHARE_PY) ------------------
     def device_id(self) -> str:
@@ -8417,6 +8579,8 @@ class Handler(BaseHTTPRequestHandler):
             return fs_upload_call(app, p, query, data)
         if route == ("POST", "fs") and len(parts) == 3:
             return fs_change_call(app, fs_project(app, parts[1]), parts[2], self._body())
+        if route == ("POST", "tts") and len(parts) == 1:
+            return app.tts(self._body())
         if route == ("GET", "tasks") and len(parts) == 1:
             return app.tasks()
         if route == ("POST", "tasks") and len(parts) == 1:

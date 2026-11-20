@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.47.0 2026-11-20  ▶ read: Persian made on the server when the device has no Persian voice
+#                       (Piper, text stays on the server; or Microsoft voices), Settings → Sounds
 #    1.46.0 2026-11-20  Git dialog: resolve merge conflicts in place like VS Code (Accept Current /
 #                       Incoming / Both / Edit per conflict, or a whole side), Abort merge;
 #                       projects and open tabs (chats, Files, Changes, Tasks) shared app ↔ web
@@ -340,7 +342,7 @@
 
 set -u -o pipefail
 
-VERSION="1.46.0"
+VERSION="1.47.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

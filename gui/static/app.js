@@ -1960,6 +1960,13 @@
     window.SWSound.play(kind, pr ? (pr.title || pr.name) : '');
   }
 
+  // ▶ read: Persian made on the server when this device has no Persian voice (sounds.js)
+  if (window.SWSound) window.SWSound.setServerVoice(function (engine, text) {
+    return api('POST', 'tts', { engine: engine, text: text }).then(function (r) {
+      return r.installing ? { installing: true } : { src: 'data:' + r.mime + ';base64,' + r.audio };
+    });
+  });
+
   // Settings → Sounds: one choice per kind, kept on this device only (saved with Save)
   function soundRows() {
     var SS = window.SWSound;
@@ -1973,6 +1980,15 @@
     }
     langSel.addEventListener('change', paintHint);
     paintHint();
+    var faSel = h('select', { class: 'inp snd-fa' }, SS.FA_VOICES.map(function (v) { return h('option', { value: v[0] }, v[1]); }));
+    faSel.value = cur.faVoice;
+    var faHint = h('small', { class: 'muted snd-hint' });
+    function paintFa() {
+      faHint.textContent = SS.hasVoice('fa') ? 'This device has a Persian voice: it is used.'
+        : ({ piper: 'Made on your server; the text stays there.', edge: 'More natural; the text is sent to Microsoft.' })[faSel.value] || '';
+    }
+    faSel.addEventListener('change', paintFa);
+    paintFa();
     var rows = SS.KINDS.map(function (k) {
       var sel = sels[k[0]] = h('select', { class: 'inp snd-mode' }, SS.MODES.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
       sel.value = cur[k[0]];
@@ -1985,9 +2001,11 @@
     var el = h('div', { class: 'snd' },
       h('div', { class: 'sec' }, 'Sounds'),
       h('div', { class: 'muted snd-help' }, 'On this device, when a chat you are not looking at finishes or needs you.'),
-      rows, h('div', { class: 'snd-row' }, h('span', { class: 'snd-name' }, 'Voice language'), langSel, hint));
+      rows, h('div', { class: 'snd-row' }, h('span', { class: 'snd-name' }, 'Voice language'), langSel, hint),
+      h('div', { class: 'snd-row' }, h('span', { class: 'snd-name', title: 'Reads answers when this device has no Persian voice' },
+        'Persian ▶ read'), faSel, faHint));
     return { el: el, save: function () {
-      var s = { lang: langSel.value };
+      var s = { lang: langSel.value, faVoice: faSel.value };
       Object.keys(sels).forEach(function (k) { s[k] = sels[k].value; });
       SS.set(s);
     } };

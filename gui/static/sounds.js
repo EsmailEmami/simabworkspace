@@ -14,7 +14,10 @@
   ];
   var MODES = [['off', 'Off'], ['chime', 'Sound'], ['voice', 'Voice']];
   var LANGS = [['en', 'English'], ['fa', 'Persian']];
-  var DEFAULTS = { done: 'voice', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'en' };
+  // ▶ read on a device with no Persian voice: the server makes it (Piper keeps the text on the
+  // server; Microsoft sounds more natural but gets the text)
+  var FA_VOICES = [['piper', 'Server'], ['edge', 'Microsoft'], ['off', 'None']];
+  var DEFAULTS = { done: 'voice', question: 'voice', permission: 'voice', plan: 'voice', error: 'voice', lang: 'en', faVoice: 'piper' };
   var KEY = 'sw-sounds-2';         // 1.43.1: voice by default — choices saved by 1.43.0 (tunes) are not kept
 
   // [frequency Hz, start s, length s] — each kind its own little tune
@@ -201,16 +204,29 @@
     reading = null;
     var ss = root.speechSynthesis;
     if (ss && ss.cancel) { try { ss.cancel(); } catch (e) { /* ignore */ } }
+    if (r && r.audio) { try { r.audio.pause(); } catch (e) { /* ignore */ } }
     if (r && r.onEnd) r.onEnd();
   }
 
-  // read(markdown, onEnd) → false when this browser cannot speak; otherwise the pieces read
-  // (each in its own language: a Persian answer with a few English words is read in Persian)
-  function read(md, onEnd) {
+  // app.js sets it: function (engine, text) → Promise of {src} (an audio data URL) or {installing}
+  var serverVoice = null;
+  function setServerVoice(fn) { serverVoice = fn; }
+  // the server engine Persian is read with here, '' = the device's own voice
+  function serverEngine() {
+    var eng = get().faVoice;
+    return serverVoice && eng !== 'off' && !hasVoice('fa') ? eng : '';
+  }
+
+  // read(markdown, onEnd, onNote) → false when this browser cannot speak; otherwise the pieces read
+  // (each in its own language: a Persian answer with a few English words is read in Persian).
+  // onNote('installing' | 'failed', message): the server voice is not there (yet) — the device's is used
+  function read(md, onEnd, onNote) {
     var ss = root.speechSynthesis, U = root.SpeechSynthesisUtterance;
     stopReading();
-    if (!ss || !U) return false;
     var list = chunks(plainText(md));
+    var eng = list.some(function (c) { return langOf(c) === 'fa'; }) ? serverEngine() : '';
+    if (eng && root.Audio) return readMixed(list, eng, onEnd, onNote);
+    if (!ss || !U) return false;
     if (!list.length) { if (onEnd) onEnd(); return []; }
     var me = { onEnd: onEnd };
     reading = me;
@@ -229,9 +245,65 @@
     return list;
   }
 
+  // one piece after another: Persian from the server (fetched ahead, one at a time), the rest
+  // with the device's voice
+  function readMixed(list, eng, onEnd, onNote) {
+    var ss = root.speechSynthesis, U = root.SpeechSynthesisUtterance;
+    var me = { onEnd: onEnd, audio: null, noServer: false, noted: false };
+    reading = me;
+    function note(kind, msg) {
+      if (me.noted) return;
+      me.noted = true;
+      if (onNote) onNote(kind, msg);
+    }
+    var jobs = list.map(function (c) { return { text: c, lang: langOf(c) }; });
+    var prev = Promise.resolve();
+    jobs.forEach(function (j) {
+      if (j.lang !== 'fa') return;
+      j.got = prev.then(function () { return reading === me && !me.noServer ? serverVoice(eng, j.text) : null; });
+      prev = j.got.catch(function () {});
+    });
+    var i = 0;
+    function next() {
+      if (reading !== me) return;
+      if (i >= jobs.length) { reading = null; if (onEnd) onEnd(); return; }
+      var j = jobs[i++];
+      if (!j.got) return device(j);
+      j.got.then(function (r) {
+        if (reading !== me) return;
+        if (r && r.src) return play(r.src);
+        if (r && r.installing) { me.noServer = true; note('installing'); }
+        device(j);
+      }, function (e) {
+        if (reading !== me) return;
+        me.noServer = true;
+        note('failed', (e && e.message) || String(e));
+        device(j);
+      });
+    }
+    function once(f) { var done = false; return function () { if (!done) { done = true; f(); } }; }
+    function play(src) {
+      var a = me.audio = new root.Audio(src), go = once(next);
+      a.onended = a.onerror = go;
+      try { var p = a.play(); if (p && p.catch) p.catch(go); } catch (e) { go(); }
+    }
+    function device(j) {
+      if (!ss || !U) return next();
+      var u = new U(j.text), v = voiceFor(j.lang), go = once(next);
+      u.lang = j.lang === 'fa' ? 'fa-IR' : 'en-US';
+      if (v) u.voice = v;
+      u.rate = 1;
+      u.onend = u.onerror = go;
+      try { ss.speak(u); } catch (e) { go(); }
+    }
+    next();
+    return list;
+  }
+
   root.SWSound = {
     read: read, stopReading: stopReading, isReading: function () { return !!reading; },
-    plainText: plainText, chunks: chunks, langOf: langOf, KINDS: KINDS, MODES: MODES, LANGS: LANGS, DEFAULTS: DEFAULTS, TUNES: TUNES,
+    plainText: plainText, chunks: chunks, langOf: langOf, KINDS: KINDS, MODES: MODES, LANGS: LANGS, FA_VOICES: FA_VOICES,
+    setServerVoice: setServerVoice, serverEngine: serverEngine, DEFAULTS: DEFAULTS, TUNES: TUNES,
     get: get, set: set, play: play, phrase: phrase, hasVoice: hasVoice, unlock: unlock,
     _reset: function () { ctx = null; nextFree = 0; } };
 })(typeof window !== 'undefined' ? window : this);

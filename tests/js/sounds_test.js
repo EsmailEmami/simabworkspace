@@ -41,8 +41,9 @@ test('defaults: an English voice for every kind; saved per device', () => {
   assert.deepStrictEqual(SS.KINDS.map((k) => k[0]), ['done', 'question', 'permission', 'plan', 'error']);
   SS.KINDS.forEach((k) => assert.strictEqual(s[k[0]], 'voice'));
   assert.strictEqual(s.lang, 'en');
+  assert.strictEqual(s.faVoice, 'piper', 'no Persian voice here: the server reads it, privately');
   SS.set({ done: 'chime', question: 'off', lang: 'fa', junk: 'x' });
-  assert.deepStrictEqual(JSON.parse(localStorage._d['sw-sounds-2']), { done: 'chime', question: 'off', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa' });
+  assert.deepStrictEqual(JSON.parse(localStorage._d['sw-sounds-2']), { done: 'chime', question: 'off', permission: 'voice', plan: 'voice', error: 'voice', lang: 'fa', faVoice: 'piper' });
   assert.strictEqual(SS.get().done, 'chime');
   localStorage._d['sw-sounds-2'] = '{broken';
   assert.strictEqual(SS.get().done, 'voice', 'a broken value falls back to the defaults');
@@ -152,3 +153,88 @@ test('read aloud: long text in short pieces; stop cancels and says it ended; no 
 
 console.log(results.join('\n'));
 if (results.some((r) => r.startsWith('FAIL'))) process.exitCode = 1;
+
+// ▶ read with no Persian voice on the device: Persian pieces come from the server, in order
+const tick = () => new Promise((r) => setTimeout(r, 0));
+(async () => {
+  const out = [];
+  async function atest(name, fn) {
+    try { await fn(); out.push('ok   ' + name); } catch (e) { out.push('FAIL ' + name); console.log(e.stack); process.exitCode = 1; }
+  }
+  const played = [];
+  global.Audio = class { constructor(src) { this.src = src; played.push(this); } play() { return Promise.resolve(); } pause() { this.paused = true; } };
+  let asked = [];
+  SS.setServerVoice((engine, text) => { asked.push([engine, text]); return Promise.resolve({ src: 'data:audio/wav;base64,' + text.length }); });
+  const md = 'این جواب فارسی است. ' + '\n\nThe build is green.\n\nیک جملهٔ دیگر.';
+
+  await atest('no Persian voice: Persian from the server (one at a time, in order), English on the device', async () => {
+    voiceList = [{ lang: 'en-US', name: 'en' }];
+    spoken = [];
+    SS.set({ faVoice: 'piper' });
+    assert.strictEqual(SS.serverEngine(), 'piper');
+    let ended = 0;
+    const pieces = SS.read(md, () => ended++);
+    assert.strictEqual(pieces.length, 3);
+    await tick(); await tick();
+    assert.strictEqual(played.length, 1);
+    assert.deepStrictEqual(asked.map((a) => a[0]), ['piper', 'piper']);
+    assert.strictEqual(spoken.length, 0, 'English waits its turn');
+    played[0].onended();
+    await tick();
+    assert.strictEqual(spoken.length, 1);
+    assert.match(spoken[0].text, /build is green/);
+    spoken[0].onend();
+    await tick(); await tick();
+    assert.strictEqual(played.length, 2);
+    played[1].onended(); played[1].onerror();             // one end only
+    await tick();
+    assert.strictEqual(ended, 1);
+    assert.ok(!SS.isReading());
+  });
+
+  await atest('stop pauses the server audio; a device with a Persian voice or "None" does not ask the server', async () => {
+    played.length = 0; asked = [];
+    let ended = 0;
+    SS.read(md, () => ended++);
+    await tick(); await tick();
+    SS.stopReading();
+    assert.ok(played[0].paused);
+    assert.strictEqual(ended, 1);
+    played[0].onended();
+    await tick();
+    assert.strictEqual(played.length, 1, 'nothing after stop');
+    SS.set({ faVoice: 'off' });
+    assert.strictEqual(SS.serverEngine(), '');
+    voiceList = [{ lang: 'fa-IR', name: 'fa' }];
+    SS.set({ faVoice: 'edge' });
+    assert.strictEqual(SS.serverEngine(), '');
+    voiceList = [];
+    assert.strictEqual(SS.serverEngine(), 'edge');
+    SS.stopReading();
+  });
+
+  await atest('server installing or failing: told once, the device voice reads it', async () => {
+    voiceList = [];
+    spoken = []; played.length = 0; asked = [];
+    SS.setServerVoice((engine, text) => { asked.push(text); return Promise.resolve({ installing: true }); });
+    const notes = [];
+    SS.read(md, null, (k) => notes.push(k));
+    await tick(); await tick();
+    assert.deepStrictEqual(notes, ['installing']);
+    assert.strictEqual(spoken.length, 1);
+    assert.strictEqual(spoken[0].lang, 'fa-IR');
+    spoken[0].onend(); await tick(); spoken[1].onend(); await tick(); await tick();
+    assert.strictEqual(spoken.length, 3);
+    assert.strictEqual(asked.length, 1, 'no more asking once it said installing');
+    SS.stopReading();
+    spoken = [];
+    SS.setServerVoice(() => Promise.reject(new Error('no docker')));
+    const notes2 = [];
+    SS.read(md, null, (k, m) => notes2.push(k + ':' + m));
+    await tick(); await tick();
+    assert.deepStrictEqual(notes2, ['failed:no docker']);
+    assert.strictEqual(spoken.length, 1);
+    SS.stopReading();
+  });
+  console.log(out.join('\n'));
+})();

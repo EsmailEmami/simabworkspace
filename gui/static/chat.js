@@ -1254,10 +1254,14 @@
     var S = window.SWSound;
     if (!S) return;
     if (btn && btn.classList.contains('on')) { S.stopReading(); return; }
-    var started = S.read(text, function () { if (btn) { btn.classList.remove('on'); btn.textContent = '▶ read'; } });
+    var started = S.read(text, function () { if (btn) { btn.classList.remove('on'); btn.textContent = '▶ read'; } },
+      function (kind, msg) {
+        toast(kind === 'installing' ? 'Installing the Persian voice on the server (a few minutes) — this device\'s voice for now'
+          : 'Persian voice on the server: ' + msg, 'warn');
+      });
     if (started === false) { toast('This browser cannot read aloud', 'warn'); return; }
     if (btn && started.length) { btn.classList.add('on'); btn.textContent = '■ stop'; }
-    if (started.length && S.langOf(text) === 'fa' && !S.hasVoice('fa') && !this.faVoiceWarned) {
+    if (started.length && S.langOf(text) === 'fa' && !S.hasVoice('fa') && !S.serverEngine() && !this.faVoiceWarned) {
       this.faVoiceWarned = true;
       toast('No Persian voice on this device — the browser may read it badly', 'warn');
     }

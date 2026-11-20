@@ -34,6 +34,7 @@ const calls = [];
 const gitStatus = { repo: true, where: 'local', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 2, conflicts: 1, last: 'abc first',
   files: [{ path: 'api/main.go', x: ' ', y: 'M', conflict: false, untracked: false }, { path: 'web/x.ts', x: 'U', y: 'U', conflict: true, untracked: false }] };
 let seq = 0;
+const apiStatus = () => Object.assign({}, gitStatus, { path: 'cheshmeh-api-service', files: [], conflicts: 0, fetched: Date.now() / 1000 - 180 });
 const state = {
   defaultIgnores: ['node_modules', 'dist'],
   version: '9', wsl: false, lastTabs: [], sessions: [],
@@ -94,7 +95,9 @@ global.fetch = (url, opts) => {
   else if (url === '/api/projects') res = { projects: state.projects };
   else if (url.startsWith('/api/status')) res = { ssh: 'ok', daemon: true };
   else if (url.startsWith('/api/git/cheshmeh/repos')) res = { where: 'local', gitSync: true, repos: ['cheshmeh-api-service', 'cheshmeh-web-app'],
-    statuses: { 'cheshmeh-api-service': Object.assign({}, gitStatus, { files: [] }), 'cheshmeh-web-app': gitStatus } };
+    statuses: { 'cheshmeh-api-service': apiStatus(), 'cheshmeh-web-app': gitStatus } };
+  else if (url.startsWith('/api/git/cheshmeh/status?repo=cheshmeh-api-service')) res = apiStatus();
+  else if (/^\/api\/git\/cheshmeh\/(pull|push|fetch)$/.test(url)) res = { output: '', status: Object.assign({}, gitStatus, { files: [], conflicts: 0, behind: 0, ahead: 0, fetched: Date.now() / 1000 }) };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
   else if (url.startsWith('/api/title/')) res = { title: body.title };
@@ -288,11 +291,13 @@ const tests = {
     const modal = document.body.querySelector('.modal');
     assert.ok(modal, 'git dialog open');
     const repoBtns = q('.grepo', modal);
-    assert.deepStrictEqual(repoBtns.map((b) => b.textContent), ['cheshmeh-api-service', 'cheshmeh-web-app2']);
-    assert.ok(repoBtns[1].classList.contains('on'), 'opens the repository that has changes');
+    assert.deepStrictEqual(repoBtns.map((b) => b.querySelector('.grepo-name').textContent), ['cheshmeh-api-service', 'cheshmeh-web-app']);
+    assert.ok(repoBtns[1].classList.contains('on'), 'opens the repository that needs the most attention');
+    assert.ok(repoBtns[1].classList.contains('s-err'), 'conflicts are red in the list');
     assert.strictEqual(q('.gfile', modal).length, 2);
     assert.match(q('.gbanner', modal)[0].textContent, /conflicts/);
     assert.match(q('.ghead', modal)[0].textContent, /↓2/);
+    assert.ok(!q('.gsync-btn', modal).length, 'no Pull button while there are conflicts');
     q('.gfile', modal)[0].dispatch('click');
     await settle();
     assert.match(q('.gdiff', modal)[0].textContent, /\+b/);
@@ -307,6 +312,44 @@ const tests = {
     assert.deepStrictEqual(post.body, { repo: 'cheshmeh-web-app', where: 'local', message: 'fix api', files: ['api/main.go'] });
     assert.ok(calls.some((c) => c.url.indexOf('/diff?repo=cheshmeh-web-app&where=local&path=') > 0), 'diff asks the right repository');
     assert.strictEqual(q('.gfile', modal).length, 1);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'git panel: the repository list says what each one needs; pull, push and fetch in one click'() {
+    q('.act').find((b) => b.textContent.indexOf('Git') === 0).click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.ok(modal.classList.contains('gitdlg'));
+    let rows = q('.grepo', modal);
+    // the clean repository is behind: a purple dot, ↓2, its branch
+    assert.ok(rows[0].classList.contains('s-pull'));
+    assert.deepStrictEqual(q('.gb', rows[0]).map((b) => b.textContent), ['↓2']);
+    assert.match(rows[0].querySelector('.grepo-br').textContent, /main/);
+    assert.deepStrictEqual(q('.gb', rows[1]).map((b) => b.textContent), ['!1', '2', '↓2']);
+    // the one with conflicts is left out of "Pull all"
+    const pullAll = q('.gall-pull', modal)[0];
+    assert.strictEqual(pullAll.textContent, '↓ Pull 1 repo');
+    assert.ok(!q('.gall-push', modal).length, 'nothing to push');
+    // open the clean one: the header says it plainly and offers the one button that fixes it
+    rows[0].click(); await settle();
+    const head = q('.ghead', modal)[0];
+    assert.ok(head.classList.contains('s-pull'));
+    assert.match(head.textContent, /↓2 to pull — 2 new commits on origin\/main/);
+    assert.match(q('.gfetched', modal)[0].textContent, /^checked 3m ago$/);
+    const sync = q('.gsync-btn', modal)[0];
+    assert.strictEqual(sync.textContent, 'Pull ↓2');
+    sync.click(); await settle();
+    const pull = calls.filter((c) => c.url === '/api/git/cheshmeh/pull').pop();
+    assert.strictEqual(pull.body.repo, 'cheshmeh-api-service');
+    assert.match(q('.ghead', modal)[0].textContent, /✓ Up to date with origin\/main/);
+    assert.ok(!q('.gsync-btn', modal).length, 'nothing left to do');
+    assert.deepStrictEqual(q('.gpill', q('.grepo', modal)[0]).map((b) => b.textContent), ['✓']);
+    // fetch all asks every repository
+    const before = calls.length;
+    q('.gfetch-all', modal)[0].click(); await settle();
+    assert.deepStrictEqual(calls.slice(before).filter((c) => c.url === '/api/git/cheshmeh/fetch').map((c) => c.body.repo).sort(),
+      ['cheshmeh-api-service', 'cheshmeh-web-app']);
+    assert.ok(q('.toast').some((t) => /Fetched 2 repos/.test(t.textContent)));
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

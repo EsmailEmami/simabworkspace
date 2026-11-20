@@ -2502,36 +2502,113 @@
     openModal({ title: 'Skills — ' + p.name, size: 'wide', body: body });
   }
 
+  // What a repository needs, in one place: the rail, the header and the sidebar all speak the same words.
+  // cls: ok | push | pull | both | local | err ; act: the one button that fixes it (pull / push / sync)
+  function gitState(st) {
+    if (!st || !st.repo) return { cls: 'none', text: st && st.error ? st.error : 'Not a git repository', short: '' };
+    var up = st.upstream, a = st.ahead || 0, b = st.behind || 0;
+    var r = !up ? { cls: 'local', text: 'Branch not on the remote yet', short: 'not published', act: { a: 'push', label: 'Publish branch' } }
+      : a && b ? { cls: 'both', text: '↓' + b + ' to pull · ↑' + a + ' to push', short: '', act: { a: 'sync', label: 'Pull & push' } }
+      : b ? { cls: 'pull', text: '↓' + b + ' to pull — ' + plural(b, 'new commit') + ' on ' + up, short: '', act: { a: 'pull', label: 'Pull ↓' + b } }
+      : a ? { cls: 'push', text: '↑' + a + ' to push — ' + plural(a, 'commit') + ' not on ' + up + ' yet', short: '', act: { a: 'push', label: 'Push ↑' + a } }
+      : { cls: 'ok', text: 'Up to date with ' + up, short: '' };
+    if (st.conflicts) { r.cls = 'err'; r.act = null; }
+    return r;
+  }
+
+  function gitPills(st) {
+    if (!st || !st.repo) return [h('span', { class: 'gpill none' }, '—')];
+    var out = [], n = (st.files || []).length;
+    if (st.conflicts) out.push(h('span', { class: 'gb conflict', title: plural(st.conflicts, 'conflict') }, '!' + st.conflicts));
+    if (n) out.push(h('span', { class: 'gb changes', title: plural(n, 'file') + ' not committed' }, String(n)));
+    if (st.ahead) out.push(h('span', { class: 'gb ahead', title: plural(st.ahead, 'commit') + ' to push' }, '↑' + st.ahead));
+    if (st.behind) out.push(h('span', { class: 'gb behind', title: plural(st.behind, 'commit') + ' to pull' }, '↓' + st.behind));
+    if (!st.upstream) out.push(h('span', { class: 'gpill local', title: 'This branch is not on the remote yet — Publish branch sends it' }, 'local'));
+    if (!out.length) out.push(h('span', { class: 'gpill ok', title: 'Nothing to commit, push or pull' }, '✓'));
+    return out;
+  }
+
   function gitDialog(p) {
     var st = null, picked = new Set(), current = null, busy = false;
-    var repos = [], repo = '', where = null, counts = {};
-    var switcher = h('div', { class: 'grepos hidden' });
-    var head = h('div', { class: 'ghead' }, h('span', { class: 'muted' }, 'Looking for repositories…'));
+    var repos = [], repo = '', where = null, stats = {}, railBusy = {};
+    var NAME = function (r) { return r ? r.split('/').pop() : p.name; };
     function qs() { return '?repo=' + encodeURIComponent(repo) + '&where=' + encodeURIComponent(where || ''); }
-    function gpost(a, body) { return api('POST', 'git/' + encodeURIComponent(p.name) + '/' + a, Object.assign({ repo: repo, where: where }, body || {})); }
-    function renderSwitcher() {
-      switcher.classList.toggle('hidden', repos.length < 2);
-      switcher.replaceChildren.apply(switcher, repos.map(function (r) {
-        var n = counts[r];
-        return h('button', { class: 'grepo' + (r === repo ? ' on' : ''), title: r || p.name, onclick: function () {
-          if (r === repo || busy) return;
-          repo = r; current = null; st = null; histData = null; histSel = '';
-          diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, 'Select a file to see its changes.'));
-          renderSwitcher();
-          load();
-        } }, (r || p.name).split('/').pop(), n ? h('span', { class: 'gcount' }, String(n)) : null);
-      }));
+    function gpost(a, body, r) {
+      return api('POST', 'git/' + encodeURIComponent(p.name) + '/' + a, Object.assign({ repo: r === undefined ? repo : r, where: where }, body || {}));
     }
+    var empty = function (t) { return h('div', { class: 'gempty-note muted' }, t); };
+
+    // ---- left rail: every repository with what it needs (only when there are several)
+    var railList = h('div', { class: 'grail-list' });
+    var railFoot = h('div', { class: 'grail-foot' });
+    var fetchAllBtn = h('button', { class: 'icon-btn gfetch-all', title: 'Fetch all — ask every remote for new commits', onclick: function () { runAll('fetch'); } }, '⟳');
+    var rail = h('div', { class: 'grail hidden' },
+      h('div', { class: 'grail-head' }, h('span', { class: 'grail-title' }, 'Repositories'), h('span', { class: 'grail-n' }), fetchAllBtn),
+      railList, railFoot);
+    function pick(r) {
+      if (r === repo || busy) return;
+      repo = r; current = null; st = null; histData = null; histSel = '';
+      diff.replaceChildren(empty('Select a file to see its changes.'));
+      renderRail();
+      if (stats[r] && stats[r].repo) apply(stats[r]);
+      load();
+    }
+    function renderRail() {
+      rail.classList.toggle('hidden', repos.length < 2);
+      if (repos.length < 2) return;
+      rail.querySelector('.grail-n').textContent = String(repos.length);
+      railList.replaceChildren.apply(railList, repos.map(function (r) {
+        var s = stats[r], gs = gitState(s);
+        return h('button', { class: 'grepo s-' + gs.cls + (r === repo ? ' on' : '') + (railBusy[r] ? ' busy' : ''), title: (r || p.name) + '\n' + gs.text, onclick: function () { pick(r); } },
+          h('span', { class: 'gdot' }),
+          h('span', { class: 'grepo-main' },
+            h('span', { class: 'grepo-name' }, NAME(r)),
+            h('span', { class: 'grepo-br mono' }, s && s.repo ? '⎇ ' + (s.branch || '(no branch)') : railBusy[r] ? '…' : '')),
+          h('span', { class: 'grepo-pills' }, railBusy[r] ? h('span', { class: 'spin' }) : gitPills(s)));
+      }));
+      var pulls = repos.filter(function (r) { var s = stats[r]; return s && s.repo && s.upstream && s.behind && !s.conflicts; });
+      var pushes = repos.filter(function (r) { var s = stats[r]; return s && s.repo && s.ahead && s.upstream && !s.conflicts; });
+      var anyBusy = Object.keys(railBusy).some(function (k) { return railBusy[k]; });
+      railFoot.replaceChildren.apply(railFoot, [
+        pulls.length ? h('button', { class: 'btn sm gall-pull', disabled: busy || anyBusy, title: pulls.map(NAME).join('\n'), onclick: function () { runAll('pull', pulls); } }, '↓ Pull ' + plural(pulls.length, 'repo')) : null,
+        pushes.length ? h('button', { class: 'btn sm gall-push', disabled: busy || anyBusy, title: pushes.map(NAME).join('\n'), onclick: function () { runAll('push', pushes); } }, '↑ Push ' + plural(pushes.length, 'repo')) : null
+      ].filter(Boolean));
+      railFoot.classList.toggle('hidden', !pulls.length && !pushes.length);
+      fetchAllBtn.disabled = busy || anyBusy;
+    }
+    // fetch: all at once; pull/push: one after another, so each error is clear
+    function runAll(a, list) {
+      list = list || repos.slice();
+      var errs = [], done = 0;
+      list.forEach(function (r) { railBusy[r] = true; });
+      renderRail();
+      function one(r) {
+        return gpost(a, null, r).then(function (d) {
+          stats[r] = d.status; done++;
+          if (d.output === 'conflicts') errs.push(NAME(r) + ': conflicts');
+        }).catch(function (e) { errs.push(NAME(r) + ': ' + e.message); }).then(function () {
+          railBusy[r] = false;
+          if (r === repo && stats[r]) apply(stats[r]); else renderRail();
+        });
+      }
+      var run = a === 'fetch' ? Promise.all(list.map(one))
+        : list.reduce(function (pr, r) { return pr.then(function () { return one(r); }); }, Promise.resolve());
+      run.then(function () {
+        refreshGit(p.name);
+        var verb = a === 'push' ? 'Pushed' : a === 'pull' ? 'Pulled' : 'Fetched';
+        if (errs.length) toast(verb + ' ' + done + ' of ' + list.length + '\n' + errs.join('\n'), 'err', { timeout: 12000 });
+        else toast(verb + ' ' + plural(done, 'repo'), 'ok');
+      });
+    }
+
+    // ---- header card: branch, what this repository needs, the one button that does it
+    var head = h('div', { class: 'ghead' }, h('span', { class: 'muted' }, 'Looking for repositories…'));
     var banner = h('div', { class: 'gbanner hidden' });
     var list = h('div', { class: 'glist' });
-    var diff = h('div', { class: 'gright' }, h('div', { class: 'muted', style: 'padding:12px' }, 'Select a file to see its changes.'));
+    var diff = h('div', { class: 'gright' }, empty('Select a file to see its changes.'));
     var msg = h('textarea', { class: 'inp', rows: 2, dir: 'auto', placeholder: 'Commit message' });
     var commitBtn = h('button', { class: 'btn primary', onclick: commit }, 'Commit');
-    var btns = {};
-    ['fetch', 'pull', 'push'].forEach(function (a) {
-      btns[a] = h('button', { class: 'btn', onclick: function () { action(a); } }, a[0].toUpperCase() + a.slice(1));
-    });
-    btns.discard = h('button', { class: 'btn danger', disabled: true, title: 'Discard selected changes (cannot be undone)', onclick: function () {
+    var discardBtn = h('button', { class: 'btn danger', disabled: true, title: 'Discard selected changes (cannot be undone)', onclick: function () {
       var sel = st ? st.files.filter(function (f) { return picked.has(f.path); }) : [];
       if (sel.length) discard(sel);
     } }, 'Discard…');
@@ -2561,20 +2638,19 @@
       synced: ['✓', 'On both sides'], local: ['•', 'This branch is not on the remote yet — Push publishes it'] };
     function loadHistory() {
       if (!st || !st.repo) return;
-      if (!histData) hist.replaceChildren(h('div', { class: 'muted', style: 'padding:10px' }, 'Loading history…'));
+      if (!histData) hist.replaceChildren(empty('Loading history…'));
       api('GET', 'git/' + encodeURIComponent(p.name) + '/log' + qs()).then(function (d) {
         histData = d;
         renderHistory();
-      }).catch(function (e) { hist.replaceChildren(h('div', { class: 'muted', style: 'padding:10px' }, e.message)); });
+      }).catch(function (e) { hist.replaceChildren(empty(e.message)); });
     }
     function renderHistory() {
       var d = histData;
       if (!d) return;
-      var sum = !d.upstream ? h('div', { class: 'hsum local' }, 'Not on the remote yet — Push to publish this branch.')
+      var sum = !d.upstream ? h('div', { class: 'hsum local' }, 'Not on the remote yet — Publish branch sends it.')
         : d.ahead || d.behind ? h('div', { class: 'hsum' + (d.behind ? ' pull' : ' push') },
-          [d.ahead ? '↑ ' + plural(d.ahead, 'commit') + ' to push' : '', d.behind ? '↓ ' + plural(d.behind, 'commit') + ' to pull' : ''].filter(Boolean).join(' · '),
-          h('small', null, ' (as of the last fetch)'))
-          : h('div', { class: 'hsum ok' }, '✓ In sync with ' + d.upstream, h('small', null, ' (as of the last fetch)'));
+          [d.ahead ? '↑ ' + plural(d.ahead, 'commit') + ' to push' : '', d.behind ? '↓ ' + plural(d.behind, 'commit') + ' to pull' : ''].filter(Boolean).join(' · '))
+          : h('div', { class: 'hsum ok' }, '✓ In sync with ' + d.upstream);
       var rows = d.commits.map(function (c) {
         var mk = HSTATE[c.state] || ['', ''];
         return h('div', { class: 'hrow ' + c.state + (c.hash === histSel ? ' sel' : ''), title: mk[1] + '\n' + c.short + ' · ' + c.author, onclick: function () { showCommit(c); } },
@@ -2584,25 +2660,24 @@
             h('span', { class: 'hmeta' }, h('span', { class: 'mono' }, c.short), ' · ' + c.author + ' · ' + agoShort(c.date),
               c.refs.filter(function (r) { return r !== 'HEAD'; }).map(function (r) { return h('span', { class: 'href mono' }, r.replace(/^HEAD -> /, '')); }))));
       });
-      if (!rows.length) rows.push(h('div', { class: 'muted', style: 'padding:10px' }, 'No commits yet.'));
+      if (!rows.length) rows.push(empty('No commits yet.'));
       hist.replaceChildren.apply(hist, [sum].concat(rows));
     }
     function showCommit(c) {
       histSel = c.hash;
       renderHistory();
-      diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, 'Loading…'));
+      diff.replaceChildren(empty('Loading…'));
       api('GET', 'git/' + encodeURIComponent(p.name) + '/show' + qs() + '&hash=' + encodeURIComponent(c.hash)).then(function (d) {
         if (histSel !== c.hash) return;
         diff.replaceChildren(h('div', { class: 'gdhead' }, h('span', { dir: 'auto' }, c.subject), h('span', { class: 'mono muted' }, c.short)), diffEl(d.diff));
-      }).catch(function (e) { diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, e.message)); });
+      }).catch(function (e) { diff.replaceChildren(empty(e.message)); });
     }
     function untrack(files) {
-      setBusy(true, 'untracking');
+      setBusy(true, 'Untracking');
       gpost('untrack', { files: files.map(function (f) { return f.path; }) }).then(function (d) {
-        setBusy(false, 'untrack');
-        apply(d.status);
+        setBusy(false); apply(d.status);
         toast('Git no longer tracks ' + (files.length === 1 ? files[0].path : plural(files.length, 'file')) + ' — commit to finish (the files stay on disk)', 'ok', { timeout: 7000 });
-      }).catch(function (e) { setBusy(false, 'untrack'); fail(e); });
+      }).catch(function (e) { setBusy(false); fail(e); });
     }
 
     function discard(files) {
@@ -2612,39 +2687,51 @@
         : 'Discard changes to ' + label + '? The ' + (files.length === 1 ? 'file goes' : 'files go') + ' back to the last commit. This cannot be undone.';
       confirmDlg(msg2, isDel ? 'Delete' : 'Discard', true).then(function (ok) {
         if (!ok) return;
-        setBusy(true, 'discarding');
+        setBusy(true, 'Discarding');
         gpost('discard', { files: files.map(function (f) { return f.path; }) }).then(function (d) {
-          setBusy(false, 'discard'); apply(d.status);
+          setBusy(false); apply(d.status);
           toast('Discarded ' + label, 'ok');
-        }).catch(function (e) { setBusy(false, 'discard'); fail(e); });
+        }).catch(function (e) { setBusy(false); fail(e); });
       });
     }
 
     var md = openModal({
-      title: 'Git — ' + p.name, size: 'wide', onclose: function () { refreshGit(p.name); },
-      body: [switcher, head, banner, h('div', { class: 'ggrid' }, h('div', { class: 'gleft' }, gtabs, changesHead, list, hist), diff)],
-      foot: [btns.fetch, btns.pull, btns.push, btns.discard, h('span', { class: 'grow' }), h('div', { class: 'gcommit' }, msg), commitBtn]
+      title: 'Git — ' + pTitle(p), size: 'wide gitdlg', onclose: function () { refreshGit(p.name); },
+      body: [h('div', { class: 'gwrap' }, rail,
+        h('div', { class: 'gmain' }, head, banner, h('div', { class: 'ggrid' }, h('div', { class: 'gleft' }, gtabs, changesHead, list, hist), diff)))],
+      foot: [discardBtn, h('span', { class: 'grow' }), h('div', { class: 'gcommit' }, msg), commitBtn]
     });
 
+    var working = '';
     function setBusy(b, what) {
       busy = b;
-      Object.keys(btns).forEach(function (k) { btns[k].disabled = b; });
+      working = b && what ? what : '';
       commitBtn.disabled = b || !st || !st.files.length || !picked.size;
-      btns.discard.disabled = b || !picked.size;
-      if (what) head.lastChild.textContent = b ? what + '…' : '';
+      discardBtn.disabled = b || !picked.size;
+      if (st && st.repo) renderHead();
+      renderRail();
     }
 
     function renderHead() {
-      var ab = !st.upstream ? '' : [st.ahead ? '↑' + st.ahead + ' to push' : '', st.behind ? '↓' + st.behind + ' to pull' : ''].filter(Boolean).join(' · ');
+      var gs = gitState(st);
+      var n = st.files.length;
+      var main = working ? h('span', { class: 'gstate busy' }, h('span', { class: 'spin' }), working + '…')
+        : h('span', { class: 'gstate s-' + gs.cls }, gs.cls === 'ok' ? '✓ ' + gs.text : gs.text);
+      var fetched = st.fetched ? 'checked ' + agoShort(st.fetched) + ' ago' : 'not checked yet';
+      head.className = 'ghead s-' + gs.cls;
       head.replaceChildren(
-        h('button', { class: 'gbranch mono', title: 'Switch branch', onclick: function () {
-          branchPicker(p, repo, where, function (ns) { if (ns) apply(ns); });
-        } }, '⎇ ' + (st.branch || '(no branch)') + ' ▾'),
-        st.upstream ? h('span', { class: 'muted mono' }, ' → ' + st.upstream) : h('span', { class: 'muted' }, ' · no upstream'),
-        ab ? h('span', { class: 'mono gab', title: 'As of the last fetch' }, ab) : st.upstream ? h('span', { class: 'gsync', title: 'As of the last fetch' }, '✓ in sync') : null,
-        h('span', { class: 'muted' }, ' · runs ' + (st.where === 'local' ? 'on this machine' : 'on the server')),
-        st.last ? h('span', { class: 'muted mono glast', title: 'Last commit' }, st.last) : null,
-        h('span', { class: 'muted gwork' }));
+        h('div', { class: 'grow1' },
+          h('button', { class: 'gbranch mono', title: 'Switch branch', disabled: busy, onclick: function () {
+            branchPicker(p, repo, where, function (ns) { if (ns) apply(ns); });
+          } }, '⎇ ' + (st.branch || '(no branch)') + ' ▾'),
+          st.upstream ? h('span', { class: 'muted mono gup' }, '→ ' + st.upstream) : null,
+          h('span', { class: 'grow' }),
+          h('button', { class: 'btn sm gfetch', disabled: busy, title: 'Ask the remote for new commits (git fetch)\nRuns ' + (st.where === 'local' ? 'on this machine' : 'on the server'), onclick: function () { action('fetch'); } }, '⟳ Fetch'),
+          gs.act ? h('button', { class: 'btn sm primary gsync-btn', disabled: busy, onclick: function () { action(gs.act.a); } }, gs.act.label) : null),
+        h('div', { class: 'grow2' }, main,
+          n ? h('span', { class: 'gwork' }, ' · ' + plural(n, 'file') + ' not committed') : null,
+          h('span', { class: 'grow' }),
+          h('span', { class: 'gfetched', title: 'Push/pull counts are as of the last fetch' }, fetched)));
       var problems = [];
       if (p.sync && p.sync.git === false) {
         problems.push(h('div', null, 'The .git folder of this project is not synced, so the server and this machine can disagree. ',
@@ -2667,7 +2754,7 @@
 
     function renderList() {
       if (!st.files.length) {
-        list.replaceChildren(h('div', { class: 'muted', style: 'padding:10px' }, 'Nothing to commit — working tree clean.'));
+        list.replaceChildren(empty('Nothing to commit — working tree clean.'));
       } else {
         list.replaceChildren.apply(list, st.files.map(function (f) {
           var code = gitCode(f);
@@ -2676,6 +2763,7 @@
             allBox.checked = picked.size === st.files.length;
             commitBtn.textContent = picked.size === st.files.length ? 'Commit' : 'Commit ' + picked.size;
             commitBtn.disabled = busy || !picked.size;
+            discardBtn.disabled = busy || !picked.size;
           } });
           var name = f.path.split('/').pop(), dir = f.path.slice(0, f.path.length - name.length);
           return h('div', { class: 'gfile' + (current === f.path ? ' sel' : '') + (f.conflict ? ' conflict' : ''), title: (GIT_LABEL[code] || code) + ': ' + f.path, onclick: function () { showDiff(f); },
@@ -2692,42 +2780,44 @@
     function showDiff(f) {
       current = f.path;
       renderList();
-      diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, 'Loading…'));
+      diff.replaceChildren(empty('Loading…'));
       api('GET', 'git/' + encodeURIComponent(p.name) + '/diff' + qs() + '&path=' + encodeURIComponent(f.path) + '&untracked=' + (f.untracked ? 1 : 0))
         .then(function (d) {
           if (current !== f.path) return;
           diff.replaceChildren(h('div', { class: 'gdhead mono' }, f.path,
             h('button', { class: 'btn sm', onclick: function () { openCode(p); } }, 'Open in VS Code')), diffEl(d.diff || '(no textual changes)'));
-        }).catch(function (e) { diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, e.message)); });
+        }).catch(function (e) { diff.replaceChildren(empty(e.message)); });
     }
 
     function apply(newSt) {
       var had = st ? new Set(st.files.map(function (f) { return f.path; })) : null;
       st = newSt;
+      stats[repo] = st;
       if (!st.repo) {
+        head.className = 'ghead';
         head.replaceChildren(h('span', { class: 'muted' }, st.error || 'Not a git repository.'));
-        list.replaceChildren(); setBusy(true); return;
+        list.replaceChildren(); renderRail(); setBusy(true); return;
       }
-      counts[repo] = st.files.length;
       changesTab.textContent = st.files.length ? 'Changes · ' + st.files.length : 'Changes';
       if (view === 'history') loadHistory();
-      renderSwitcher();
       // keep the user's selection; new files start selected
       var next = new Set();
       st.files.forEach(function (f) { if (!had || !had.has(f.path) || picked.has(f.path)) next.add(f.path); });
       picked = next;
       allBox.checked = picked.size === st.files.length;
-      btns.discard.disabled = busy || !picked.size;
+      discardBtn.disabled = busy || !picked.size;
       renderHead();
       renderList();
+      renderRail();
       if (current && !st.files.some(function (f) { return f.path === current; })) {
         current = null;
-        diff.replaceChildren(h('div', { class: 'muted', style: 'padding:12px' }, 'Select a file to see its changes.'));
+        diff.replaceChildren(empty('Select a file to see its changes.'));
       }
     }
 
     function load() {
-      return api('GET', 'git/' + encodeURIComponent(p.name) + '/status' + qs()).then(apply)
+      var r = repo;
+      return api('GET', 'git/' + encodeURIComponent(p.name) + '/status' + qs()).then(function (d) { if (r === repo) apply(d); })
         .catch(function (e) { head.replaceChildren(h('span', { class: 'muted' }, e.message)); });
     }
 
@@ -2745,36 +2835,53 @@
           setBusy(true);
           return;
         }
-        Object.keys(d.statuses || {}).forEach(function (r) { counts[r] = (d.statuses[r].files || []).length; });
-        // start with the first repository that has changes
-        repo = repos.find(function (r) { return counts[r]; }) || repos[0];
-        renderSwitcher();
-        if (d.statuses && d.statuses[repo]) apply(d.statuses[repo]); else load();
+        stats = Object.assign({}, d.statuses || {});
+        // start with the repository that needs the most attention
+        var rank = function (r) { var s = stats[r]; return !s || !s.repo ? 0 : s.conflicts ? 5 : (s.files || []).length ? 4 : s.behind ? 3 : s.ahead ? 2 : !s.upstream ? 1 : 0; };
+        repo = repos.slice().sort(function (a, b) { return rank(b) - rank(a); })[0];
+        renderRail();
+        if (stats[repo]) apply(stats[repo]); else load();
       }).catch(function (e) { head.replaceChildren(h('span', { class: 'muted' }, e.message)); });
     }
 
     function action(a) {
       if (busy) return;
-      setBusy(true, a === 'pull' ? 'pulling' : a === 'push' ? 'pushing' : 'fetching');
-      gpost(a).then(function (d) {
-        setBusy(false, a);
-        apply(d.status);
-        if (d.output === 'conflicts') toast('Pull stopped with conflicts — resolve them in VS Code', 'err', { timeout: 9000 });
-        else toast(a === 'push' ? 'Pushed' : a === 'pull' ? 'Pulled' : 'Fetched', 'ok');
-      }).catch(function (e) { setBusy(false, a); fail(e); });
+      var steps = a === 'sync' ? ['pull', 'push'] : [a];
+      var WORD = { pull: 'Pulling', push: 'Pushing', fetch: 'Fetching' };
+      var r = repo;
+      (function next(i) {
+        if (i >= steps.length) {
+          setBusy(false);
+          refreshGit(p.name);
+          toast(a === 'sync' ? 'Pulled and pushed' : a === 'push' ? (st && st.upstream ? 'Pushed' : 'Published') : a === 'pull' ? 'Pulled' : 'Fetched', 'ok');
+          return;
+        }
+        setBusy(true, WORD[steps[i]]);
+        gpost(steps[i], null, r).then(function (d) {
+          stats[r] = d.status;
+          if (r === repo) { busy = false; working = ''; apply(d.status); }
+          if (d.output === 'conflicts') {
+            setBusy(false);
+            toast('Pull stopped with conflicts — resolve them in VS Code', 'err', { timeout: 9000 });
+            return;
+          }
+          next(i + 1);
+        }).catch(function (e) { setBusy(false); fail(e); });
+      })(0);
     }
 
     function commit() {
       if (busy || !st || !picked.size) return;
       if (!msg.value.trim()) { msg.focus(); toast('Write a commit message', 'warn'); return; }
       var all = picked.size === st.files.length;
-      setBusy(true, 'committing');
+      setBusy(true, 'Committing');
       gpost('commit', { message: msg.value, files: all ? null : Array.from(picked) }).then(function (d) {
-        setBusy(false, 'commit');
+        busy = false; working = '';
         msg.value = '';
         apply(d.status);
-        toast('Committed' + (st.upstream ? ' — Push to send it' : ''), 'ok');
-      }).catch(function (e) { setBusy(false, 'commit'); fail(e); });
+        setBusy(false);
+        toast('Committed' + (st.upstream ? ' — Push ↑' + (st.ahead || 1) + ' sends it' : ' — Publish branch sends it'), 'ok');
+      }).catch(function (e) { setBusy(false); fail(e); });
     }
 
     discover();

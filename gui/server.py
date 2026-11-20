@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.44.0"
+VERSION = "1.45.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -3404,6 +3404,12 @@ def git_repos(app, project: dict) -> dict:
     return {"where": "local" if project.get("localExists") else "server", "repos": []}
 
 
+def git_fetched(app) -> dict:
+    """When each repository last asked its remote for news (fetch/pull, ours or the watcher's) —
+    the window shows it, so "up to date" never looks surer than it is."""
+    return app.__dict__.setdefault("_git_fetched", {})
+
+
 class GitRepo:
     def __init__(self, app, project: dict, repo: str = "", where: str = None):
         self.app, self.p = app, project
@@ -3479,7 +3485,14 @@ class GitRepo:
             st["ignoredTracked"] = sum(1 for f in st["files"] if f.get("ignored"))
         code, last, _ = self.run(["log", "-1", "--format=%h %s"], timeout=15)
         st["last"] = last.strip() if code == 0 else ""
+        st["fetched"] = git_fetched(self.app).get(self.key())
         return st
+
+    def key(self) -> str:
+        return f"{self.p.get('name')}\0{self.repo}\0{self.where}"
+
+    def mark_fetched(self):
+        git_fetched(self.app)[self.key()] = time.time()
 
     def diff(self, path: str, untracked: bool) -> str:
         if not git_path_ok(path):
@@ -3539,6 +3552,8 @@ class GitRepo:
             args.append("--no-rebase")
         code, out, err = self.run(args, timeout=180)
         self.flush()
+        if code == 0 or "CONFLICT" in out + err:
+            self.mark_fetched()
         if code != 0:
             st = self.status()
             if st.get("conflicts"):
@@ -3556,7 +3571,9 @@ class GitRepo:
         return (out + err).strip()
 
     def fetch(self) -> str:
-        return self.check(["fetch", "--prune"], timeout=120)
+        out = self.check(["fetch", "--prune"], timeout=120)
+        self.mark_fetched()
+        return out
 
     def untrack(self, files) -> str:
         """Stop tracking files (they stay on disk) — for files .gitignore names."""
@@ -6526,8 +6543,8 @@ class App:
         for r in info["repos"]:
             repo = GitRepo(self, p, r, info["where"])
             try:
-                if fetch:
-                    repo.run(["fetch", "--quiet", "--prune"], timeout=60)
+                if fetch and repo.run(["fetch", "--quiet", "--prune"], timeout=60)[0] == 0:
+                    repo.mark_fetched()
                 st = repo.status()
             except ApiError:
                 continue

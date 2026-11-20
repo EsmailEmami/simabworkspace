@@ -41,6 +41,11 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.0 2026-11-20  Git dialog redesigned for projects with many repositories: a list of
+#                       every repository with its branch and what it needs (changes, ↑ push,
+#                       ↓ pull, conflicts, not published), Fetch all / Pull all / Push all;
+#                       one plain sentence per repository ("↓2 to pull", "Up to date") with
+#                       the one button that fixes it, and when the remote was last checked
 #    1.44.0 2026-11-19  Chat: "▶ read" under each answer reads it aloud (Persian or English, code
 #                       skipped); "Read aloud" in the chat menu for one message
 #                       Dictation keeps going: a guess Chrome never finishes is kept, short
@@ -321,7 +326,7 @@
 
 set -u -o pipefail
 
-VERSION="1.44.0"
+VERSION="1.45.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -1216,6 +1216,23 @@ class GitFlow(TmpHome):
         self.assertFalse(os.path.exists(os.path.join(self.a, "new.txt")))
         self.assertFalse(os.path.exists(os.path.join(self.a, "staged.txt")))
 
+    def test_status_says_when_the_remote_was_last_asked(self):
+        repo = sw.GitRepo(self.app, self.p)
+        repo.push()
+        self.assertIsNone(repo.status()["fetched"], "never fetched yet")
+        t = time.time()
+        repo.fetch()
+        self.assertGreaterEqual(repo.status()["fetched"], t)
+        # per repository: another project with the same folder has its own time
+        self.assertIsNone(sw.GitRepo(self.app, dict(self.p, name="b")).status()["fetched"])
+        # pull and the watcher's fetch count too
+        self.app._git_fetched.clear()
+        repo.pull()
+        self.assertIsNotNone(repo.status()["fetched"])
+        self.app._git_fetched.clear()
+        self.app.git_summary_one(self.p, fetch=True)
+        self.assertIsNotNone(repo.status()["fetched"])
+
     def test_status_diff_commit_push_pull_conflict(self):
         repo = sw.GitRepo(self.app, self.p)
         st = repo.status()
@@ -2270,7 +2287,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.44.0"', text)
+        self.assertIn('VERSION="1.45.0"', text)
 
 
 if __name__ == "__main__":

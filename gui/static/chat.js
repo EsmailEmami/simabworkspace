@@ -61,9 +61,13 @@
       var fence = l.match(/^\s*(```+|~~~+)\s*([\w+#.-]*)/);
       if (fence) {
         flush();
-        var code = [], end = fence[1];
+        var code = [], end = fence[1], fin = l.length - l.replace(/^ +/, '').length;
         i++;
-        while (i < lines.length && lines[i].trim().indexOf(end) !== 0) { code.push(lines[i]); i++; }
+        while (i < lines.length && lines[i].trim().indexOf(end) !== 0) {
+          var cl0 = lines[i], k0 = 0;
+          while (k0 < fin && cl0[k0] === ' ') k0++;
+          code.push(cl0.slice(k0)); i++;
+        }
         i++;
         root.append(codeBlock(code.join('\n'), fence[2]));
         continue;
@@ -96,6 +100,21 @@
         var list = h(ordered ? 'ol' : 'ul', { dir: 'auto' });
         while (i < lines.length) {
           var mm = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+          // a code block inside a list item (indented ```): a real code block with copy, not text
+          var lf = !mm && lines[i].match(/^(\s+)(```+|~~~+)\s*([\w+#.-]*)\s*$/);
+          if (lf) {
+            var ind = lf[1].length, cl = [];
+            i++;
+            while (i < lines.length && lines[i].trim().indexOf(lf[2]) !== 0) {
+              var ln = lines[i], k = 0;
+              while (k < ind && ln[k] === ' ') k++;
+              cl.push(ln.slice(k)); i++;
+            }
+            i++;
+            var cbk = codeBlock(cl.join('\n'), lf[3]);
+            if (list.lastChild) list.lastChild.append(cbk); else root.append(cbk);
+            continue;
+          }
           if (!mm) {
             if (lines[i].trim() && /^\s{2,}/.test(lines[i]) && list.lastChild) { list.lastChild.append(h('br'), inline(lines[i].trim())); i++; continue; }
             break;

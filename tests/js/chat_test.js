@@ -903,6 +903,18 @@ const tests = {
     global.SW.showMenu = () => {};
   },
 
+  'markdown: a code block inside a list item is a code block with copy, not text'() {
+    const md = global.SWChat.markdown('- بعد این دستور را اجرا کنید:\n   ```bash\n   tax-api-service/build-release.sh --publish\n     indented\n   ```\n- بعدی\n\n1. یک\n\n   ```\n   ls -la\n   ```\n\nمتن');
+    const blocks = md.querySelectorAll('.codeblock');
+    assert.strictEqual(blocks.length, 2);
+    assert.strictEqual(blocks[0].querySelector('code').textContent, 'tax-api-service/build-release.sh --publish\n  indented');
+    assert.strictEqual(blocks[0].querySelector('.cb-copy').textContent, 'copy');
+    assert.strictEqual(md.querySelectorAll('li')[0].querySelectorAll('.codeblock').length, 1, 'inside its list item');
+    assert.strictEqual(md.querySelectorAll('li').length, 3, 'the list goes on after the code');
+    assert.strictEqual(blocks[1].querySelector('code').textContent, 'ls -la');
+    assert.ok(!/```/.test(md.textContent), 'no raw fences');
+  },
+
   'markdown: code, lists, tables, links'() {
     const md = global.SWChat.markdown('# عنوان\n\nمتن `کد` و **پررنگ** https://x.dev\n\n- یک\n- دو\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfmt.Println(1)\n```');
     assert.strictEqual(md.querySelectorAll('h3').length, 1);

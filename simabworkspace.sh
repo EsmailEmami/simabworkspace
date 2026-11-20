@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.1 2026-11-20  Chat: a code block inside a list item (indented ```) shows as a code
+#                       block with copy, not as raw text
 #    1.45.0 2026-11-20  Git dialog redesigned for projects with many repositories: a list of
 #                       every repository with its branch and what it needs (changes, ↑ push,
 #                       ↓ pull, conflicts, not published), Fetch all / Pull all / Push all;
@@ -326,7 +328,7 @@
 
 set -u -o pipefail
 
-VERSION="1.45.0"
+VERSION="1.45.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

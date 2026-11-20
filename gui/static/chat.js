@@ -366,6 +366,8 @@
 
     this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
+    // a narrow chat (tablet split, laptop side pane) gets the phone's one chip instead of three selects
+    if (window.ResizeObserver) new window.ResizeObserver(function () { self.fitBar(); }).observe(composer);
     this.pane.addEventListener('mouseenter', function () { self.hover = true; self.updateAway(); });
     this.pane.addEventListener('mouseleave', function () { self.hover = false; });
     // a tap on the chat makes it the active one: its message box comes back at once
@@ -635,6 +637,11 @@
     var o = Array.prototype.filter.call(sel.children || [], function (x) { return x.value === sel.value; })[0];
     return o ? o.textContent : sel.value;
   }
+  // the three selects + buttons need ~600px; below that one chip, like on phones
+  P.fitBar = function () {
+    var w = this.composerEl.clientWidth;
+    if (w) this.composerEl.classList.toggle('cb-narrow', w < 600);
+  };
   P.paintOpts = function () {
     if (!this.optsBtn) return;
     this.optsBtn.className = 'cb-opts m-' + this.modeSel.value;

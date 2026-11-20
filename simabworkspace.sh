@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.4 2026-11-20  A narrow chat (tablet split, laptop side pane) shows one chip for mode /
+#                       model / effort, like phones, so the bar never overflows
 #    1.45.3 2026-11-20  @ and Find file see the files of repositories inside a repository (only
 #                       the first level was found); such a new repository is listed once, not twice
 #    1.45.2 2026-11-20  VS Code on the server opens the project again when its folder is
@@ -333,7 +335,7 @@
 
 set -u -o pipefail
 
-VERSION="1.45.3"
+VERSION="1.45.4"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

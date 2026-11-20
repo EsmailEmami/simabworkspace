@@ -880,6 +880,19 @@ const tests = {
     assert.ok(tab.agentsEl.classList.contains('hidden'), 'cleared when the turn ends');
   },
 
+  'narrow chat pane (tablet / laptop split) also gets the one chip'() {
+    const { tab } = newTab();
+    const el = tab.composerEl;
+    Object.defineProperty(el, 'clientWidth', { configurable: true, value: 430 });
+    tab.fitBar();
+    assert.ok(el.classList.contains('cb-narrow'), 'narrow pane -> chip');
+    Object.defineProperty(el, 'clientWidth', { configurable: true, value: 900 });
+    tab.fitBar();
+    assert.ok(!el.classList.contains('cb-narrow'), 'wide pane -> three selects');
+    const css = fs.readFileSync(path.join(__dirname, '../../gui/static/app.css'), 'utf8');
+    assert.match(css, /:is\(body\.compact, \.cb-narrow\) \.cb-opts \{ display: inline-flex/);
+    assert.match(css, /:is\(body\.compact, \.cb-narrow\) \.cbar \.mini-sel \{ display: none/);
+  },
   'phone: one chip for mode / model / effort, its menu changes them'() {
     const { tab, feed, ws } = newTab();
     ws.onopen();

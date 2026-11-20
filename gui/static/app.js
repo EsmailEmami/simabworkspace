@@ -2245,13 +2245,34 @@
             h('span', { class: 'httl', dir: 'auto' }, ttl), said ? h('span', { class: 'hsaid', dir: 'auto' }, said) : null)
             : h('span', { class: 'htext', dir: 'auto', title: it.text }, (it.kind.indexOf('git-') === 0 ? k[1] + (it.text ? ': ' : '') : '') + (it.text || k[1])),
           detail ? h('span', { class: 'hdetail mono', title: detail }, detail) : null,
-          acts.map(function (a) { return h('button', { class: 'btn sm', title: a.title || '', onclick: function () { md.close(); a.fn(); } }, a.label); })));
+          acts.map(function (a) { return h('button', { class: 'btn sm', title: a.title || '', onclick: function () { md.close(); a.fn(); } }, a.label); }),
+          h('button', { class: 'btn sm hdel', title: it.session ? 'Remove this conversation from History (Claude keeps it)' : 'Remove from History',
+            onclick: function () { removeRows(it.session ? { session: it.session } : { ids: [it.id] }); } }, '×')));
       });
       list.replaceChildren.apply(list, out);
+      clearBtn.disabled = !shown.length;
+      return shown;
     }
+    // remove from the list only; the Claude conversations themselves are not deleted
+    function removeRows(body) {
+      api('POST', 'activity-delete', body).then(function () {
+        items = items.filter(function (it) {
+          return body.clear ? (body.project && it.project !== body.project)
+            : body.session ? it.session !== body.session : body.ids.indexOf(it.id) < 0;
+        });
+        render();
+      }).catch(fail);
+    }
+    var clearBtn = h('button', { class: 'btn danger', style: 'flex:none', title: 'Remove the entries shown from History', onclick: function () {
+      var text = q.value.trim(), shown = render();
+      var what = text ? shown.length + ' matching entr' + (shown.length === 1 ? 'y' : 'ies') : proj.value ? 'all of “' + proj.value + '”' : 'everything';
+      confirmDlg('Clear ' + what + ' from History? Claude conversations themselves are kept.', 'Clear', true).then(function (ok) {
+        if (ok) removeRows(text ? { ids: shown.map(function (it) { return it.id; }) } : { clear: true, project: proj.value });
+      });
+    } }, 'Clear');
     q.addEventListener('input', render);
     proj.addEventListener('change', render);
-    var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, proj), list] });
+    var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, proj, clearBtn), list] });
     api('GET', 'activity?limit=2000').then(function (d) { items = d.items || []; render(); loadTitles(); })
       .catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
     // the titles come from the server, one list per project that has conversations here

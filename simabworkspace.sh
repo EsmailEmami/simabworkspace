@@ -42,6 +42,7 @@
 #
 #  Changelog:
 #    1.47.0 2026-11-20  ▶ read: Persian made on the server when the device has no Persian voice
+#    1.48.0 2026-11-20  History: remove an entry or a whole conversation, Clear (all / one project / matches)
 #                       (Piper, text stays on the server; or Microsoft voices), Settings → Sounds
 #    1.46.0 2026-11-20  Git dialog: resolve merge conflicts in place like VS Code (Accept Current /
 #                       Incoming / Both / Edit per conflict, or a whole side), Abort merge;
@@ -342,7 +343,7 @@
 
 set -u -o pipefail
 
-VERSION="1.47.0"
+VERSION="1.48.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

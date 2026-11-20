@@ -153,6 +153,21 @@ class ActivityLog(TmpHome):
         self.assertEqual(len(a.list(limit=1)), 1)
         self.assertNotIn("session", a.add("x", "", "t", session=""))                     # empty extras dropped
 
+    def test_delete_rows_conversation_and_clear(self):
+        a = sw.Activity(Path(self.tmp.name) / "activity.jsonl")
+        a.add("prompt", "cheshmeh", "one", session="s1")
+        a.add("prompt", "cheshmeh", "two", session="s1")
+        a.add("run", "shop", "web")
+        a.add("git-commit", "cheshmeh", "fix")
+        a.add("run", "", "home")
+        self.assertEqual(a.delete(session="s1"), 2)                       # a whole conversation
+        run = next(i for i in a.list() if i["text"] == "web")
+        self.assertEqual(a.delete(ids=[run["id"], "x"]), 1)                # one row; junk ids ignored
+        self.assertEqual(a.delete(clear=True, project="cheshmeh"), 1)      # clear one project
+        self.assertEqual([i["text"] for i in a.list()], ["home"])
+        a.delete(clear=True)
+        self.assertEqual(a.list(), [])
+
     def test_app_records_runs_and_prompts(self):
         app = sw.App(self.store, sw.ServerConf("", "h"))
         with tempfile.TemporaryDirectory() as d, mock.patch.object(sw, "mutagen_sessions", return_value=[]):
@@ -2396,7 +2411,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.47.0"', text)
+        self.assertIn('VERSION="1.48.0"', text)
 
 
 if __name__ == "__main__":

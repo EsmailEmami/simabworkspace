@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.47.0"
+VERSION = "1.48.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5089,7 +5089,7 @@ class Activity:
         return item
 
     def list(self, limit=500, project="", query="") -> list:
-        sql, args = "SELECT t, kind, project, text, extra FROM activity WHERE 1=1", []
+        sql, args = "SELECT id, t, kind, project, text, extra FROM activity WHERE 1=1", []
         if project:
             sql += " AND project = ?"
             args.append(project)
@@ -5099,14 +5099,30 @@ class Activity:
         sql += " ORDER BY id DESC LIMIT ?"
         args.append(max(1, min(int(limit), 5000)))
         out = []
-        for t, kind, proj, text, extra in self.db.rows(sql, args):
+        for rid, t, kind, proj, text, extra in self.db.rows(sql, args):
             it = {"t": t, "kind": kind, "project": proj, "text": text}
             try:
                 it.update(json.loads(extra))
             except ValueError:
                 pass
+            it["id"] = rid
             out.append(it)
         return out
+
+    def delete(self, ids=None, session: str = "", clear: bool = False, project: str = "") -> int:
+        """Remove rows: given ids, every row of one Claude conversation, or all (of one project). Only the list —
+        the conversations themselves stay with Claude."""
+        if clear:
+            cur = self.db.run("DELETE FROM activity WHERE project = ?", (project,)) if project else self.db.run("DELETE FROM activity")
+            return cur.rowcount
+        n = 0
+        if session:
+            n += self.db.run("DELETE FROM activity WHERE json_extract(extra, '$.session') = ?", (str(session),)).rowcount
+        ids = [int(i) for i in (ids or []) if str(i).isdigit()][:5000]
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            n += self.db.run(f"DELETE FROM activity WHERE id IN ({','.join('?' * len(part))})", part).rowcount
+        return n
 
 
 # ----------------------------------------------------------------------------- docker on the server
@@ -8753,6 +8769,10 @@ class Handler(BaseHTTPRequestHandler):
             lim = (query.get("limit") or ["500"])[0]
             return {"items": app.activity.list(int(lim) if lim.isdigit() else 500,
                                                (query.get("project") or [""])[0], (query.get("q") or [""])[0])}
+        if route == ("POST", "activity-delete"):
+            b = self._body()
+            return {"deleted": app.activity.delete(b.get("ids"), str(b.get("session") or ""), bool(b.get("clear")),
+                                                   str(b.get("project") or ""))}
         if route == ("GET", "chat-history") and len(parts) == 2:
             b = (query.get("before") or ["0"])[0]
             return app.chat_history_page(parts[1], int(b) if b.isdigit() else 0)

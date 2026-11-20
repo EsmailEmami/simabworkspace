@@ -505,6 +505,9 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 .hrow { display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-bottom: 1px solid #14181f; font-size: 12.5px; min-width: 0; }
 .hrow:hover { background: var(--bg3); }
 .hrow.fail .hk { color: var(--err); }
+.hrow .hdel { opacity: 0; flex: none; }
+.hrow:hover .hdel, .hrow .hdel:focus { opacity: 1; }
+@media (hover: none) { .hrow .hdel { opacity: .6; } }
 .htime { color: var(--faint); font-size: 11px; flex: none; }
 .hk { width: 14px; text-align: center; color: var(--muted); flex: none; }
 .hproj { font-size: 11.5px; flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

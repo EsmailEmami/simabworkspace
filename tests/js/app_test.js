@@ -99,6 +99,10 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/git/cheshmeh/status?repo=cheshmeh-api-service')) res = apiStatus();
   else if (global.gitFail && url === '/api/git/cheshmeh/' + global.gitFail) return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: "! [rejected] main -> main (fetch first)\nerror: failed to push some refs" }) });
   else if (/^\/api\/git\/cheshmeh\/(pull|push|fetch)$/.test(url)) res = { output: '', status: Object.assign({}, gitStatus, { files: [], conflicts: 0, behind: 0, ahead: 0, fetched: Date.now() / 1000 }) };
+  else if (url.startsWith('/api/git/cheshmeh/conflict')) res = { path: 'web/x.ts', code: 'UU', exists: true, binary: false, big: false, merging: true,
+    text: 'a\n<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> origin/main\nb\n<<<<<<< HEAD\nm2\n=======\nt2\n>>>>>>> origin/main\n' };
+  else if (/^\/api\/git\/cheshmeh\/(resolve|merge-abort)$/.test(url)) res = { status: Object.assign({}, gitStatus, { conflicts: 0, merging: true,
+    files: gitStatus.files.map((f) => Object.assign({}, f, f.conflict ? { x: 'M', y: ' ', conflict: false } : {})) }) };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
   else if (url.startsWith('/api/title/')) res = { title: body.title };
@@ -299,8 +303,6 @@ const tests = {
     assert.match(q('.gbanner', modal)[0].textContent, /conflicts/);
     assert.match(q('.ghead', modal)[0].textContent, /↓2/);
     assert.ok(!q('.gsync-btn', modal).length, 'no Pull button while there are conflicts');
-    q('button', q('.gbanner', modal)[0]).find((b) => b.textContent === 'Open in VS Code').click(); await settle();
-    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/editor').pop().body, { project: 'cheshmeh', where: 'local' }, 'VS Code opens the copy git runs on');
     q('.gfile', modal)[0].dispatch('click');
     await settle();
     assert.match(q('.gdiff', modal)[0].textContent, /\+b/);
@@ -316,6 +318,40 @@ const tests = {
     assert.ok(calls.some((c) => c.url.indexOf('/diff?repo=cheshmeh-web-app&where=local&path=') > 0), 'diff asks the right repository');
     assert.strictEqual(q('.gfile', modal).length, 1);
     document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'git panel: merge conflicts are resolved in place, like VS Code'() {
+    const SW = global.window.SW;
+    const segs = SW.parseConflicts('x\r\n<<<<<<< HEAD\r\nA\r\n||||||| base\r\nO\r\n=======\r\nB\r\n>>>>>>> br\r\ny');
+    assert.strictEqual(segs.length, 3);
+    assert.deepStrictEqual([segs[1].ours, segs[1].base, segs[1].theirs, segs[1].theirsLabel], [['A\r'], ['O\r'], ['B\r'], 'br']);
+    segs[1].choice = 'both';
+    assert.strictEqual(SW.mergeText(segs), 'x\r\nA\r\nB\r\ny', 'line endings kept');
+    assert.strictEqual(SW.mergeText(SW.parseConflicts('<<<<<<< HEAD\nnever closed')), '<<<<<<< HEAD\nnever closed', 'broken markers left alone');
+    q('.act').find((b) => b.textContent.indexOf('Git') === 0).click();
+    await settle();
+    const modal = q('.modal').pop();
+    q('button', q('.gbanner', modal)[0]).find((b) => b.textContent === 'Resolve').click(); await settle();
+    const save = () => q('.gmsave', modal)[0];
+    assert.ok(calls.some((c) => c.url.indexOf('/conflict?repo=cheshmeh-web-app&where=local&path=web%2Fx.ts') > 0));
+    assert.match(q('.gdhead', modal)[0].textContent, /2 conflicts left/);
+    assert.ok(save().disabled, 'cannot save before every conflict is picked');
+    const link = (t) => q('a', modal).find((a) => a.textContent === t);
+    link('Accept Current').click();
+    assert.match(q('.gdhead', modal)[0].textContent, /1 conflict left/);
+    link('Accept Both').click();
+    assert.ok(!save().disabled);
+    link('Undo').click();                                // the first one again
+    link('Edit').click();
+    const ta = q('.gmedit', modal)[0];
+    ta.value = 'hand made';
+    link('Done').click();
+    save().click(); await settle();
+    const post = calls.filter((c) => c.url.endsWith('/resolve')).pop();
+    assert.deepStrictEqual(post.body, { repo: 'cheshmeh-web-app', where: 'local', path: 'web/x.ts', text: 'a\nhand made\nb\nm2\nt2\n' });
+    assert.match(q('.gbanner', modal)[0].textContent, /commit to finish the merge/);
+    assert.ok(!q('.gfile.conflict', modal).length);
+    q('.icon-btn', modal)[0].click();
   },
 
   async 'git panel: the repository list says what each one needs; pull, push and fetch in one click'() {

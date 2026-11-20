@@ -1274,6 +1274,57 @@ class GitFlow(TmpHome):
         self.assertFalse(os.path.exists(os.path.join(self.a, "new.txt")))
         self.assertFalse(os.path.exists(os.path.join(self.a, "staged.txt")))
 
+    def make_conflict(self, extra=False):
+        """a and b both change f.txt; a pulls b's commit → conflict in a."""
+        repo = sw.GitRepo(self.app, self.p)
+        Path(self.a, "f.txt").write_text("top\none\nend\n")
+        self.git(self.a, "commit", "-q", "-am", "base")
+        repo.push()
+        b = self.clone(self.remote, "b")
+        Path(b, "f.txt").write_text("top\nTHEIRS\nend\n")
+        self.git(b, "commit", "-q", "-am", "theirs")
+        self.git(b, "push", "-q")
+        Path(self.a, "f.txt").write_text("top\nOURS\nend\n")
+        if extra:
+            Path(self.a, "other.txt").write_text("x\n")
+            self.git(self.a, "add", "other.txt")
+        self.git(self.a, "commit", "-q", "-am", "ours")
+        self.assertEqual(repo.pull(), "conflicts")
+        return repo
+
+    def test_resolve_conflict_with_picked_text(self):
+        repo = self.make_conflict()
+        st = repo.status()
+        self.assertTrue(st["merging"])
+        self.assertEqual(st["conflicts"], 1)
+        c = repo.conflict("f.txt")
+        self.assertIn("<<<<<<< HEAD\nOURS\n=======\nTHEIRS\n>>>>>>>", c["text"])
+        self.assertTrue(c["merging"] and c["exists"] and not c["binary"])
+        with self.assertRaises(sw.ApiError):
+            repo.resolve("f.txt", "top\n<<<<<<< HEAD\nx\n")          # markers left
+        with self.assertRaises(sw.ApiError):
+            repo.conflict("other.txt")                                  # no conflict there
+        repo.resolve("f.txt", "top\nOURS\nTHEIRS\nend\n")
+        self.assertEqual(Path(self.a, "f.txt").read_text(), "top\nOURS\nTHEIRS\nend\n")
+        st = repo.status()
+        self.assertEqual(st["conflicts"], 0)
+        self.assertTrue(st["merging"], "still needs the merge commit")
+        # committing a merge with a file list must not be a "partial commit"
+        repo.commit("merge", ["f.txt"])
+        self.assertFalse(repo.status()["merging"])
+        self.assertIn("THEIRS", self.git(self.a, "show", "HEAD:f.txt"))
+
+    def test_resolve_conflict_by_side_and_abort(self):
+        repo = self.make_conflict(extra=True)
+        repo.resolve("f.txt", side="theirs")
+        self.assertEqual(Path(self.a, "f.txt").read_text(), "top\nTHEIRS\nend\n")
+        self.assertEqual(repo.status()["conflicts"], 0)
+        repo.merge_abort()
+        self.assertFalse(repo.status()["merging"])
+        self.assertEqual(Path(self.a, "f.txt").read_text(), "top\nOURS\nend\n")
+        with self.assertRaises(sw.ApiError):
+            repo.merge_abort()
+
     def test_status_says_when_the_remote_was_last_asked(self):
         repo = sw.GitRepo(self.app, self.p)
         repo.push()
@@ -2345,7 +2396,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.45.5"', text)
+        self.assertIn('VERSION="1.46.0"', text)
 
 
 if __name__ == "__main__":

@@ -414,6 +414,22 @@ details.thinking[open] .think-body { max-height: 220px; overflow-y: auto; }
 .gl.add { background: #12261e; color: #9ece6a; }
 .gl.del { background: #2d1519; color: #f7768e; }
 .gl.hunk { color: var(--accent); background: #10172a; }
+.gmerge .gl.gmours { background: #12261e; }
+.gmerge .gl.gmtheirs { background: #111d33; }
+.gmerge .gl.gmbase { background: #1c1a24; color: var(--muted); }
+.gmerge .gl.gmres { background: #15191f; }
+.gmerge .gl.gmhead { color: var(--faint); background: #0f1216; }
+.gmerge .gl.gmhead.ours { color: #9ece6a; background: #183324; }
+.gmerge .gl.gmhead.theirs { color: var(--accent); background: #15274a; }
+.gmbar { font: 11.5px var(--ui); color: var(--muted); padding: 6px 10px 3px; }
+.gmbar a { color: var(--accent); cursor: pointer; }
+.gmbar a:hover { text-decoration: underline; }
+.gmbar.done { color: var(--ok); }
+.gmedit { display: block; width: calc(100% - 20px); margin: 2px 10px 6px; font: 12px/1.55 var(--mono); resize: vertical; }
+.gmacts { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.gmleft { color: var(--err); font-family: var(--ui); }
+.gmleft.done { color: var(--ok); }
+.gmerge-none { padding: 14px; display: flex; flex-direction: column; gap: 10px; color: var(--muted); }
 .gl.meta { color: var(--faint); }
 .gall label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .gall .gdiscard { text-transform: none; letter-spacing: 0; height: 22px; }

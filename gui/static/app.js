@@ -2151,7 +2151,7 @@
   var HIST_KIND = {
     prompt: ['✳', 'Claude'], chat: ['✳', 'chat'], 'claude-tui': ['✳', 'Claude (terminal)'], 'claude-stop': ['✳', 'Claude stopped'],
     run: ['▶', 'run'], 'run-exit': ['■', 'finished'], terminal: ['›', 'terminal'],
-    'git-commit': ['⎇', 'commit'], 'git-push': ['⎇', 'push'], 'git-pull': ['⎇', 'pull'], 'git-fetch': ['⎇', 'fetch'], 'git-switch': ['⎇', 'branch'],
+    'git-commit': ['⎇', 'commit'], 'git-push': ['⎇', 'push'], 'git-pull': ['⎇', 'pull'], 'git-fetch': ['⎇', 'fetch'], 'git-switch': ['⎇', 'branch'], 'git-resolve': ['⎇', 'resolved'], 'git-merge-abort': ['⎇', 'merge aborted'],
     'docker-logs': ['▣', 'logs'], 'docker-shell': ['▣', 'container shell'], 'docker-rebuild': ['▣', 'rebuild'],
     'docker-start': ['▣', 'start'], 'docker-stop': ['▣', 'stop'], 'docker-restart': ['▣', 'restart'], 'docker-crash': ['▣', 'crashed'],
     tunnels: ['⇄', 'ports'],
@@ -2291,6 +2291,43 @@
       pre.append(h('div', { class: 'gl ' + cls }, l || ' '));
     });
     return pre;
+  }
+
+  // Split a file with <<<<<<< / ||||||| / ======= / >>>>>>> markers into text and conflict blocks.
+  function parseConflicts(text) {
+    var segs = [], cur = null, plain = [], part = '';
+    String(text).split('\n').forEach(function (l) {
+      var m = /^(<{7}|\|{7}|={7}|>{7})(?: (.*?))?\r?$/.exec(l);
+      if (!cur && m && m[1][0] === '<') {
+        if (plain.length) segs.push({ lines: plain });
+        plain = [];
+        cur = { conflict: true, ours: [], base: null, theirs: [], oursLabel: m[2] || '', choice: null, edit: null, raw: [l] };
+        part = 'ours';
+        return;
+      }
+      if (cur) cur.raw.push(l);
+      if (cur && m && m[1][0] === '|' && part === 'ours') { cur.base = []; cur.baseLabel = m[2] || ''; part = 'base'; }
+      else if (cur && m && m[1][0] === '=' && part !== 'theirs' && !m[2]) part = 'theirs';
+      else if (cur && m && m[1][0] === '>' && part === 'theirs') { cur.theirsLabel = m[2] || ''; segs.push(cur); cur = null; }
+      else if (cur) cur[part].push(l);
+      else plain.push(l);
+    });
+    if (cur) {                                  // markers never closed: keep the text as it was
+      plain = cur.raw;
+    }
+    if (plain.length || !segs.length) segs.push({ lines: plain });
+    return segs;
+  }
+
+  function conflictResult(b) {
+    return b.choice === 'ours' ? b.ours : b.choice === 'theirs' ? b.theirs : b.choice === 'both' ? b.ours.concat(b.theirs)
+      : b.choice === 'edit' ? (b.text === '' ? [] : String(b.text).split('\n')) : [];
+  }
+
+  function mergeText(segs) {
+    var out = [];
+    segs.forEach(function (s) { out = out.concat(s.conflict ? conflictResult(s) : s.lines); });
+    return out.join('\n');
   }
 
   function agoShort(t) {
@@ -2711,6 +2748,15 @@
       });
     }
 
+    function abortMerge() {
+      confirmDlg('Abort the merge? Every file goes back to how it was before the pull, including conflicts you already resolved.', 'Abort merge', true).then(function (ok) {
+        if (!ok) return;
+        setBusy(true, 'Aborting merge');
+        gpost('merge-abort', {}).then(function (d) { setBusy(false); apply(d.status); toast('Merge aborted', 'ok'); })
+          .catch(function (e) { setBusy(false); showErr(e); });
+      });
+    }
+
     var md = openModal({
       title: 'Git — ' + pTitle(p), size: 'wide gitdlg', onclose: function () { refreshGit(p.name); },
       body: [h('div', { class: 'gwrap' }, rail,
@@ -2760,8 +2806,12 @@
           h('button', { class: 'btn sm', title: ign.map(function (f) { return f.path; }).join('\n'), onclick: function () { untrack(ign); } }, 'Stop tracking ' + (ign.length === 1 ? 'it' : 'them'))));
       }
       if (st.conflicts) {
-        problems.push(h('div', null, plural(st.conflicts, 'file') + ' with merge conflicts. Resolve them in VS Code, then commit here. ',
-          h('button', { class: 'btn sm', title: 'Opens the copy git runs on — ' + (st.where === 'local' ? 'this machine' : 'the server'), onclick: function () { openEditor(p, st.where === 'local' ? 'local' : 'server'); } }, 'Open in VS Code')));
+        var firstC = st.files.find(function (f) { return f.conflict; });
+        problems.push(h('div', null, plural(st.conflicts, 'file') + ' with merge conflicts. Resolve each one, then commit here. ',
+          h('button', { class: 'btn sm', onclick: function () { showDiff(firstC); } }, 'Resolve'), ' ',
+          st.merging ? h('button', { class: 'btn sm', disabled: busy, title: 'Undo the merge: back to how it was before the pull (git merge --abort)', onclick: abortMerge }, 'Abort merge') : null));
+      } else if (st.merging) {
+        problems.push(h('div', null, 'All conflicts resolved — commit to finish the merge. '));
       }
       banner.replaceChildren.apply(banner, problems);
       banner.classList.toggle('hidden', !problems.length);
@@ -2797,12 +2847,107 @@
       current = f.path;
       renderList();
       diff.replaceChildren(empty('Loading…'));
+      if (f.conflict) return mergeView(f);
       api('GET', 'git/' + encodeURIComponent(p.name) + '/diff' + qs() + '&path=' + encodeURIComponent(f.path) + '&untracked=' + (f.untracked ? 1 : 0))
         .then(function (d) {
           if (current !== f.path) return;
           diff.replaceChildren(h('div', { class: 'gdhead mono' }, f.path,
             h('button', { class: 'btn sm', title: 'Opens the copy git runs on — ' + (st.where === 'local' ? 'this machine' : 'the server'), onclick: function () { openEditor(p, st.where === 'local' ? 'local' : 'server'); } }, 'Open in VS Code')), diffEl(d.diff || '(no textual changes)'));
         }).catch(function (e) { diff.replaceChildren(empty(e.message)); });
+    }
+
+    // Resolve a merge conflict here, like VS Code: per conflict take Current / Incoming / Both / edit.
+    function mergeView(f) {
+      var vsBtn = h('button', { class: 'btn sm', title: 'Opens the copy git runs on — ' + (st.where === 'local' ? 'this machine' : 'the server'), onclick: function () { openEditor(p, st.where === 'local' ? 'local' : 'server'); } }, 'Open in VS Code');
+      function takeSide(side) {
+        setBusy(true, 'Resolving');
+        gpost('resolve', { path: f.path, side: side }).then(function (d) {
+          setBusy(false); apply(d.status); toast('Resolved ' + f.path.split('/').pop(), 'ok');
+          var nf = st.files.find(function (x) { return x.path === f.path; });
+          if (nf) showDiff(nf);
+        }).catch(function (e) { setBusy(false); showErr(e); });
+      }
+      var sideBtns = function () {
+        return [h('button', { class: 'btn sm', disabled: busy, title: 'Keep the whole file as it is on ' + (st.branch || 'HEAD') + ' (git checkout --ours)', onclick: function () { takeSide('ours'); } }, 'Take current file'),
+          h('button', { class: 'btn sm', disabled: busy, title: 'Take the whole incoming file (git checkout --theirs)', onclick: function () { takeSide('theirs'); } }, 'Take incoming file')];
+      };
+      api('GET', 'git/' + encodeURIComponent(p.name) + '/conflict' + qs() + '&path=' + encodeURIComponent(f.path)).then(function (d) {
+        if (current !== f.path) return;
+        var segs = d.exists && !d.binary && !d.big ? parseConflicts(d.text) : null;
+        var blocks = segs ? segs.filter(function (x) { return x.conflict; }) : [];
+        if (!blocks.length) {
+          var why = !d.exists ? 'The file was deleted on one side.' : d.binary ? 'This is a binary file.' : d.big ? 'The file is too big to show.' : 'No conflict markers left in the file.';
+          diff.replaceChildren(h('div', { class: 'gdhead mono' }, f.path, vsBtn),
+            h('div', { class: 'gmerge-none' }, h('div', null, why + ' Pick which version to keep:'), h('div', { class: 'gmacts' }, sideBtns())));
+          return;
+        }
+        var head = h('div', { class: 'gdhead mono' }), body = h('div', { class: 'gdiff gmerge' });
+        function left() { return blocks.filter(function (b) { return b.choice == null; }).length; }
+        function saveIt() {
+          setBusy(true, 'Resolving');
+          gpost('resolve', { path: f.path, text: mergeText(segs) }).then(function (r) {
+            setBusy(false); apply(r.status); toast('Resolved ' + f.path.split('/').pop(), 'ok');
+            var nf = st.files.find(function (x) { return x.path === f.path; });
+            if (nf && current === f.path) showDiff(nf);
+          }).catch(function (e) { setBusy(false); showErr(e); });
+        }
+        function all(c) { blocks.forEach(function (b) { b.choice = c; b.edit = null; }); render(); }
+        function lines(arr, cls) { return arr.map(function (l) { return h('div', { class: 'gl ' + cls }, l.replace(/\r$/, '') || ' '); }); }
+        function render() {
+          var n = left();
+          head.replaceChildren(h('span', null, f.path.split('/').pop(), h('span', { class: 'gmleft' + (n ? '' : ' done') }, n ? ' · ' + plural(n, 'conflict') + ' left' : ' · all picked')),
+            h('span', { class: 'gmacts' },
+              h('button', { class: 'btn sm', onclick: function () { all('ours'); } }, 'All current'),
+              h('button', { class: 'btn sm', onclick: function () { all('theirs'); } }, 'All incoming'),
+              h('button', { class: 'btn sm', title: 'Take one whole version of the file instead', onclick: function (e) {
+                showMenu(e.clientX, e.clientY, [{ label: 'Take current file (' + (st.branch || 'HEAD') + ')', action: function () { takeSide('ours'); } }, { label: 'Take incoming file', action: function () { takeSide('theirs'); } }, { label: 'Open in VS Code', action: function () { vsBtn.click(); } }]);
+              } }, '⋯'),
+              h('button', { class: 'btn sm primary gmsave', disabled: busy || n > 0, title: n ? 'Pick a side for every conflict first' : 'Save the file and mark it resolved (git add)', onclick: saveIt }, 'Mark resolved')));
+          var out = [];
+          segs.forEach(function (sg) {
+            if (!sg.conflict) {
+              var L = sg.lines;
+              if (L.length > 10) {
+                out = out.concat(lines(L.slice(0, 4), ''));
+                out.push(h('div', { class: 'gl hunk' }, '… ' + (L.length - 8) + ' unchanged lines …'));
+                out = out.concat(lines(L.slice(-4), ''));
+              } else out = out.concat(lines(L, ''));
+              return;
+            }
+            var b = sg, i = blocks.indexOf(b);
+            function pick(c) { b.choice = c; b.edit = null; render(); }
+            if (b.choice != null) {
+              var tag = { ours: 'current', theirs: 'incoming', both: 'both', edit: 'edited' }[b.choice];
+              out.push(h('div', { class: 'gmbar done' }, '✓ Conflict ' + (i + 1) + ': ' + tag + ' ', h('a', { onclick: function () { b.choice = null; render(); } }, 'Undo')));
+              out = out.concat(lines(conflictResult(b), 'gmres'));
+              return;
+            }
+            if (b.edit != null) {
+              var ta = h('textarea', { class: 'inp mono gmedit', rows: Math.min(20, b.edit.split('\n').length + 1), spellcheck: 'false', 'data-voice-to-text': 'off' });
+              ta.value = b.edit;
+              out.push(h('div', { class: 'gmbar' }, 'Conflict ' + (i + 1) + ': edit the result ',
+                h('a', { onclick: function () { b.text = ta.value; b.choice = 'edit'; b.edit = null; render(); } }, 'Done'), ' | ',
+                h('a', { onclick: function () { b.edit = null; render(); } }, 'Cancel')));
+              out.push(ta);
+              return;
+            }
+            out.push(h('div', { class: 'gmbar' }, 'Conflict ' + (i + 1) + ': ',
+              h('a', { onclick: function () { pick('ours'); } }, 'Accept Current'), ' | ',
+              h('a', { onclick: function () { pick('theirs'); } }, 'Accept Incoming'), ' | ',
+              h('a', { onclick: function () { pick('both'); } }, 'Accept Both'), ' | ',
+              h('a', { onclick: function () { b.edit = b.ours.concat(b.theirs).join('\n'); render(); } }, 'Edit')));
+            out.push(h('div', { class: 'gl gmhead ours' }, '<<<<<<< ' + (b.oursLabel || 'HEAD') + ' (Current Change)'));
+            out = out.concat(lines(b.ours, 'gmours'));
+            if (b.base) { out.push(h('div', { class: 'gl gmhead' }, '||||||| ' + (b.baseLabel || 'base'))); out = out.concat(lines(b.base, 'gmbase')); }
+            out.push(h('div', { class: 'gl gmhead' }, '======='));
+            out = out.concat(lines(b.theirs, 'gmtheirs'));
+            out.push(h('div', { class: 'gl gmhead theirs' }, '>>>>>>> ' + (b.theirsLabel || '') + ' (Incoming Change)'));
+          });
+          body.replaceChildren.apply(body, out);
+        }
+        render();
+        diff.replaceChildren(head, body);
+      }).catch(function (e) { diff.replaceChildren(empty(e.message)); });
     }
 
     function apply(newSt) {
@@ -4616,7 +4761,7 @@
     confirmDlg: confirmDlg, promptDlg: promptDlg, openModal: openModal, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, sound: sound, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
-    gitCode: gitCode, diffEl: diffEl, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
+    gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
   };

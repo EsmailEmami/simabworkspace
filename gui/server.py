@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.45.5"
+VERSION = "1.46.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -3423,7 +3423,7 @@ class GitRepo:
         if self.where == "server" and not project.get("remote"):
             raise ApiError(400, "this project has no folder for git")
 
-    def run(self, args: list, timeout=60, stdin: bytes = None):
+    def run(self, args: list, timeout=60, stdin: bytes = None, prog: str = "git"):
         env = dict(os.environ, PATH=tool_path(), **GIT_ENV)
         if self.where == "local":
             git = which("git")
@@ -3436,7 +3436,7 @@ class GitRepo:
             conf = conf.with_endpoint(ep.get("user"), ep.get("host"), ep.get("port"))
             envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in GIT_ENV.items())
             rpath = self.p["remote"].rstrip("/") + ("/" + self.repo if self.repo else "")
-            cmd = f"cd {remote_path_expr(rpath)} && {envs} git " + " ".join(shlex.quote(a) for a in args)
+            cmd = f"cd {remote_path_expr(rpath)} && {envs} {prog} " + " ".join(shlex.quote(a) for a in args)
             argv = ssh_base(conf, multiplex=bool(self.app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)]
             cwd = os.path.expanduser("~")
         try:
@@ -3487,6 +3487,7 @@ class GitRepo:
         code, last, _ = self.run(["log", "-1", "--format=%h %s"], timeout=15)
         st["last"] = last.strip() if code == 0 else ""
         st["fetched"] = git_fetched(self.app).get(self.key())
+        st["merging"] = self.merging() if st["conflicts"] or st["files"] else False
         return st
 
     def key(self) -> str:
@@ -3529,7 +3530,8 @@ class GitRepo:
             if not isinstance(files, list) or not files or not all(isinstance(f, str) and git_path_ok(f) for f in files):
                 raise ApiError(400, "pick at least one file")
             self.check(["add", "-A", "--"] + files)
-            out = self.check(["commit", "-m", message, "--"] + files)
+            # a merge can only be committed whole (git refuses "partial commit during a merge")
+            out = self.check(["commit", "-m", message] + ([] if self.merging() else ["--"] + files))
         self.flush()
         return out
 
@@ -3606,6 +3608,87 @@ class GitRepo:
             out += self.check(["rm", "-f", "-q", "--"] + added)
         if new:
             out += self.check(["clean", "-f", "-q", "--"] + new)
+        self.flush()
+        return out
+
+    # merge conflicts ----------------------------------------------------------
+    def merging(self) -> bool:
+        return self.run(["rev-parse", "-q", "--verify", "MERGE_HEAD"], timeout=15)[0] == 0
+
+    def conflict(self, path: str) -> dict:
+        """The conflicted file as it is now (with <<<<<<< markers), for resolving in the dialog."""
+        if not git_path_ok(path):
+            raise ApiError(400, "bad path")
+        f = next((x for x in self.status().get("files", []) if x["path"] == path), None)
+        if not f or not f["conflict"]:
+            raise ApiError(400, path + " has no merge conflict")
+        if self.where == "local":
+            full = os.path.join(self.p["local"], self.repo, path)
+            try:
+                with open(full, "rb") as fh:
+                    raw = fh.read(2_000_001)
+                code = 0
+            except OSError:
+                raw, code = b"", 1
+        else:
+            code, text, _ = self.run(["--", path], timeout=30, prog="cat")
+            raw = text.encode("utf-8")
+        binary = b"\0" in raw[:8000]
+        text = raw.decode("utf-8", "replace")
+        return {"path": path, "code": f["x"] + f["y"], "exists": code == 0, "binary": binary,
+                "big": len(raw) > 2_000_000, "text": "" if binary or len(raw) > 2_000_000 else text,
+                "merging": self.merging()}
+
+    def resolve(self, path: str, text=None, side: str = None) -> str:
+        """Mark a conflict resolved: with the given final text, or by taking one whole side
+        ("ours" = current / HEAD, "theirs" = incoming)."""
+        if not git_path_ok(path):
+            raise ApiError(400, "bad path")
+        f = next((x for x in self.status().get("files", []) if x["path"] == path), None)
+        if not f or not f["conflict"]:
+            raise ApiError(400, path + " has no merge conflict")
+        self.flush()
+        if side in ("ours", "theirs"):
+            stage = "2" if side == "ours" else "3"
+            code, ls, _ = self.run(["ls-files", "-u", "--", path], timeout=15)
+            if not any(l.split()[2:3] == [stage] for l in ls.splitlines() if len(l.split()) > 2):
+                out = self.check(["rm", "-q", "-f", "--", path])      # that side deleted the file
+            else:
+                self.check(["checkout", "--" + side, "--", path])
+                out = self.check(["add", "--", path])
+        elif isinstance(text, str):
+            if len(text) > 5_000_000:
+                raise ApiError(400, "too big to save from here")
+            if re.search(r"^(<{7}|>{7})( |$)", text, re.M):
+                raise ApiError(400, "conflict markers are still in the file")
+            code, ls, _ = self.run(["ls-files", "-u", "--", path], timeout=15)
+            modes = {l.split()[2]: l.split()[0] for l in ls.splitlines() if len(l.split()) > 2}
+            mode = modes.get("2") or modes.get("3") or "100644"
+            if mode not in ("100644", "100755"):
+                raise ApiError(400, "not a normal file — take one side instead")
+            code, sha, err = self.run(["hash-object", "-w", "--stdin", "--path=" + path], timeout=30, stdin=text.encode("utf-8"))
+            sha = sha.strip()
+            if code != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+                raise ApiError(400, (err.strip() or "git hash-object failed")[-500:])
+            # a stage-0 entry replaces the conflict stages; then write the file from it
+            code, out, err = self.run(["update-index", "--index-info"], timeout=30,
+                                      stdin=f"{mode} {sha} 0\t{path}\n".encode("utf-8"))
+            if code != 0:
+                raise ApiError(400, (err.strip() or "git update-index failed")[-500:])
+            out = self.check(["checkout-index", "-f", "--", path])
+        else:
+            raise ApiError(400, "nothing to resolve with")
+        self.flush()
+        return out
+
+    def merge_abort(self) -> str:
+        self.flush()
+        if self.merging():
+            out = self.check(["merge", "--abort"])
+        elif self.run(["rev-parse", "-q", "--verify", "REBASE_HEAD"], timeout=15)[0] == 0:
+            out = self.check(["rebase", "--abort"])
+        else:
+            raise ApiError(400, "no merge in progress")
         self.flush()
         return out
 
@@ -8151,6 +8234,17 @@ class Handler(BaseHTTPRequestHandler):
                 repo.discard(body.get("files"))
                 app.invalidate()
                 app.activity.add("git-discard", p["name"], ", ".join(str(x) for x in body.get("files") or [])[:200], repo=repo.repo)
+                return {"status": repo.status()}
+            if method == "GET" and act == "conflict":
+                return repo.conflict((query.get("path") or [""])[0])
+            if method == "POST" and act in ("resolve", "merge-abort"):
+                if act == "resolve":
+                    side = body.get("side")
+                    repo.resolve(body.get("path"), body.get("text"), side if side in ("ours", "theirs") else None)
+                else:
+                    repo.merge_abort()
+                app.invalidate()
+                app.activity.add("git-" + act, p["name"], str(body.get("path") or "")[:200], repo=repo.repo)
                 return {"status": repo.status()}
             if method == "POST" and act == "untrack":
                 repo.untrack(body.get("files"))

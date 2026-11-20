@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.3 2026-11-20  @ and Find file see the files of repositories inside a repository (only
+#                       the first level was found); such a new repository is listed once, not twice
 #    1.45.2 2026-11-20  VS Code on the server opens the project again when its folder is
 #                       "~/…" (VS Code got the ~ as is and opened an empty window); Git dialog's
 #                       "Open in VS Code" opens the copy git runs on (this machine or server)
@@ -331,7 +333,7 @@
 
 set -u -o pipefail
 
-VERSION="1.45.2"
+VERSION="1.45.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

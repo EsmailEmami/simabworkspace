@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.45.2"
+VERSION = "1.45.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2582,6 +2582,7 @@ def local_files(root: str) -> list:
 
 
 def with_dirs(files: list) -> list:
+    files = [f for f in files if not f.endswith("/")]       # folders come from the paths, once
     dirs = set()
     for f in files:
         parts = f.split("/")[:-1]
@@ -3819,12 +3820,37 @@ def fs_git_files(folder, prefix):
     return [prefix + x for x in r.stdout.decode("utf-8", "replace").split("\0") if x]
 
 
+def fs_git_tree(folder, prefix, limit, depth=0):
+    """git's list, with repositories inside the repository opened too: git names a nested
+    repository only as "name/" (new) or "name" (tracked as a link) — never its files."""
+    got = fs_git_files(folder, prefix)
+    if got is None:
+        return None
+    out = []
+    for x in got:
+        rel = x[len(prefix):].rstrip("/")
+        full = os.path.join(folder, rel)
+        if (x.endswith("/") or os.path.isdir(full)) and depth < 5 and os.path.exists(os.path.join(full, ".git")):
+            sub = fs_git_tree(full, prefix + rel + "/", limit - len(out), depth + 1)
+            if sub is not None:
+                out.extend(sub)
+                if len(out) >= limit:
+                    break
+                continue
+        if not x.endswith("/"):
+            out.append(x)
+            if len(out) >= limit:
+                break
+    return out
+
+
 def fs_all(root, limit=30000):
     """Every file of a project, for Find file and @-mentions. Inside git repositories git's
-    list is used (so .gitignore counts) — also when the project folder holds several of them."""
+    list is used (so .gitignore counts) — also when the project folder holds several of them,
+    and when a repository holds other repositories."""
     root = os.path.realpath(os.path.expanduser(root or "~"))
     if os.path.exists(os.path.join(root, ".git")):
-        got = fs_git_files(root, "")
+        got = fs_git_tree(root, "", limit)
         if got is not None:
             return got[:limit]
     out = []
@@ -3832,7 +3858,7 @@ def fs_all(root, limit=30000):
         rel = os.path.relpath(d, root)
         rel = "" if rel == "." else rel.replace(os.sep, "/") + "/"
         if rel and os.path.exists(os.path.join(d, ".git")):
-            got = fs_git_files(d, rel)
+            got = fs_git_tree(d, rel, limit - len(out))
             if got is not None:
                 out.extend(got)
                 dirs[:] = []

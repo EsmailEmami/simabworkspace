@@ -1154,6 +1154,36 @@ class ProjectFiles(unittest.TestCase):
             self.assertEqual(sorted(json.loads(r.stdout)["files"]), files)
 
 
+class ProjectFilesNestedRepos(unittest.TestCase):
+    def test_a_repository_holding_repositories_lists_their_files_once(self):
+        # the user's project: the folder is a repository AND holds repositories (one tracked as a
+        # link, one new) — @ found only the first level, and the new one showed twice
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        g = lambda *a: subprocess.run(["git"] + list(a), check=True, capture_output=True)
+        with tempfile.TemporaryDirectory() as d:
+            g("init", "-q", d)
+            Path(d, "notes.md").write_text("x")
+            for repo in ("tax-admin", "tax-baskool"):
+                g("init", "-q", str(Path(d, repo)))
+                Path(d, repo, "src").mkdir()
+                Path(d, repo, "src", "deep.ts").write_text("x")
+            Path(d, "tax-admin", ".gitignore").write_text("dist/\n")
+            Path(d, "tax-admin", "dist").mkdir()
+            Path(d, "tax-admin", "dist", "out.js").write_text("x")
+            g("-C", str(Path(d, "tax-admin")), "-c", "user.email=t@e", "-c", "user.name=t", "add", "-A")
+            g("-C", str(Path(d, "tax-admin")), "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "x")
+            g("-C", d, "add", "tax-admin", "notes.md")           # tracked as a link (gitlink)
+            want = ["notes.md", "tax-admin/.gitignore", "tax-admin/src/deep.ts", "tax-baskool/src/deep.ts"]
+            self.assertEqual(sorted(sw.local_files(d)), want)
+            r = subprocess.run([sys.executable, "-c", sw.FS_PY, "all", d], capture_output=True, text=True)
+            self.assertEqual(sorted(json.loads(r.stdout)["files"]), want)
+            withd = sw.with_dirs(sw.local_files(d))
+            self.assertEqual(withd.count("tax-baskool/"), 1)
+            self.assertIn("tax-baskool/src/", withd)
+        self.assertEqual(sw.with_dirs(["x/", "x/a"]), ["x/", "x/a"])
+
+
 class OpenInVSCode(TmpHome):
     def test_server_folder_with_tilde_is_given_to_vscode_in_full(self):
         app = sw.App(self.store, sw.ServerConf("esi", "h", "22", "/k"))
@@ -2315,7 +2345,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.45.2"', text)
+        self.assertIn('VERSION="1.45.3"', text)
 
 
 if __name__ == "__main__":

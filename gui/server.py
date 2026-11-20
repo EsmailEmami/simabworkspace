@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.45.1"
+VERSION = "1.45.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -7054,6 +7054,21 @@ class App:
         return self.set_tunnels(project, specs)
 
     # editor
+    def full_remote_path(self, p: dict) -> str:
+        """The server folder with ~ replaced by the real home: VS Code does not expand ~, it
+        opened an empty window for "~/shop"."""
+        r = p["remote"]
+        if r != "~" and not r.startswith("~/"):
+            return r
+        homes = self.__dict__.setdefault("_server_homes", {})
+        key = json.dumps(p.get("endpoint") or {}, sort_keys=True)
+        if not homes.get(key):
+            home = (self.server_ls("~/", p["name"]).get("home") or "").rstrip("/")
+            if not home.startswith("/"):
+                raise ApiError(502, "could not find the home folder on the server")
+            homes[key] = home
+        return homes[key] + r[1:]
+
     def open_editor(self, body: dict) -> dict:
         body = body if isinstance(body, dict) else {}
         where = body.get("where") or "local"
@@ -7082,6 +7097,7 @@ class App:
                 raise ApiError(400, "the server is not configured")
             conf = ServerConf(conf.user, conf.host, conf.port, conf.key or default_identity())
             write_vscode_ssh_alias(conf)
+            folder = self.full_remote_path(p)
             if is_wsl():
                 wh = windows_home()
                 if wh:
@@ -7089,7 +7105,7 @@ class App:
                         prepare_windows_vscode(conf, wh)
                     except OSError as e:
                         raise ApiError(500, f"could not set up Windows SSH for VS Code: {e}")
-            argv = editor + ["--remote", f"ssh-remote+{VSCODE_HOST_ALIAS}", p["remote"]]
+            argv = editor + ["--remote", f"ssh-remote+{VSCODE_HOST_ALIAS}", folder]
         try:
             subprocess.Popen(argv, cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

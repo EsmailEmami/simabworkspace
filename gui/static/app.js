@@ -2745,7 +2745,7 @@
       }
       if (st.conflicts) {
         problems.push(h('div', null, plural(st.conflicts, 'file') + ' with merge conflicts. Resolve them in VS Code, then commit here. ',
-          h('button', { class: 'btn sm', onclick: function () { openCode(p); } }, 'Open in VS Code')));
+          h('button', { class: 'btn sm', title: 'Opens the copy git runs on — ' + (st.where === 'local' ? 'this machine' : 'the server'), onclick: function () { openEditor(p, st.where === 'local' ? 'local' : 'server'); } }, 'Open in VS Code')));
       }
       banner.replaceChildren.apply(banner, problems);
       banner.classList.toggle('hidden', !problems.length);
@@ -2785,7 +2785,7 @@
         .then(function (d) {
           if (current !== f.path) return;
           diff.replaceChildren(h('div', { class: 'gdhead mono' }, f.path,
-            h('button', { class: 'btn sm', onclick: function () { openCode(p); } }, 'Open in VS Code')), diffEl(d.diff || '(no textual changes)'));
+            h('button', { class: 'btn sm', title: 'Opens the copy git runs on — ' + (st.where === 'local' ? 'this machine' : 'the server'), onclick: function () { openEditor(p, st.where === 'local' ? 'local' : 'server'); } }, 'Open in VS Code')), diffEl(d.diff || '(no textual changes)'));
         }).catch(function (e) { diff.replaceChildren(empty(e.message)); });
     }
 

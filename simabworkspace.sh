@@ -41,6 +41,9 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.2 2026-11-20  VS Code on the server opens the project again when its folder is
+#                       "~/…" (VS Code got the ~ as is and opened an empty window); Git dialog's
+#                       "Open in VS Code" opens the copy git runs on (this machine or server)
 #    1.45.1 2026-11-20  Chat: a code block inside a list item (indented ```) shows as a code
 #                       block with copy, not as raw text
 #    1.45.0 2026-11-20  Git dialog redesigned for projects with many repositories: a list of
@@ -328,7 +331,7 @@
 
 set -u -o pipefail
 
-VERSION="1.45.1"
+VERSION="1.45.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -298,6 +298,8 @@ const tests = {
     assert.match(q('.gbanner', modal)[0].textContent, /conflicts/);
     assert.match(q('.ghead', modal)[0].textContent, /↓2/);
     assert.ok(!q('.gsync-btn', modal).length, 'no Pull button while there are conflicts');
+    q('button', q('.gbanner', modal)[0]).find((b) => b.textContent === 'Open in VS Code').click(); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/editor').pop().body, { project: 'cheshmeh', where: 'local' }, 'VS Code opens the copy git runs on');
     q('.gfile', modal)[0].dispatch('click');
     await settle();
     assert.match(q('.gdiff', modal)[0].textContent, /\+b/);

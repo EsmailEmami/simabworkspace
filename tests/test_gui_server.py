@@ -1154,6 +1154,34 @@ class ProjectFiles(unittest.TestCase):
             self.assertEqual(sorted(json.loads(r.stdout)["files"]), files)
 
 
+class OpenInVSCode(TmpHome):
+    def test_server_folder_with_tilde_is_given_to_vscode_in_full(self):
+        app = sw.App(self.store, sw.ServerConf("esi", "h", "22", "/k"))
+        p = {"name": "shop", "source": "manual", "local": "", "localExists": False, "remote": "~/work/shop"}
+        app.projects = lambda max_age=0: [p]
+        ls = mock.Mock(return_value={"home": "/home/esi", "entries": []})
+        app.server_ls = ls
+        with mock.patch.object(sw, "which", return_value="/usr/bin/code"), \
+                mock.patch.object(sw, "write_vscode_ssh_alias"), mock.patch.object(sw, "is_wsl", return_value=False), \
+                mock.patch.object(sw.subprocess, "Popen") as po:
+            app.open_editor({"project": "shop", "where": "server"})
+            self.assertEqual(po.call_args[0][0], ["/usr/bin/code", "--remote", "ssh-remote+" + sw.VSCODE_HOST_ALIAS, "/home/esi/work/shop"])
+            app.open_editor({"project": "shop", "where": "server"})
+            self.assertEqual(ls.call_count, 1, "the home folder is asked once")
+            p["remote"] = "/srv/shop"
+            app.open_editor({"project": "shop", "where": "server"})
+            self.assertEqual(po.call_args[0][0][-1], "/srv/shop")
+        ls.return_value = {"home": ""}
+        app._server_homes.clear()
+        p["remote"] = "~"
+        with mock.patch.object(sw, "which", return_value="/usr/bin/code"), \
+                mock.patch.object(sw, "write_vscode_ssh_alias"), mock.patch.object(sw, "is_wsl", return_value=False), \
+                mock.patch.object(sw.subprocess, "Popen") as po:
+            with self.assertRaises(sw.ApiError):
+                app.open_editor({"project": "shop", "where": "server"})
+            po.assert_not_called()
+
+
 class GitStatusParse(unittest.TestCase):
     def test_branch_and_files(self):
         raw = "## main...origin/main [ahead 2, behind 1]\0 M src/a.go\0?? new file.txt\0R  b2.go\0b.go\0UU c.go\0"
@@ -2287,7 +2315,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.45.1"', text)
+        self.assertIn('VERSION="1.45.2"', text)
 
 
 if __name__ == "__main__":

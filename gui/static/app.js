@@ -1485,9 +1485,11 @@
       renderTitle();
       var by = {};
       (d.sessions || []).forEach(function (x) { by[x.id] = x; });
+      var gone = d.gone || [];
       S.tabs.slice().forEach(function (t) {
         var x = by[t.id];
         if (x && (x.win || '') !== WID) removeTab(t, false);          // moved to another window
+        else if (!x && gone.indexOf(t.id) >= 0) removeTab(t, false);  // closed on another device
       });
       var now = Date.now();
       (d.sessions || []).forEach(function (x) {
@@ -3131,7 +3133,8 @@
     var el = h('div', { class: 'proj' + (open ? ' open' : ''), style: '--pc:' + projectColor(p.name) });
     var more = h('button', { class: 'icon-btn', title: 'More', onclick: function (e) { e.stopPropagation(); projectMenu(p, more); } }, '⋯');
     var tip = [p.title ? 'name: ' + p.name : '', p.remote ? 'server: ' + p.remote : '', p.local ? 'local: ' + p.local : '',
-      sync ? 'sync: ' + sync.label + (sync.conflicts ? ', ' + plural(sync.conflicts, 'conflict') : '') : ''].filter(Boolean).join('\n');
+      sync ? 'sync: ' + sync.label + (sync.conflicts ? ', ' + plural(sync.conflicts, 'conflict') : '') : '',
+      p.sharedFrom ? 'from: ' + p.sharedFrom + ' (shared between devices)' : ''].filter(Boolean).join('\n');
     el.dataset.proj = p.name;
     el.append(h('div', { class: 'proj-head', draggable: 'true', title: tip, onclick: function () {
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
@@ -3563,6 +3566,7 @@
       chk('bellNotify', 'Notification when a tab needs you'),
       snd.el,
       chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
+      chk('shareDevices', 'Same projects and tabs on every device', 'The installed app and the web version show each other’s projects; chats, Files, Changes and Tasks tabs open and close on all of them.'),
       h('div', { class: 'sec' }, 'In the installed app'),
       h('div', { class: 'app-only' },
         ['Two-way sync of projects with your computer', 'Terminals and run commands on your computer', 'VS Code (local or Remote-SSH)',
@@ -3616,6 +3620,7 @@
         chk('bellNotify', 'Desktop notification when a tab needs you'),
         snd.el,
         chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
+      chk('shareDevices', 'Same projects and tabs on every device', 'The installed app and the web version show each other’s projects; chats, Files, Changes and Tasks tabs open and close on all of them.'),
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
           h('button', { class: 'btn sm danger', onclick: uninstallDialog }, 'Uninstall…'))

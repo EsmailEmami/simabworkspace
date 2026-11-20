@@ -339,6 +339,7 @@ DEFAULT_SETTINGS = {
     "gitWatch": True,            # git badges: check every repository in the background
     "gitAutoFetch": True,        # …and `git fetch` every few minutes so "behind" is current
     "dockerWatch": True,         # check the projects' docker containers; tell me when one crashes
+    "shareDevices": True,        # same projects + open tabs on every device (installed app ↔ web)
     "port": 0,                   # remembered so the window keeps the same address
     "starred": [],               # starred commands (Ctrl+Shift+P) and project ⋯ menu entries, shown first
 }
@@ -4703,6 +4704,75 @@ class FilesSession:
         pass
 
 
+# ----------------------------------------------------------------------------- devices
+# The installed app (each laptop) and the web version share their projects and open tabs through
+# one file on the SERVER (~/.config/simabworkspace/devices.json). Projects: every device puts its
+# own list there (a snapshot); the others show those they do not have. Tabs: one shared set with
+# small add / remove operations (a removed tab leaves a tombstone, so every device closes it too).
+SHARE_PY = r"""
+import json, os, sys, time, fcntl
+d = os.path.expanduser("~/.config/simabworkspace")
+os.makedirs(d, exist_ok=True)
+f = os.path.join(d, "devices.json")
+op = json.loads(sys.stdin.read() or "{}")
+lk = open(f + ".lock", "a")
+fcntl.flock(lk, fcntl.LOCK_EX)
+try:
+    with open(f, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        data = {}
+except (OSError, ValueError):
+    data = {}
+now = time.time()
+devs = {k: v for k, v in (data.get("devices") or {}).items() if isinstance(v, dict) and now - float(v.get("at") or 0) < 60 * 86400}
+tabs = {k: v for k, v in (data.get("tabs") or {}).items() if isinstance(v, dict)}
+closed = {k: v for k, v in (data.get("closed") or {}).items() if isinstance(v, dict) and now - float(v.get("at") or 0) < 7 * 86400}
+me = op.get("device") or ""
+if me:
+    rec = devs.get(me) or {}
+    rec.update(name=op.get("name") or "", at=now)
+    if isinstance(op.get("projects"), list):
+        rec["projects"] = op["projects"]
+    devs[me] = rec
+for t in op.get("add") or []:
+    k = t.get("key")
+    if k and k not in tabs:
+        tabs[k] = {"spec": t.get("spec") or {}, "title": t.get("title") or "", "at": now, "by": me}
+    if k:
+        closed.pop(k, None)
+for t in op.get("remove") or []:
+    k = t.get("key")
+    if k:
+        tabs.pop(k, None)
+        closed[k] = {"at": now, "by": me, "keep": bool(t.get("keep"))}
+while len(tabs) > 60:
+    tabs.pop(min(tabs, key=lambda k: tabs[k].get("at") or 0))
+data = {"devices": devs, "tabs": tabs, "closed": closed}
+tmp = f + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False)
+os.replace(tmp, f)
+print(json.dumps(data))
+"""
+
+
+def share_tab_key(spec: dict) -> str:
+    """The same tab on every device: a server chat by its conversation, Files / Changes by project,
+    Tasks. Terminals and local tabs stay on their device ("")."""
+    kind, proj = spec.get("kind"), spec.get("project") or ""
+    if kind == "chat":
+        conv = spec.get("resume") or ""
+        if spec.get("watch") or spec.get("where") != "server" or not UUID_RE.fullmatch(conv):
+            return ""
+        return "chat:" + conv
+    if kind in ("files", "changes") and proj:
+        return kind + ":" + proj
+    if kind == "tasks":
+        return "tasks"
+    return ""
+
+
 # ----------------------------------------------------------------------------- tasks
 # The user's own to-do list. It lives on the SERVER (~/.config/simabworkspace/tasks.json), not
 # in this app's database, so the installed app on every laptop and the web version all see the
@@ -5582,6 +5652,13 @@ class App:
         self._restored.set()
         self._live_saved = False
         self.copies = {}              # project -> FastCopy (Add project with parallel copies)
+        self._share_lock = threading.Lock()
+        self._share_kick = threading.Event()     # a tab opened / closed: share now
+        self._share_stop = False
+        self._share_keep = {}                    # tab key -> closed here (value: Claude keeps working)
+        self._share_seen = None                  # tab keys the shared set and this device agree on
+        self._share_projects = []                # projects of the other devices
+        self._share_gone = {}                    # session id -> closed because another device closed it
         self._copies_checked = False
 
     @property
@@ -5594,6 +5671,17 @@ class App:
         if time.time() - t < max_age:
             return cached
         p = merge_projects([] if self.web else mutagen_sessions(), self.store.manual(), self.store.data["projects"])
+        have = {x["name"] for x in p} | {x.get("remote") for x in p if x.get("remote")}
+        for sp in self._share_projects:
+            if sp["name"] in have or sp["remote"] in have:
+                continue
+            have |= {sp["name"], sp["remote"]}
+            own = self.store.data["projects"].get(sp["name"]) or {}      # renamed / coloured here
+            p.append({"name": sp["name"], "source": "shared", "local": "", "localExists": False, "remote": sp["remote"],
+                      "endpoint": {}, "sync": None, "commands": list(own.get("commands") or []),
+                      "color": own.get("color") or str(sp.get("color") or "")[:20],
+                      "starter": own.get("starter") or str(sp.get("starter") or "")[:2000],
+                      "title": own.get("title") or str(sp.get("title") or "")[:80], "sharedFrom": sp.get("sharedFrom") or ""})
         if self.web:                  # "local" would be the web server's own disk
             for x in p:
                 x["local"], x["localExists"] = "", False
@@ -5651,6 +5739,125 @@ class App:
         if res.get("error"):
             raise ApiError(400, str(res["error"]))
         return {"tasks": res.get("tasks") or [], "rev": res.get("rev") or 0}
+
+    # projects + open tabs shared with the other devices (see SHARE_PY) ------------------
+    def device_id(self) -> str:
+        d = self.store.db.get("deviceId", "")
+        if not (isinstance(d, str) and re.fullmatch(r"[0-9a-f]{16}", d)):
+            d = secrets.token_hex(8)
+            self.store.db.put("deviceId", d)
+        return d
+
+    def device_name(self) -> str:
+        return "Web" if self.web else (socket.gethostname() or "Computer")[:40]
+
+    def share_on(self) -> bool:
+        return bool(self.store.settings.get("shareDevices", True)) and self.conf.configured
+
+    def _share_projects_mine(self) -> list:
+        """This device's projects that live on the default server (others cannot reach the rest)."""
+        c, out = self.conf, []
+        for p in self.projects(max_age=10):
+            ep = p.get("endpoint") or {}
+            if p.get("source") == "shared" or not p.get("remote"):
+                continue
+            if ep.get("host") and (ep.get("host") != c.host or (ep.get("user") or c.user) != c.user
+                                   or str(ep.get("port") or c.port) != str(c.port)):
+                continue
+            out.append({k: p.get(k) or "" for k in ("name", "remote", "title", "color", "starter")})
+        return out[:300]
+
+    def _share_tabs_mine(self) -> dict:
+        out = {}
+        for s in list(self.sessions.values()):
+            k = share_tab_key(getattr(s, "spec", {}) or {})
+            if k and k not in out:
+                out[k] = s
+        return out
+
+    def share_sync(self) -> dict:
+        """One round: publish my projects and tab changes, then open the tabs other devices opened
+        and close the ones they closed. Answers what changed here (for tests / logs)."""
+        if not self.share_on() or self._share_stop:
+            return {}
+        with self._share_lock:
+            mine = self._share_tabs_mine()
+            first = self._share_seen is None          # first round: only read (what is open / closed elsewhere)
+            seen = set() if first else self._share_seen
+            add = [] if first else [
+                {"key": k, "title": s.title, "spec": {x: s.spec.get(x) for x in ("kind", "project", "resume", "named") if s.spec.get(x)}}
+                for k, s in mine.items() if k not in seen]
+            # only tabs the user closed here (quitting / a restart closes nothing elsewhere)
+            keep = dict(self._share_keep)
+            remove = [] if first else [{"key": k, "keep": bool(v)} for k, v in keep.items() if k not in mine]
+            op = {"device": self.device_id(), "name": self.device_name(), "projects": self._share_projects_mine(),
+                  "add": add, "remove": remove}
+            res = remote_python(self.conf, SHARE_PY, [], stdin=json.dumps(op).encode(),
+                                multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30)
+            if not isinstance(res, dict) or "tabs" not in res:
+                return {}
+            seen = (seen | {t["key"] for t in add}) - {t["key"] for t in remove}
+            for k in keep:
+                self._share_keep.pop(k, None)
+            if first:
+                seen = {k for k in mine if k in (res.get("tabs") or {})}      # the rest is added next round
+            # projects of the other devices
+            me, others = self.device_id(), []
+            for dev_id, dev in (res.get("devices") or {}).items():
+                if dev_id == me or not isinstance(dev, dict):
+                    continue
+                for p in dev.get("projects") or []:
+                    if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"] and isinstance(p.get("remote"), str) and p["remote"]:
+                        others.append(dict(p, sharedFrom=str(dev.get("name") or "")[:40]))
+            if others != self._share_projects:
+                self._share_projects = others
+                self._projects_cache = (0.0, [])
+            names = {p["name"] for p in self.projects(max_age=0)}
+            opened, closed = [], []
+            for k, c in (res.get("closed") or {}).items():
+                s = mine.get(k)
+                if s and isinstance(c, dict) and c.get("by") != me and not any(t["key"] == k for t in add):
+                    try:
+                        self.close_session(s.id, keep=bool(c.get("keep")), share=False)
+                    except ApiError:
+                        pass
+                    self._share_gone[s.id] = time.time()
+                    seen.discard(k)
+                    closed.append(k)
+            for k, t in (res.get("tabs") or {}).items():
+                if k in mine or k in seen or not isinstance(t, dict):
+                    continue
+                sp = t.get("spec") or {}
+                if sp.get("project") and sp["project"] not in names:
+                    continue                   # that project is not here
+                body = {x: sp.get(x) for x in ("kind", "project", "resume", "mode", "model", "effort", "named") if sp.get(x)}
+                if body.get("kind") == "chat":
+                    body["where"] = "server"
+                body["title"] = str(t.get("title") or "")[:80]
+                try:
+                    info = self._create_session(body)
+                except (ApiError, OSError) as e:
+                    log_line(f"shared tab {k}: {e}")
+                    continue
+                sess = self.sessions.get(info.get("id"))
+                if sess:
+                    sess.moved = time.time()          # the open pages add it (see syncTabs)
+                seen.add(k)
+                opened.append(k)
+            self._share_seen = seen
+            if first and any(k not in seen for k in self._share_tabs_mine()):
+                self._share_kick.set()
+            return {"opened": opened, "closed": closed}
+
+    def share_loop(self):
+        while not self._share_stop:
+            try:
+                self.share_sync()
+            except Exception as e:                     # never let the loop die
+                log_line(f"share: {e}")
+            busy = time.time() - self.last_visible < 120
+            self._share_kick.wait(6 if busy else 60)
+            self._share_kick.clear()
 
     def _shared_call(self, p: dict, op: str, stdin: bytes = None) -> dict:
         side = self._shared_side(p)
@@ -5919,7 +6126,10 @@ class App:
     def tabs(self) -> dict:
         self._restored.wait(60)
         wins = self.live_windows()
-        return {"sessions": [s.info() for s in self.sessions.values()], "windows": wins, "now": time.time()}
+        now = time.time()
+        self._share_gone = {k: t for k, t in self._share_gone.items() if now - t < 120}
+        return {"sessions": [s.info() for s in self.sessions.values()], "windows": wins, "now": now,
+                "gone": list(self._share_gone)}
 
     def get(self, sid: str) -> Session:
         s = self.sessions.get(sid)
@@ -5930,10 +6140,15 @@ class App:
             raise ApiError(404, "this tab no longer exists")
         return s
 
-    def close_session(self, sid: str, keep=False):
+    def close_session(self, sid: str, keep=False, share=True):
         """keep: a chat tab closed while Claude works — Claude finishes on the server (it can be
-        opened again from Sessions); otherwise it is stopped unless another device is on it too."""
+        opened again from Sessions); otherwise it is stopped unless another device is on it too.
+        share=False: closed because another device closed it."""
         s = self.get(sid)
+        if share:
+            k = share_tab_key(getattr(s, "spec", {}) or {})
+            if k:
+                self._share_keep[k] = keep
         with self.lock:
             self.sessions.pop(sid, None)
         if keep and isinstance(s, ChatSession):
@@ -6809,6 +7024,7 @@ class App:
         return {"ok": True, "running": self.claude_running(force=True).get(project, [])}
 
     def _remember(self):
+        self._share_kick.set()
         specs = []
         for s in list(self.sessions.values()):
             sp = dict(s.spec)
@@ -6819,6 +7035,9 @@ class App:
         self.store.set_last_tabs(specs)
 
     def shutdown_sessions(self):
+        self._share_stop = True               # quitting closes tabs here, not on the other devices
+        with self._share_lock:
+            pass
         self._save_live()
         for s in list(self.sessions.values()):
             getattr(s, "shutdown", s.kill)()
@@ -7760,6 +7979,7 @@ class WebGate:
         if self.start_loops:
             threading.Thread(target=app.git_watch_loop, daemon=True).start()
             threading.Thread(target=app.docker_watch_loop, daemon=True).start()
+            threading.Thread(target=app.share_loop, daemon=True).start()
         return app
 
     def shutdown(self):
@@ -8599,6 +8819,7 @@ def serve(foreground_msg=True):
     threading.Thread(target=app.docker_watch_loop, daemon=True).start()
     threading.Thread(target=app.start_tunnels, daemon=True).start()
     app.restore_live()
+    threading.Thread(target=app.share_loop, daemon=True).start()
     start_wsl_keepalive()
     log_line(f"started {VERSION} on 127.0.0.1:{app.port} (pid {os.getpid()})")
     for sig in (signal.SIGTERM, signal.SIGINT):

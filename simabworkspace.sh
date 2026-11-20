@@ -42,7 +42,8 @@
 #
 #  Changelog:
 #    1.46.0 2026-11-20  Git dialog: resolve merge conflicts in place like VS Code (Accept Current /
-#                       Incoming / Both / Edit per conflict, or a whole side), Abort merge.
+#                       Incoming / Both / Edit per conflict, or a whole side), Abort merge;
+#                       projects and open tabs (chats, Files, Changes, Tasks) shared app ↔ web
 #    1.45.5 2026-11-20  Git dialog: commit box right under the branch, a clearer Commit button;
 #                       git errors (push rejected…) stay in the dialog with the fix (Pull & push)
 #    1.45.4 2026-11-20  A narrow chat (tablet split, laptop side pane) shows one chip for mode /

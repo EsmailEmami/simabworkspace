@@ -1159,6 +1159,14 @@ const tests = {
     await SW.moveToWindow(t3, wid); await settle();
     assert.strictEqual(winOf[t3.id], wid);
     assert.ok(!S.tabs.includes(t3));
+    // closed on another device (installed app ↔ web): the tab goes, nothing is sent back
+    fakeTabs = { sessions: [{ id: 'dev1', title: 'Tasks', spec: { kind: 'tasks', project: '', where: '' }, alive: true, win: '', moved: 1e12 }], windows: [], now: 0 };
+    await SW.syncTabs(); await settle();
+    assert.ok(S.tabs.some((t) => t.id === 'dev1'), 'a tab opened on another device shows up');
+    fakeTabs = { sessions: [], windows: [], now: 0, gone: ['dev1'] };
+    await SW.syncTabs(); await settle();
+    assert.ok(!S.tabs.some((t) => t.id === 'dev1'));
+    assert.ok(!calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/dev1'));
     fakeTabs = { sessions: [], windows: [], now: 0 };
   },
 

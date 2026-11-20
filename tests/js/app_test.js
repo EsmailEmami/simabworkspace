@@ -97,6 +97,7 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/git/cheshmeh/repos')) res = { where: 'local', gitSync: true, repos: ['cheshmeh-api-service', 'cheshmeh-web-app'],
     statuses: { 'cheshmeh-api-service': apiStatus(), 'cheshmeh-web-app': gitStatus } };
   else if (url.startsWith('/api/git/cheshmeh/status?repo=cheshmeh-api-service')) res = apiStatus();
+  else if (global.gitFail && url === '/api/git/cheshmeh/' + global.gitFail) return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: "! [rejected] main -> main (fetch first)\nerror: failed to push some refs" }) });
   else if (/^\/api\/git\/cheshmeh\/(pull|push|fetch)$/.test(url)) res = { output: '', status: Object.assign({}, gitStatus, { files: [], conflicts: 0, behind: 0, ahead: 0, fetched: Date.now() / 1000 }) };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
   else if (url.startsWith('/api/color/')) res = { color: body.color };
@@ -352,6 +353,30 @@ const tests = {
     assert.deepStrictEqual(calls.slice(before).filter((c) => c.url === '/api/git/cheshmeh/fetch').map((c) => c.body.repo).sort(),
       ['cheshmeh-api-service', 'cheshmeh-web-app']);
     assert.ok(q('.toast').some((t) => /Fetched 2 repos/.test(t.textContent)));
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'git panel: commit sits under the branch; a git error stays in the dialog with the fix'() {
+    q('.act').find((b) => b.textContent.indexOf('Git') === 0).click();
+    await settle();
+    const modal = q('.modal').pop();
+    const main = q('.gmain', modal)[0];
+    const kids = Array.from(main.children).map((c) => c.className.split(' ')[0]);
+    assert.deepStrictEqual(kids.slice(0, 3), ['ghead', 'gcbox', 'gerror'], 'commit box right under the branch card');
+    assert.ok(!q('.modal-foot', modal).length, 'no footer any more');
+    assert.ok(q('.gdiscard', q('.gall', modal)[0]).length, 'Discard… next to Select all');
+    assert.match(q('textarea', q('.gcbox', modal)[0])[0].placeholder, /Ctrl\+Enter to commit on "main"/);
+    global.gitFail = 'fetch';
+    q('.gfetch', modal)[0].click(); await settle();
+    const err = q('.gerror', modal)[0];
+    assert.ok(!err.classList.contains('hidden'), 'error shown in the dialog');
+    assert.match(err.textContent, /Fetch failed/);
+    assert.match(err.textContent, /\[rejected\].*fetch first/);
+    assert.match(err.textContent, /Pull first, then push/);
+    assert.ok(q('button', err).some((b) => b.textContent === 'Pull & push'));
+    global.gitFail = '';
+    q('.gerror-x', err)[0].click();
+    assert.ok(err.classList.contains('hidden'), 'dismissed');
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

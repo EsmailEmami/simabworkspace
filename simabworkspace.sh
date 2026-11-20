@@ -41,6 +41,8 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.45.5 2026-11-20  Git dialog: commit box right under the branch, a clearer Commit button;
+#                       git errors (push rejected…) stay in the dialog with the fix (Pull & push)
 #    1.45.4 2026-11-20  A narrow chat (tablet split, laptop side pane) shows one chip for mode /
 #                       model / effort, like phones, so the bar never overflows
 #    1.45.3 2026-11-20  @ and Find file see the files of repositories inside a repository (only
@@ -335,7 +337,7 @@
 
 set -u -o pipefail
 
-VERSION="1.45.4"
+VERSION="1.45.5"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -2547,7 +2547,7 @@
       railList, railFoot);
     function pick(r) {
       if (r === repo || busy) return;
-      repo = r; current = null; st = null; histData = null; histSel = '';
+      repo = r; current = null; st = null; histData = null; histSel = ''; clearErr();
       diff.replaceChildren(empty('Select a file to see its changes.'));
       renderRail();
       if (stats[r] && stats[r].repo) apply(stats[r]);
@@ -2606,9 +2606,25 @@
     var banner = h('div', { class: 'gbanner hidden' });
     var list = h('div', { class: 'glist' });
     var diff = h('div', { class: 'gright' }, empty('Select a file to see its changes.'));
-    var msg = h('textarea', { class: 'inp', rows: 2, dir: 'auto', placeholder: 'Commit message' });
-    var commitBtn = h('button', { class: 'btn primary', onclick: commit }, 'Commit');
-    var discardBtn = h('button', { class: 'btn danger', disabled: true, title: 'Discard selected changes (cannot be undone)', onclick: function () {
+    var msg = h('textarea', { class: 'inp', rows: 1, dir: 'auto', placeholder: 'Commit message' });
+    var commitBtn = h('button', { class: 'btn primary gcommit-btn', onclick: commit }, 'Commit');
+    // commit sits right under the branch card; git's own error stays here until dismissed
+    var cbox = h('div', { class: 'gcbox' }, msg, commitBtn);
+    var errBox = h('div', { class: 'gerror hidden' });
+    function showErr(e, retry) {
+      if (e && e.offline) return;
+      var text = e && e.message ? e.message : String(e);
+      var behind = /rejected|fetch first|non-fast-forward|integrate the remote|pull first/i.test(text);
+      errBox.replaceChildren(
+        h('div', { class: 'gerror-top' }, h('b', null, retry ? retry + ' failed' : 'Git error'), h('span', { class: 'grow' }),
+          h('button', { class: 'gerror-x', title: 'Dismiss', onclick: clearErr }, '×')),
+        behind ? h('div', { class: 'gerror-hint' }, 'The remote has commits you do not have. Pull first, then push. ',
+          h('button', { class: 'btn sm primary', onclick: function () { action('sync'); } }, 'Pull & push')) : null,
+        h('pre', { class: 'gerror-msg mono' }, text));
+      errBox.classList.remove('hidden');
+    }
+    function clearErr() { errBox.classList.add('hidden'); errBox.replaceChildren(); }
+    var discardBtn = h('button', { class: 'btn sm danger gdiscard', disabled: true, title: 'Discard selected changes (cannot be undone)', onclick: function () {
       var sel = st ? st.files.filter(function (f) { return picked.has(f.path); }) : [];
       if (sel.length) discard(sel);
     } }, 'Discard…');
@@ -2623,7 +2639,7 @@
     var changesTab = h('button', { class: 'gtab on', onclick: function () { showView('changes'); } }, 'Changes');
     var historyTab = h('button', { class: 'gtab', onclick: function () { showView('history'); } }, 'History');
     var gtabs = h('div', { class: 'gtabs-bar' }, changesTab, historyTab);
-    var changesHead = h('label', { class: 'gall' }, allBox, 'Select all');
+    var changesHead = h('div', { class: 'gall' }, h('label', null, allBox, 'Select all'), h('span', { class: 'grow' }), discardBtn);
     var hist = h('div', { class: 'glist hidden' });
     function showView(v) {
       view = v;
@@ -2677,7 +2693,7 @@
       gpost('untrack', { files: files.map(function (f) { return f.path; }) }).then(function (d) {
         setBusy(false); apply(d.status);
         toast('Git no longer tracks ' + (files.length === 1 ? files[0].path : plural(files.length, 'file')) + ' — commit to finish (the files stay on disk)', 'ok', { timeout: 7000 });
-      }).catch(function (e) { setBusy(false); fail(e); });
+      }).catch(function (e) { setBusy(false); showErr(e); });
     }
 
     function discard(files) {
@@ -2691,15 +2707,14 @@
         gpost('discard', { files: files.map(function (f) { return f.path; }) }).then(function (d) {
           setBusy(false); apply(d.status);
           toast('Discarded ' + label, 'ok');
-        }).catch(function (e) { setBusy(false); fail(e); });
+        }).catch(function (e) { setBusy(false); showErr(e); });
       });
     }
 
     var md = openModal({
       title: 'Git — ' + pTitle(p), size: 'wide gitdlg', onclose: function () { refreshGit(p.name); },
       body: [h('div', { class: 'gwrap' }, rail,
-        h('div', { class: 'gmain' }, head, banner, h('div', { class: 'ggrid' }, h('div', { class: 'gleft' }, gtabs, changesHead, list, hist), diff)))],
-      foot: [discardBtn, h('span', { class: 'grow' }), h('div', { class: 'gcommit' }, msg), commitBtn]
+        h('div', { class: 'gmain' }, head, cbox, errBox, banner, h('div', { class: 'ggrid' }, h('div', { class: 'gleft' }, gtabs, changesHead, list, hist), diff)))]
     });
 
     var working = '';
@@ -2719,6 +2734,7 @@
         : h('span', { class: 'gstate s-' + gs.cls }, gs.cls === 'ok' ? '✓ ' + gs.text : gs.text);
       var fetched = st.fetched ? 'checked ' + agoShort(st.fetched) + ' ago' : 'not checked yet';
       head.className = 'ghead s-' + gs.cls;
+      msg.placeholder = 'Message (Ctrl+Enter to commit on "' + (st.branch || 'HEAD') + '")';
       head.replaceChildren(
         h('div', { class: 'grow1' },
           h('button', { class: 'gbranch mono', title: 'Switch branch', disabled: busy, onclick: function () {
@@ -2856,6 +2872,7 @@
           toast(a === 'sync' ? 'Pulled and pushed' : a === 'push' ? (st && st.upstream ? 'Pushed' : 'Published') : a === 'pull' ? 'Pulled' : 'Fetched', 'ok');
           return;
         }
+        if (i === 0) clearErr();
         setBusy(true, WORD[steps[i]]);
         gpost(steps[i], null, r).then(function (d) {
           stats[r] = d.status;
@@ -2866,7 +2883,7 @@
             return;
           }
           next(i + 1);
-        }).catch(function (e) { setBusy(false); fail(e); });
+        }).catch(function (e) { setBusy(false); showErr(e, { pull: 'Pull', push: 'Push', fetch: 'Fetch' }[steps[i]]); });
       })(0);
     }
 
@@ -2874,6 +2891,7 @@
       if (busy || !st || !picked.size) return;
       if (!msg.value.trim()) { msg.focus(); toast('Write a commit message', 'warn'); return; }
       var all = picked.size === st.files.length;
+      clearErr();
       setBusy(true, 'Committing');
       gpost('commit', { message: msg.value, files: all ? null : Array.from(picked) }).then(function (d) {
         busy = false; working = '';
@@ -2881,7 +2899,7 @@
         apply(d.status);
         setBusy(false);
         toast('Committed' + (st.upstream ? ' — Push ↑' + (st.ahead || 1) + ' sends it' : ' — Publish branch sends it'), 'ok');
-      }).catch(function (e) { setBusy(false); fail(e); });
+      }).catch(function (e) { setBusy(false); showErr(e, 'Commit'); });
     }
 
     discover();

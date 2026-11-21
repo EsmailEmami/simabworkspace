@@ -1923,6 +1923,13 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  'phone: the tools are a left column of the open drawer, like the laptop / tablet (not a bottom row)'() {
+    const css = fs.readFileSync(path.join(ROOT, 'gui/static/app.css'), 'utf8');
+    assert.match(css, /body\.compact\.side-open \.rail \{ display: flex; position: fixed; z-index: 46; left: 0; top: 0; bottom: 0; width: 54px;/);
+    assert.match(css, /body\.compact\.side-open #sidebar \{ left: 54px;/);
+    assert.ok(!/body\.compact\.side-open \.rail \{[^}]*flex-direction: row/.test(css), 'no bottom row any more');
+  },
+
   async 'Ctrl+P: go to a file of the project you are in'() {
     const SW = global.SW, S = SW.S;
     for (let i = 0; i < 10; i++) dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });   // earlier tests' dialogs

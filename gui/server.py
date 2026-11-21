@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.58.0"
+VERSION = "1.59.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6866,6 +6866,34 @@ def pc_rtt(host: str, port) -> float:
         return None
 
 
+def ssh_speed(conf: ServerConf, down_bytes=8 << 20, up_bytes=4 << 20, run=None) -> dict:
+    """Real speed between this computer and the server over ssh (what sync, mounts and onpc use):
+    zeros from the server's /dev/zero (down) and to its /dev/null (up), after one warm-up call."""
+    run = run or (lambda argv, data=None: subprocess.run(argv, input=data, capture_output=True, timeout=120))
+    base = ssh_base(conf, multiplex=True, batch=True) + ["-T", conf.target]
+    out = {"rtt": pc_rtt(conf.host, conf.port)}
+    try:
+        if run(base + ["true"]).returncode != 0:
+            raise ApiError(502, "cannot reach the server")
+        t = time.time()
+        r = run(base + [f"head -c {int(down_bytes)} /dev/zero"])
+        dt = max(time.time() - t, 1e-3)
+        if r.returncode != 0 or not r.stdout:
+            raise ApiError(502, "download test failed")
+        out["down"] = round(len(r.stdout) * 8 / dt / 1e6, 1)
+        t = time.time()
+        r = run(base + ["cat >/dev/null"], b"\0" * int(up_bytes))
+        dt = max(time.time() - t, 1e-3)
+        if r.returncode != 0:
+            raise ApiError(502, "upload test failed")
+        out["up"] = round(up_bytes * 8 / dt / 1e6, 1)
+    except subprocess.TimeoutExpired:
+        raise ApiError(504, "the test took too long — the connection is very slow")
+    except OSError as e:
+        raise ApiError(500, f"ssh did not start: {e}")
+    return out
+
+
 def pc_hung_up(conn) -> bool:
     import select
     try:
@@ -9393,6 +9421,8 @@ class App:
             return self.pc.pending()
         if key == ("GET", "net"):
             return self.pc.net_info()
+        if key == ("POST", "speed"):
+            return ssh_speed(self.conf)
         if key == ("POST", "bgstop"):
             self.pc.stop_bg(str(body.get("name") or "") or "-")
             return {"bg": self.pc.bg_list()}

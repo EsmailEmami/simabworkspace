@@ -164,6 +164,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
   else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
+  else if (url === '/api/pc/speed') res = { down: 87.5, up: 21.3, rtt: 34 };
   else if (url.startsWith('/api/chat-search')) { fakePc.searched = url; res = { hits: [
     { project: 'cheshmeh', dir: '-home-esi-cheshmeh', id: CONV_OLD, title: 'Old work', snippet: '…the Refund button was broken', who: 'assistant', mtime: Date.now() / 1000 - 7200 },
     { project: '', dir: '-elsewhere', id: 'cccc', title: 'x', snippet: 'refund elsewhere', who: 'user', mtime: 1 }] }; }
@@ -1864,6 +1865,16 @@ const tests = {
     assert.match(byTitle('Claude').textContent, /running/);
     byTitle('Server').click(); await settle();
     assert.ok(q('.modal').pop() !== md, 'server details opened');
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'Speed test: real down / up / round trip'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    global.SWComputers.speedTest(); await settle();
+    const md = q('.modal').pop();
+    q('button', md).find((b) => b.textContent === 'Start').click(); await settle();
+    assert.deepStrictEqual(q('.speed-tile b', md).length ? q('.speed-tile b', md).map((b) => b.textContent) : q('b', q('.speed-tiles', md)[0]).map((b) => b.textContent), ['87.5', '21.3', '34']);
+    assert.match(md.textContent, /Good enough/);
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

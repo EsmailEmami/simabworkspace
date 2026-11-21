@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.59.0 2026-11-21  Speed test: real down / up / round trip between this computer and the server
 #    1.58.0 2026-11-21  Health: server, computers, link, sync, containers and Claude at a glance
 #    1.57.0 2026-11-21  History: search inside every Claude conversation, open it to continue
 #    1.56.0 2026-11-21  Saved prompts: / in a chat, for all projects or one, shared by the app and the web version
@@ -367,7 +368,7 @@
 
 set -u -o pipefail
 
-VERSION="1.58.0"
+VERSION="1.59.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

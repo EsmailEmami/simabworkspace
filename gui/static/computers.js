@@ -554,6 +554,27 @@
     el.title = n.state !== 'connected' ? 'This computer is not connected to the server — Local only projects cannot work'
       : 'Connection to the server: ' + (n.rtt == null ? 'no answer' : n.rtt + ' ms round trip') + '\nNow: ↓ ' + rate(n.down) + ' from the server, ↑ ' + rate(n.up) + ' to it';
   }
+  // a real speed test over ssh (installed app): click the bars, or ⚙ → Speed test…
+  function speedTest() {
+    var res = h('div', { class: 'speed-res' }, h('div', { class: 'muted' }, 'Press Start: about 8 MB down and 4 MB up between this computer and the server.'));
+    var go = h('button', { class: 'btn primary', onclick: function () {
+      go.disabled = true; go.textContent = 'Testing…';
+      kids(res, [h('div', { class: 'muted' }, 'Measuring…')]);
+      api('POST', 'pc/speed').then(function (r) {
+        var tile = function (label, v, unit) { return h('div', { class: 'speed-tile' }, h('small', null, label), h('b', null, v == null ? '—' : String(v)), h('span', { class: 'muted' }, unit)); };
+        kids(res, [h('div', { class: 'speed-tiles' }, tile('↓ Download', r.down, 'Mbit/s'), tile('↑ Upload', r.up, 'Mbit/s'), tile('Round trip', r.rtt, 'ms')),
+          h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:8px' }, (r.down || 0) < 5 || (r.rtt || 0) > 250
+            ? 'Slow: Local only projects will feel slow (each file is read over this line).' : 'Good enough for Local only projects.')]);
+      }).catch(function (e) { kids(res, [h('div', { class: 'pc-note err' }, e.message || String(e))]); })
+        .then(function () { go.disabled = false; go.textContent = 'Test again'; });
+    } }, 'Start');
+    var md = SW.openModal({ title: 'Speed test — this computer ↔ server', size: 'sm', body: res,
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close'), go] });
+    return md;
+  }
+  var netEl = document.getElementById('pc-net');
+  if (netEl) { netEl.style.cursor = 'pointer'; netEl.addEventListener('click', function () { speedTest(); }); }
+
   function pollNet() {
     if (S.web || !S.pc || !S.pc.on || !(S.projects || []).some(function (p) { return p.localOnly; })) { netBox(null); return Promise.resolve(); }
     return api('GET', 'pc/net').then(netBox).catch(function () { netBox({ state: 'off', bars: 0, down: 0, up: 0 }); });
@@ -651,6 +672,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, setupCheck: setupCheck, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

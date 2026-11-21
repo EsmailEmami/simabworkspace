@@ -4935,6 +4935,7 @@
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
         { label: 'Health — everything at a glance…', action: healthDialog },
+        S.web ? null : { label: 'Speed test — this computer ↔ server…', action: function () { if (window.SWComputers) window.SWComputers.speedTest(); } },
         { label: 'Saved prompts…', action: function () { if (window.SWPrompts) window.SWPrompts.dialog(); } },
         { label: 'Setup check…', action: function () { if (window.SWComputers) window.SWComputers.setupCheck(); } },
         { label: 'Computers — builds on your own computers…', action: function () { if (window.SWComputers) window.SWComputers.open(); } },

@@ -868,3 +868,22 @@ class ChatSearch(unittest.TestCase):
             self.assertEqual(hits["bbbb"]["project"], "lo", "a ~ project (Local only) is found too")
             self.assertEqual(hits["cccc"]["project"], "", "not one of the projects: shown, cannot be opened")
             self.assertEqual({h["id"] for h in search("refund", only=True)}, {"aaaa", "bbbb"})
+
+
+class SpeedTest(unittest.TestCase):
+    def test_measures_down_and_up_over_ssh(self):
+        calls = []
+
+        def run(argv, data=None):
+            calls.append((argv[-1], len(data or b"")))
+            time.sleep(0.05)
+            out = b"\0" * (1 << 20) if argv[-1].startswith("head -c") else b""
+            return subprocess.CompletedProcess(argv, 0, out, b"")
+        with mock.patch.object(sw, "pc_rtt", return_value=42.0):
+            r = sw.ssh_speed(sw.ServerConf("esi", "h", "22"), down_bytes=1 << 20, up_bytes=1 << 19, run=run)
+        self.assertEqual([c[0] for c in calls], ["true", "head -c 1048576 /dev/zero", "cat >/dev/null"])
+        self.assertEqual(calls[2][1], 1 << 19, "the upload is really sent")
+        self.assertEqual(r["rtt"], 42.0)
+        self.assertTrue(0 < r["down"] < 1000 and 0 < r["up"] < 1000)
+        with mock.patch.object(sw, "pc_rtt", return_value=None), self.assertRaises(sw.ApiError):
+            sw.ssh_speed(sw.ServerConf("esi", "h"), run=lambda a, d=None: subprocess.CompletedProcess(a, 255, b"", b""))

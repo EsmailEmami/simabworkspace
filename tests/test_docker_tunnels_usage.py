@@ -235,10 +235,20 @@ class Tunnels(TmpHome):
         a = sw.tunnel_argv(sw.ServerConf("esi", "h", "225", ""), {"localPort": 15432, "remoteHost": "db", "remotePort": 5432})
         self.assertIn("127.0.0.1:15432:db:5432", a)
         self.assertEqual(a[a.index("127.0.0.1:15432:db:5432") - 1], "-L")
-        self.assertIn("ExitOnForwardFailure=yes", a)
+        self.assertNotIn("ExitOnForwardFailure=yes", a, "a failing RemoteForward of ~/.ssh/config must not end it")
         self.assertIn("BatchMode=yes", a)
         self.assertNotIn("ControlMaster=auto", a)           # its own connection
         self.assertEqual(a[-1], "esi@h")
+
+    def test_ssh_up_but_port_not_open_is_an_error(self):
+        procs = []
+        t = sw.Tunnel("p", {"localPort": 1, "remoteHost": "127.0.0.1", "remotePort": 2}, lambda: sw.ServerConf("u", "h"),
+                      popen=lambda a: procs.append(FakeProc()) or procs[-1], free=lambda p: True, listening=lambda p: False)
+        t.start()
+        self.assertTrue(wait_for(lambda: t.state == "error", 6))
+        self.assertIn("did not open", t.error)
+        self.assertTrue(wait_for(lambda: len(procs) >= 2, 8), "tries again")
+        t.stop()
 
     def test_up_then_drop_then_retry(self):
         procs = []
@@ -247,7 +257,7 @@ class Tunnels(TmpHome):
             procs.append(FakeProc(exit_after=3 if not procs else None, err=b"Warning: Permanently added\nConnection reset by peer\n"))
             return procs[-1]
         t = sw.Tunnel("p", {"localPort": 1, "remoteHost": "127.0.0.1", "remotePort": 2}, lambda: sw.ServerConf("u", "h"),
-                      popen=popen, free=lambda p: True)
+                      popen=popen, free=lambda p: True, listening=lambda p: True)
         t.start()
         self.assertTrue(wait_for(lambda: t.state == "up", 5))
         self.assertTrue(wait_for(lambda: t.state == "error", 5))

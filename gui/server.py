@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.54.2"
+VERSION = "1.54.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5309,15 +5309,16 @@ def port_problem(port: int) -> str:
 
 
 def tunnel_argv(conf: ServerConf, t: dict) -> list:
+    """No ExitOnForwardFailure: a RemoteForward of the user's ~/.ssh/config that fails on the server
+    (a user's Mac) would end the tunnel too. Tunnel checks the local port itself (`listening`)."""
     return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
-        "-N", "-T", "-o", "ExitOnForwardFailure=yes",
-        "-L", f"127.0.0.1:{t['localPort']}:{t['remoteHost']}:{t['remotePort']}", conf.target]
+        "-N", "-T", "-L", f"127.0.0.1:{t['localPort']}:{t['remoteHost']}:{t['remotePort']}", conf.target]
 
 
 class Tunnel:
     """Keeps one `ssh -L` running; reconnects with a growing pause when it drops."""
 
-    def __init__(self, project: str, spec: dict, conf_fn, popen=None, free=None):
+    def __init__(self, project: str, spec: dict, conf_fn, popen=None, free=None, listening=None):
         self.project = project
         self.spec = dict(spec)
         self.conf_fn = conf_fn
@@ -5325,6 +5326,7 @@ class Tunnel:
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             env=dict(os.environ, PATH=tool_path()), start_new_session=True))
         self.free = free or local_port_free
+        self.listening = listening or (lambda port: not local_port_free(port))     # our ssh took the port
         self.state = "off"            # off | connecting | up | error
         self.error = ""
         self.since = 0.0
@@ -5371,9 +5373,21 @@ class Tunnel:
                 return
             while self.wanted and p.poll() is None:
                 if self.state != "up" and time.time() - started > 2.5:
+                    if not self.listening(lp):          # ssh is up but the local port did not open
+                        self.state, self.error = "error", f"local port {lp} did not open — retrying in {pause}s"
+                        try:
+                            p.terminate()
+                        except OSError:
+                            pass
+                        break
                     self.state, self.error, self.since = "up", "", time.time()
                     pause = 2
                 self.wake.wait(0.5)
+            if self.state == "error" and self.wanted:
+                if self.wake.wait(pause):
+                    return
+                pause = min(pause * 2, 60)
+                continue
             if not self.wanted:
                 return
             err = ""

@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.48.2"
+VERSION = "1.49.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1806,8 +1806,10 @@ def chat_args(mode: str, model: str = "", resume: str = "", effort: str = "") ->
 
 def chat_remote_script(rpath: str, claude_cmd: str, args: list) -> str:
     cmd = claude_cmd or "claude"
-    inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "") + "exec " + cmd + " "
-             + " ".join(shlex.quote(x) for x in args))
+    # a project built on the user's own computers: Claude is told to use onpc (see PC_HINT)
+    inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "")
+             + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); exec ' + cmd + " "
+             + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"}')
     # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
     return (f"cd {remote_path_expr(rpath)} || exit 97; "
             f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote("exec sh -c " + shlex.quote(inner))}')
@@ -5365,6 +5367,671 @@ class Tunnel:
                     on=self.wanted)
 
 
+# ----------------------------------------------------------------------------- builds on your own computer (onpc)
+# Claude stays on the server; a project's builds / tests / runs can go to the user's own
+# computers. Each computer that turned it on (Settings → Computers) keeps
+# `ssh -R <home>/.cache/simabworkspace/pc/<id>.sock:127.0.0.1:<app port>` open: the folder is
+# 0700 and the socket 0600, so only this server user (and root) can reach it; every request
+# also carries the computer's own secret. `onpc CMD` on the server sends CMD there; the app
+# maps the server folder to its synced copy, asks the user (rules: PC_DEFAULT), flushes
+# Mutagen, runs it and streams the output back.
+# Frames of the answer: b"o" (stdout) / b"e" (stderr) + 4-byte length + bytes; b"x" + 4-byte exit code.
+# A project is built on the computers only when the user chose it ("Builds run on"):
+# ~/.cache/simabworkspace/pc/projects.json {real server path: "computers"}; then every chat in
+# it gets PC_HINT as extra system prompt (chat_remote_script asks `onpc --hint`).
+PC_ASK_WAIT = 120
+PC_MODES = ("every", "new", "all")
+PC_OUTPUTS = ("chat", "panel")
+PC_ANSWERS = ("once", "always", "hour", "deny")
+PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "new", "allow": [],
+              "deny": ["sudo *", "git push*", "rm -rf /*", "rm -rf ~*"], "projects": [], "always": {},
+              "output": "chat"}
+PC_ID_RE = re.compile(r"[0-9a-f]{12}")
+PC_HINT = (
+    "This project is built and run on the user's own computer, not on this server. Run every build, "
+    "test, lint, package install (npm/yarn/pnpm install …) and run command of this project through "
+    "`onpc`, e.g. `onpc npm run build` — same folder; it runs in the synced copy on the user's computer "
+    "and gives back the output and exit code; the user may have to approve it there, so it can take a "
+    "while: give the Bash call a long timeout (600000 ms). Never run those commands directly on this server. If onpc says no computer is connected or "
+    "the user denied it, stop and tell the user; do not fall back to the server. `onpc --list` shows "
+    "the user's computers. Long-running dev servers (ng serve, npm start) are not supported by onpc "
+    "yet: ask the user to start them.")
+
+ONPC_PY = r'''#!/usr/bin/env python3
+# onpc — run a command on your own computer instead of this server (Simab Workspace).
+#   onpc npm run build        onpc "npm ci && npm test"        onpc --on laptop go test ./...
+#   onpc --list               your computers and which are connected
+import os, sys, json, socket, struct, signal, shlex
+D = os.path.expanduser("~/.cache/simabworkspace/pc")
+HINT = @@HINT@@
+NOT_HERE = -404
+USAGE = ("usage: onpc COMMAND…   run it on your own computer, in the synced copy of this folder\n"
+         "       onpc --on NAME COMMAND…   on that computer\n"
+         "       onpc --list   your computers")
+
+
+def load(name, default):
+    try:
+        with open(os.path.join(D, name)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def reach(d):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3)
+    try:
+        s.connect(os.path.join(D, d["id"] + ".sock"))
+        return s
+    except OSError:
+        s.close()
+        return None
+
+
+def devices():
+    out = []
+    try:
+        names = sorted(os.listdir(D))
+    except OSError:
+        names = []
+    for f in names:
+        if f.endswith(".json") and f != "projects.json":
+            d = load(f, None)
+            if isinstance(d, dict) and d.get("id"):
+                s = reach(d)
+                d["online"] = s is not None
+                if s:
+                    s.close()
+                out.append(d)
+    out.sort(key=lambda d: -(d.get("since") or 0))
+    return out
+
+
+def project_on(cwd):
+    m = load("projects.json", {})
+    for p, v in (m.items() if isinstance(m, dict) else []):
+        if v == "computers" and (cwd == p or cwd.startswith(p.rstrip("/") + "/")):
+            return p
+    return ""
+
+
+def send(d, cwd, cmd):
+    s = reach(d)
+    if s is None:
+        return NOT_HERE
+    s.settimeout(None)
+    body = json.dumps({"cwd": cwd, "cmd": cmd}).encode()
+    head = ("POST /pc/run HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+            "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))
+    try:
+        s.sendall(head.encode() + body)
+        f = s.makefile("rb")
+        status = f.readline().split(b" ")
+    except OSError:
+        return NOT_HERE
+    code = int(status[1]) if len(status) > 1 and status[1].isdigit() else 0
+    while True:
+        line = f.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+    if code != 200:
+        try:
+            msg = json.loads(f.read().decode("utf-8", "replace") or "{}").get("error") or ""
+        except ValueError:
+            msg = ""
+        if code in (0, 404):
+            return NOT_HERE
+        sys.stderr.write("onpc: %s: %s\n" % (d.get("name") or "your computer", msg or "refused (HTTP %d)" % code))
+        return 126 if code == 403 else 255
+    while True:
+        k = f.read(1)
+        if not k:
+            sys.stderr.write("onpc: the connection to %s was lost — the command may not have finished.\n" % (d.get("name") or "your computer"))
+            return 255
+        n = struct.unpack(">i", f.read(4))[0]
+        if k == b"x":
+            return n
+        out = sys.stdout if k == b"o" else sys.stderr
+        out.buffer.write(f.read(n))
+        out.flush()
+
+
+def run(cmd, on):
+    cwd = os.path.realpath(os.getcwd())
+    devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id")))]
+    if not devs:
+        sys.stderr.write("onpc: none of your computers is connected%s — the command was NOT run.\n"
+                         "Do not run it on the server instead: tell the user to open Simab Workspace on their "
+                         "computer (Settings → Computers), then try again.\n" % (" (" + on + ")" if on else ""))
+        return 255
+    for d in devs:
+        code = send(d, cwd, cmd)
+        if code != NOT_HERE:
+            return code
+    sys.stderr.write("onpc: this folder is not synced to %s — the command was NOT run.\n"
+                     % ", ".join(d.get("name") or "?" for d in devs))
+    return 255
+
+
+def main(a):
+    if a[:1] == ["--hint"]:
+        if project_on(os.path.realpath(os.getcwd())):
+            sys.stdout.write(HINT)
+        return 0
+    if a[:1] == ["--list"]:
+        ds = devices()
+        for d in ds:
+            print(("connected " if d["online"] else "offline   ") + (d.get("name") or "?") + "  (" + (d.get("os") or "?") + ")")
+        if not ds:
+            print("no computers yet — turn it on in Simab Workspace: Settings → Computers")
+        return 0
+    on = ""
+    if a[:1] == ["--on"] and len(a) > 2:
+        on, a = a[1], a[2:]
+    if not a or a[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0 if a else 2
+    return run(a[0] if len(a) == 1 else " ".join(shlex.quote(x) for x in a), on)
+
+
+if __name__ == "__main__":
+    for sig in ("SIGTERM", "SIGHUP"):
+        signal.signal(getattr(signal, sig), lambda *_: sys.exit(143))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+'''.replace("@@HINT@@", json.dumps(PC_HINT))
+
+# Installs onpc and this computer's card on the server. stdin: {"onpc", "device", "paths": {project: server path}}
+PC_SETUP_PY = r'''
+import os, sys, json
+cfg = json.loads(sys.stdin.read() or "{}")
+D = os.path.expanduser("~/.cache/simabworkspace/pc")
+os.makedirs(D, exist_ok=True)
+os.chmod(D, 0o700)
+def put(path, text, mode):
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path + ".tmp", mode)
+    os.replace(path + ".tmp", path)
+if cfg.get("onpc"):
+    b = os.path.expanduser("~/.local/bin")
+    os.makedirs(b, exist_ok=True)
+    put(os.path.join(b, "onpc"), cfg["onpc"], 0o755)
+dev = cfg.get("device")
+if isinstance(dev, dict) and dev.get("id"):
+    put(os.path.join(D, os.path.basename(dev["id"]) + ".json"), json.dumps(dev), 0o600)
+real = {k: os.path.realpath(os.path.expanduser(v)) for k, v in (cfg.get("paths") or {}).items() if isinstance(v, str) and v}
+print(json.dumps({"home": os.path.expanduser("~"), "dir": D, "real": real}))
+'''
+
+# list (stdin {"paths"}) | remove ID | builds PATH computers|server
+PC_ADMIN_PY = r'''
+import os, sys, json, socket
+D = os.path.expanduser("~/.cache/simabworkspace/pc")
+op = sys.argv[1]
+def load(n, d):
+    try:
+        with open(os.path.join(D, n)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return d
+def builds_of(paths):
+    m = load("projects.json", {})
+    out = {}
+    for name, p in paths.items():
+        r = os.path.realpath(os.path.expanduser(p)) if isinstance(p, str) and p else ""
+        out[name] = "computers" if r and m.get(r) == "computers" else "server"
+    return out
+if op == "list":
+    cfg = json.loads(sys.stdin.read() or "{}")
+    devs = []
+    for f in sorted(os.listdir(D)) if os.path.isdir(D) else []:
+        if not f.endswith(".json") or f == "projects.json":
+            continue
+        d = load(f, None)
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        try:
+            s.connect(os.path.join(D, d["id"] + ".sock"))
+            on = True
+        except OSError:
+            on = False
+        finally:
+            s.close()
+        devs.append({"id": d.get("id"), "name": d.get("name") or "", "os": d.get("os") or "",
+                     "since": d.get("since") or 0, "version": d.get("version") or "", "online": on})
+    print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {})}))
+elif op == "remove":
+    for ext in (".json", ".sock"):
+        try:
+            os.remove(os.path.join(D, os.path.basename(sys.argv[2]) + ext))
+        except OSError:
+            pass
+    print("{}")
+elif op == "builds":
+    r = os.path.realpath(os.path.expanduser(sys.argv[2]))
+    os.makedirs(D, exist_ok=True)
+    os.chmod(D, 0o700)
+    m = load("projects.json", {})
+    m = m if isinstance(m, dict) else {}
+    if sys.argv[3] == "computers":
+        m[r] = "computers"
+    else:
+        m.pop(r, None)
+    fd = os.open(os.path.join(D, "projects.json.tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(m, f)
+    os.replace(os.path.join(D, "projects.json.tmp"), os.path.join(D, "projects.json"))
+    print(json.dumps({"path": r, "on": sys.argv[3]}))
+'''
+
+
+def pc_os() -> str:
+    if IS_WIN:
+        return "windows"
+    if sys.platform == "darwin":
+        return "mac"
+    return "wsl" if is_wsl() else "linux"
+
+
+def pc_segments(cmd: str) -> list:
+    """`a && b; c | d` → each command on its own (rules apply to every part)."""
+    return [s.strip() for s in re.split(r"&&|\|\||[;|\n]", cmd or "") if s.strip()]
+
+
+def pc_match(seg: str, patterns) -> bool:
+    import fnmatch
+    return any(isinstance(p, str) and p.strip() and fnmatch.fnmatchcase(seg, p.strip()) for p in patterns or [])
+
+
+def pc_decide(c: dict, project: str, cmd: str, hour: dict, now: float):
+    """→ ("allow" | "ask" | "deny", why). Deny list and allowed projects win over everything."""
+    if c.get("projects") and project not in c["projects"]:
+        return "deny", f"project {project} may not run commands on this computer (Settings → Computers)"
+    segs = pc_segments(cmd) or [cmd.strip()]
+    bad = [s for s in segs if pc_match(s, c.get("deny"))]
+    if bad:
+        return "deny", f"“{bad[0]}” is on the deny list of this computer (Settings → Computers)"
+    mode = c.get("mode")
+    if mode == "all":
+        return "allow", ""
+    if mode == "every":
+        return "ask", ""
+    if all(pc_match(s, c.get("allow")) for s in segs):
+        return "allow", ""
+    if cmd.strip() in ((c.get("always") or {}).get(project) or []):
+        return "allow", ""
+    if hour.get(project, 0) > now:
+        return "allow", ""
+    return "ask", ""
+
+
+def pc_link_argv(conf: ServerConf, sock: str, port: int) -> list:
+    return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
+        "-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
+        "-R", f"{sock}:127.0.0.1:{port}", conf.target]
+
+
+def pc_shell_argv(cmd: str) -> list:
+    """A login shell, so nvm / sdkman / Homebrew paths are there like in the user's own terminal."""
+    if IS_WIN:
+        return [bash_exe(), "-lc", cmd]
+    return [os.environ.get("SHELL") or "/bin/sh", "-lc", cmd]
+
+
+def mutagen_flush(name: str):
+    exe = which("mutagen")
+    if exe:
+        try:
+            subprocess.run([exe, "sync", "flush", name], capture_output=True, timeout=90,
+                           env=dict(os.environ, PATH=tool_path()))
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+class PcHub:
+    """This computer's side of onpc: settings, the ssh -R link, permission asks, running commands.
+    Not used by the web version (it has no computer of its own)."""
+
+    def __init__(self, app, popen=None, remote=None):
+        self.app = app
+        self.popen = popen or (lambda argv: subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            env=dict(os.environ, PATH=tool_path()), start_new_session=True))
+        self.remote = remote or remote_python
+        self.lock = threading.RLock()
+        self.state, self.error, self.since = "off", "", 0.0
+        self.proc = None
+        self.wanted = False
+        self.wake = threading.Event()
+        self.home = ""
+        self.real = {}                 # project -> its real path on the server
+        self.asks = {}                 # id -> waiting permission question
+        self.hour = {}                 # project -> everything allowed until (time)
+        self.runs = collections.deque(maxlen=20)
+
+    # settings ---------------------------------------------------------------
+    def cfg(self) -> dict:
+        with self.lock:
+            saved = self.app.store.db.get("pc", {}) or {}
+            c = dict(PC_DEFAULT)
+            c.update({k: v for k, v in saved.items() if k in PC_DEFAULT} if isinstance(saved, dict) else {})
+            if not PC_ID_RE.fullmatch(c.get("id") or "") or len(c.get("secret") or "") < 32:
+                c["id"] = c["id"] if PC_ID_RE.fullmatch(c.get("id") or "") else secrets.token_hex(6)
+                c["secret"] = c["secret"] if len(c.get("secret") or "") >= 32 else secrets.token_urlsafe(32)
+                self.app.store.db.put("pc", c)
+            if not c.get("name"):
+                c["name"] = (socket.gethostname() or "computer").split(".")[0][:40]
+            return c
+
+    def public(self) -> dict:
+        c = self.cfg()
+        c.pop("secret", None)
+        return {"config": c, "state": self.state, "error": self.error, "since": self.since, "os": pc_os()}
+
+    def update(self, patch: dict) -> dict:
+        if not isinstance(patch, dict):
+            raise ApiError(400, "bad request")
+        with self.lock:
+            c = self.cfg()
+            old = (c["on"], c["name"])
+            if "on" in patch:
+                c["on"] = bool(patch["on"])
+            if "name" in patch:
+                c["name"] = clean_str(patch["name"], 40, "name", required=True)
+            if "mode" in patch:
+                if patch["mode"] not in PC_MODES:
+                    raise ApiError(400, "invalid mode")
+                c["mode"] = patch["mode"]
+            if "output" in patch:
+                if patch["output"] not in PC_OUTPUTS:
+                    raise ApiError(400, "invalid output")
+                c["output"] = patch["output"]
+            for k in ("allow", "deny", "projects"):
+                if k in patch:
+                    v = patch[k]
+                    if not isinstance(v, list) or len(v) > 200 or not all(isinstance(x, str) and len(x) <= 300 for x in v):
+                        raise ApiError(400, f"invalid {k} list")
+                    c[k] = [x.strip() for x in v if x.strip()]
+            if "always" in patch:
+                v = patch["always"]
+                if not isinstance(v, dict) or not all(isinstance(x, list) and all(isinstance(y, str) for y in x) for x in v.values()):
+                    raise ApiError(400, "invalid always list")
+                c["always"] = {k: [y for y in x if y.strip()][:200] for k, x in v.items() if x}
+            self.app.store.db.put("pc", c)
+        if (c["on"], c["name"]) != old:
+            self.stop()
+            if c["on"]:
+                self.start()
+        return self.public()
+
+    # the link ---------------------------------------------------------------
+    def start(self):
+        if self.app.web or self.wanted or not self.cfg()["on"] or not self.app.conf.configured:
+            return
+        self.wanted = True
+        self.wake.clear()
+        self.state, self.error = "connecting", ""
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self.wanted = False
+        self.wake.set()
+        p = self.proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+        self.state, self.error = "off", ""
+
+    def _setup(self) -> str:
+        """Installs onpc + this computer's card on the server; → the socket path there."""
+        c = self.cfg()
+        paths = {p["name"]: p["remote"] for p in self.app.projects() if p.get("remote")}
+        dev = {"id": c["id"], "name": c["name"], "os": pc_os(), "port": self.app.port, "secret": c["secret"],
+               "since": time.time(), "version": VERSION}
+        r = self.remote(self.app.conf, PC_SETUP_PY, [], multiplex=False, timeout=30,
+                        stdin=json.dumps({"onpc": ONPC_PY, "device": dev, "paths": paths}).encode())
+        if not isinstance(r, dict) or not r.get("dir"):
+            raise ApiError(502, "bad answer from the server")
+        self.home, self.real = r.get("home") or "", r.get("real") or {}
+        return r["dir"].rstrip("/") + "/" + c["id"] + ".sock"
+
+    def _loop(self):
+        self.wake.clear()
+        pause = 2
+        while self.wanted:
+            self.state = "connecting"
+            started = time.time()
+            try:
+                sock = self._setup()
+                self.proc = p = self.popen(pc_link_argv(self.app.conf, sock, self.app.port))
+            except (ApiError, OSError) as e:
+                self.state, self.error = "error", (getattr(e, "message", "") or str(e))[:200] + f" — retrying in {pause}s"
+                if self.wake.wait(pause):
+                    return
+                pause = min(pause * 2, 60)
+                continue
+            while self.wanted and p.poll() is None:
+                if self.state != "connected" and time.time() - started > 2.5:
+                    self.state, self.error, self.since = "connected", "", time.time()
+                    pause = 2
+                self.wake.wait(0.5)
+            if not self.wanted:
+                return
+            err = ""
+            try:
+                err = (p.stderr.read() or b"").decode("utf-8", "replace").strip() if p.stderr else ""
+            except (OSError, ValueError):
+                pass
+            last = [x for x in err.splitlines() if x.strip() and "Warning: Permanently added" not in x]
+            self.state = "error"
+            self.error = (last[-1] if last else "the connection closed")[:200] + f" — retrying in {pause}s"
+            if self.wake.wait(pause):
+                return
+            pause = min(pause * 2, 60)
+
+    # a command from the server ------------------------------------------------
+    def map_path(self, cwd: str):
+        """Server folder → (project, folder on this computer) or None."""
+        best = None
+        host = self.app.conf.host
+        for p in self.app.projects():
+            ep = p.get("endpoint") or {}
+            if not p.get("localExists") or not p.get("remote") or (ep.get("host") and ep.get("host") != host):
+                continue
+            r = p["remote"]
+            roots = {self.real.get(p["name"]) or "",
+                     (self.home + r[1:]) if self.home and (r == "~" or r.startswith("~/")) else r}
+            for root in roots:
+                root = root.rstrip("/") or "/"
+                if root.startswith("/") and (cwd == root or cwd.startswith(root + "/")) and (best is None or len(root) > len(best[1])):
+                    best = (p, root)
+        if not best:
+            return None
+        rest = [x for x in cwd[len(best[1]):].split("/") if x]
+        if any(x == ".." for x in rest):
+            return None
+        return best[0], os.path.join(best[0]["local"], *rest) if rest else best[0]["local"]
+
+    def serve_run(self, h):
+        """POST /pc/run from onpc (through the ssh link). h = the HTTP handler."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "builds on this computer are turned off (Settings → Computers)"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        cwd, cmd = b.get("cwd"), b.get("cmd")
+        if not isinstance(cwd, str) or not cwd.startswith("/") or not isinstance(cmd, str) or not cmd.strip() or len(cmd) > 20000:
+            return h._json(400, {"error": "bad request"})
+        hit = self.map_path(cwd)
+        if not hit:
+            return h._json(404, {"error": f"{cwd} is not synced to {c['name']}"})
+        project, local = hit
+        if not os.path.isdir(local):
+            return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
+        verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
+        run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local,
+               "start": time.time(), "end": 0, "code": None, "state": "asking" if verdict == "ask" else "running", "out": ""}
+        if verdict == "deny":
+            run.update(state="denied", end=time.time(), out=why)
+            self.runs.appendleft(run)
+            return h._json(403, {"error": why})
+        self.runs.appendleft(run)
+        h.send_response(200)
+        h.send_header("Content-Type", "application/octet-stream")
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.close_connection = True
+        wlock = threading.Lock()
+
+        def frame(kind: bytes, data=b"", code=None):
+            with wlock:
+                if code is not None:
+                    h.wfile.write(kind + struct.pack(">i", code))
+                else:
+                    h.wfile.write(kind + struct.pack(">i", len(data)) + data)
+                h.wfile.flush()
+        try:
+            if verdict == "ask":
+                frame(b"e", f"onpc: waiting for the user to approve it on {c['name']}…\n".encode())
+                if not self.ask(project["name"], cmd.strip(), run):
+                    run.update(state="denied", end=time.time(), out="denied by the user")
+                    frame(b"e", f"onpc: the user did not allow this command on {c['name']} — it was NOT run.\n".encode())
+                    frame(b"x", code=126)
+                    return
+            if pc_hung_up(h.connection):           # Claude stopped onpc while the user was asked
+                run.update(state="stopped", end=time.time())
+                return
+            run["state"] = "running"
+            if project.get("source") == "mutagen":
+                mutagen_flush(project["name"])      # Claude's last edits are here before the build
+            code = self._exec(cmd, local, frame, run, h.connection)
+            if project.get("source") == "mutagen":
+                mutagen_flush(project["name"])
+            run.update(state="done", end=time.time(), code=code)
+            frame(b"x", code=code)
+        except OSError:                            # onpc went away
+            if run["state"] != "done":
+                run.update(state="stopped", end=time.time())
+
+    def _exec(self, cmd: str, cwd: str, frame, run: dict, conn) -> int:
+        import select
+        kw = {"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True}
+        p = subprocess.Popen(pc_shell_argv(cmd), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=dict(os.environ, PATH=tool_path()), **kw)
+        gone = threading.Event()
+
+        def pump(stream, kind):
+            for chunk in iter(lambda: stream.read1(65536) if hasattr(stream, "read1") else stream.read(4096), b""):
+                run["out"] = (run["out"] + chunk.decode("utf-8", "replace"))[-65536:]
+                if not gone.is_set():
+                    try:
+                        frame(kind, chunk)
+                    except OSError:
+                        gone.set()
+        ts = [threading.Thread(target=pump, args=(p.stdout, b"o"), daemon=True),
+              threading.Thread(target=pump, args=(p.stderr, b"e"), daemon=True)]
+        for t in ts:
+            t.start()
+        while p.poll() is None and not gone.is_set():
+            try:                                   # onpc closed (Claude stopped it) → stop the command
+                r, _, _ = select.select([conn], [], [], 0.5)
+                if r and not conn.recv(1, socket.MSG_PEEK):
+                    gone.set()
+            except (OSError, ValueError):
+                gone.set()
+        if gone.is_set() and p.poll() is None:
+            pc_kill(p)
+        code = p.wait()
+        for t in ts:
+            t.join(5)
+        for f in (p.stdout, p.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
+        if gone.is_set():
+            raise OSError("onpc went away")
+        return code
+
+    def ask(self, project: str, cmd: str, run: dict) -> bool:
+        a = {"id": secrets.token_hex(6), "project": project, "cmd": cmd, "at": time.time(),
+             "until": time.time() + PC_ASK_WAIT, "answer": "", "_ev": threading.Event(), "run": run["id"]}
+        with self.lock:
+            self.asks[a["id"]] = a
+        a["_ev"].wait(PC_ASK_WAIT)
+        with self.lock:
+            self.asks.pop(a["id"], None)
+        ans = a["answer"] or "deny"
+        if ans == "always":
+            with self.lock:
+                c = self.cfg()
+                lst = c["always"].setdefault(project, [])
+                if cmd not in lst:
+                    lst.append(cmd)
+                self.app.store.db.put("pc", c)
+        elif ans == "hour":
+            self.hour[project] = time.time() + 3600
+        return ans != "deny"
+
+    def answer(self, aid, ans) -> dict:
+        if ans not in PC_ANSWERS:
+            raise ApiError(400, "invalid answer")
+        with self.lock:
+            a = self.asks.get(aid) if isinstance(aid, str) else None
+            if not a:
+                raise ApiError(404, "this question is no longer open")
+            if not a["answer"]:
+                a["answer"] = ans
+                a["_ev"].set()
+        return {"ok": True}
+
+    def pending(self) -> dict:
+        with self.lock:
+            asks = [{k: v for k, v in a.items() if not k.startswith("_")} for a in self.asks.values() if not a["answer"]]
+        runs = [{k: v for k, v in r.items() if k != "out"} for r in list(self.runs)]
+        return {"asks": asks, "runs": runs, "now": time.time(), "output": self.cfg()["output"]}
+
+    def run_info(self, rid: str) -> dict:
+        for r in list(self.runs):
+            if r["id"] == rid:
+                return dict(r)
+        raise ApiError(404, "no such command")
+
+
+def pc_hung_up(conn) -> bool:
+    import select
+    try:
+        r, _, _ = select.select([conn], [], [], 0)
+        return bool(r) and not conn.recv(1, socket.MSG_PEEK)
+    except (OSError, ValueError):
+        return True
+
+
+def pc_kill(p):
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(p.pid, signal.SIGTERM)
+            try:
+                p.wait(3)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, getattr(signal, "SIGKILL"))      # not on Windows (never reached there)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+
 # ----------------------------------------------------------------------------- Claude usage (limits, cost)
 USAGE_WINDOWS = ("five_hour", "seven_day", "seven_day_overage_included")
 
@@ -5824,6 +6491,7 @@ class App:
         self._share_projects = []                # projects of the other devices
         self._share_gone = {}                    # session id -> closed because another device closed it
         self._copies_checked = False
+        self.pc = PcHub(self)                    # builds on this computer (onpc)
 
     @property
     def conf(self) -> ServerConf:
@@ -7223,6 +7891,7 @@ class App:
         self.sessions = {}
         for t in list(self.tunnels.values()):
             t.stop()
+        self.pc.stop()
 
     # A restart (update, the web service restarted) must not cost the open tabs: chats (Claude
     # keeps running on the server under its relay), watched chats and Files tabs come back with
@@ -7492,6 +8161,54 @@ class App:
                     return
                 time.sleep(0.5)
 
+    # builds on your own computers (onpc) ---------------------------------------------
+    def pc_api(self, method: str, rest: list, body: dict) -> dict:
+        key = (method, rest[0] if rest else "")
+        if key == ("GET", "devices"):
+            return self.pc_devices()
+        if key == ("POST", "remove"):
+            did = body.get("id")
+            if not isinstance(did, str) or not PC_ID_RE.fullmatch(did):
+                raise ApiError(400, "invalid computer")
+            if not self.web and did == self.pc.cfg()["id"]:
+                self.pc.update({"on": False})
+            remote_python(self.conf, PC_ADMIN_PY, ["remove", did])
+            return self.pc_devices()
+        if key == ("POST", "builds"):
+            p = self._project(body.get("project") if isinstance(body.get("project"), str) else "")
+            on = body.get("on")
+            if on not in ("computers", "server"):
+                raise ApiError(400, "invalid choice")
+            if not p.get("remote"):
+                raise ApiError(400, "this project has no server folder")
+            if (p.get("endpoint") or {}).get("host") not in (None, "", self.conf.host):
+                raise ApiError(400, "this project is on another server")
+            remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], on])
+            return self.pc_devices()
+        if self.web:
+            raise ApiError(403, "not available in the web version")
+        if key == ("GET", ""):
+            return self.pc.public()
+        if key == ("POST", ""):
+            return self.pc.update(body)
+        if key == ("GET", "asks"):
+            return self.pc.pending()
+        if key == ("POST", "answer"):
+            return self.pc.answer(body.get("id"), body.get("answer"))
+        if key == ("GET", "run") and len(rest) == 2:
+            return self.pc.run_info(rest[1])
+        raise ApiError(404, "not found")
+
+    def pc_devices(self) -> dict:
+        """The computers of this server user (from the server) + which projects build on them."""
+        if not self.conf.configured:
+            raise ApiError(400, "the server is not configured")
+        paths = {p["name"]: p["remote"] for p in self.projects() if p.get("remote")}
+        r = remote_python(self.conf, PC_ADMIN_PY, ["list"], stdin=json.dumps({"paths": paths}).encode())
+        r = r if isinstance(r, dict) else {}
+        return {"devices": r.get("devices") or [], "builds": r.get("builds") or {},
+                "self": "" if self.web else self.pc.cfg()["id"]}
+
     # port tunnels ----------------------------------------------------------------
     def _tunnel_conf(self, project: str):
         def conf():
@@ -7655,7 +8372,7 @@ class App:
                 "projects": self.projects(), "sessions": [s.info() for s in self.sessions.values()],
                 "lastTabs": self.store.data.get("lastTabs") or [], "wsl": False if self.web else is_wsl(),
                 "platform": sys.platform, "web": self.web, "home": "" if self.web else os.path.expanduser("~"),
-                "defaultIgnores": default_ignores()}
+                "defaultIgnores": default_ignores(), "pc": {"on": False if self.web else bool(self.pc.cfg()["on"])}}
 
     # the local folder of a project in Explorer / Finder / the file manager
     def open_folder(self, name: str) -> dict:
@@ -8422,6 +9139,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         path, query = url.path, urllib.parse.parse_qs(url.query)
         try:
+            if method == "POST" and path == "/pc/run":         # onpc on the server, through the ssh link
+                return self.app.pc.serve_run(self)
             if method == "GET" and path == "/ws":
                 return self._websocket(query)
             if path.startswith("/api/"):
@@ -8481,6 +9200,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.client_error(self._body())
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
+        if parts[:1] == ["pc"]:
+            return app.pc_api(method, parts[1:], self._body() if method == "POST" else {})
         if route == ("GET", "state"):
             return app.state()
         if route == ("GET", "projects"):
@@ -9050,6 +9771,7 @@ def serve(foreground_msg=True):
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
     threading.Thread(target=app.docker_watch_loop, daemon=True).start()
     threading.Thread(target=app.start_tunnels, daemon=True).start()
+    threading.Thread(target=app.pc.start, daemon=True).start()
     app.restore_live()
     threading.Thread(target=app.share_loop, daemon=True).start()
     start_wsl_keepalive()

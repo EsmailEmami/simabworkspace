@@ -85,6 +85,11 @@ function tasksOp(op) {
   T.rev++;
   return tasksOp(null);
 }
+// Computers (computers.js): this computer + the server's list of computers
+const fakePc = { posts: [], answers: [],
+  me: { config: { on: false, name: 'desk', mode: 'new', allow: [], deny: ['sudo *'], projects: [], always: { cheshmeh: ['npm test'] }, output: 'chat' }, state: 'off', error: '', os: 'windows' },
+  devs: { devices: [{ id: 'a1b2c3d4e5f6', name: 'laptop', os: 'mac', since: Date.now() / 1000 - 120, online: true }], builds: { cheshmeh: 'server', shop: 'server' }, self: 'ffffffffffff' },
+  asks: { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' } };
 global.fetch = (url, opts) => {
   if (offline) return Promise.reject(new TypeError('Failed to fetch'));
   const method = (opts && opts.method) || 'GET';
@@ -151,6 +156,13 @@ global.fetch = (url, opts) => {
   }
   else if (url === '/api/files/cheshmeh') res = { files: ['README.md', 'cheshmeh-web-app/', 'cheshmeh-web-app/api/', 'cheshmeh-web-app/api/main.go', 'cheshmeh-web-app/web/x.ts'] };
   else if (url === '/api/tasks') res = tasksOp(method === 'POST' ? body : null);
+  else if (url === '/api/pc' && method === 'POST') { fakePc.posts.push(body); Object.assign(fakePc.me.config, body); res = fakePc.me; }
+  else if (url === '/api/pc') res = fakePc.me;
+  else if (url === '/api/pc/devices') res = fakePc.devs;
+  else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
+  else if (url === '/api/pc/asks') res = fakePc.asks;
+  else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
+  else if (url.startsWith('/api/pc/run/')) res = { id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', out: 'building…', start: 1, code: null };
   else if (url === '/api/tabs' || url === '/api/tabs?vis=1') res = fakeTabs;
   else if (url.startsWith('/api/server-stats')) res = Object.assign({ cpu: 92.4, cores: 8, load: [7.1, 5, 3], memTotal: 16e9, memUsed: 12.4e9, swapTotal: 0, swapUsed: 0,
     diskTotal: 500e9, diskUsed: 120e9, diskFree: 380e9, diskPath: '/home/esi' }, url.indexOf('top=1') > 0 ? {
@@ -199,6 +211,7 @@ require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 global.SW && require(path.join(ROOT, 'gui/static/files.js'));
 global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
+global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
 
 const tests = {
   'local paths: ~ shown as the real folder (Windows and Linux)'() {
@@ -1482,6 +1495,48 @@ const tests = {
     delete global.document.elementFromPoint;
     SW.closeTab(tab, true); await settle();
     assert.ok(!S.tabs.some((t) => t.isTasks));
+  },
+
+  async 'Computers: connect this computer, builds per project, rules; a question pops up in the window'() {
+    const S = global.SW.S;
+    global.SWComputers.open('cheshmeh'); await settle();
+    const md = q('.modal').pop();
+    assert.match(md.textContent, /This computer/);
+    assert.match(md.textContent, /laptop/);
+    assert.match(md.textContent, /npm test/, 'remembered commands are listed');
+    byText('button', 'Connect this computer').click(); await settle();
+    assert.deepStrictEqual(fakePc.posts.pop(), { on: true });
+    assert.strictEqual(S.pc.on, true);
+    const row = q('.pc-row', md).find((r) => r.classList.contains('focus'));
+    const sel = row && row.querySelector('select');
+    assert.ok(sel, 'opened at the project of the menu');
+    sel.value = 'computers'; sel.dispatch('change'); await settle();
+    assert.strictEqual(fakePc.devs.builds.cheshmeh, 'computers');
+    const ta = q('textarea', md);
+    ta[0].value = 'npm run *\n\n ng build* ';
+    q('select', md).find((x) => /Ask every time/.test(x.textContent)).value = 'every';
+    q('button', md).find((b) => b.textContent === 'Save rules').click(); await settle();
+    const saved = fakePc.posts.pop();
+    assert.deepStrictEqual(saved.allow, ['npm run *', 'ng build*']);
+    assert.strictEqual(saved.mode, 'every');
+    q('.icon-btn', md)[0].click(); await settle();
+    // Claude asks to run a command here: the question shows; Always allow answers it
+    fakePc.asks = { asks: [{ id: 'q1', project: 'cheshmeh', cmd: 'npm run build', until: Date.now() / 1000 + 100 }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    await global.SWComputers.poll(); await settle();
+    const ask = q('.modal').pop();
+    assert.match(ask.textContent, /Run on this computer\?/);
+    assert.match(q('.pc-cmd', ask)[0].textContent, /npm run build/);
+    q('button', ask).find((b) => b.textContent === 'Always allow this').click(); await settle();
+    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q1', answer: 'always' });
+    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'closed');
+    // output "panel": a running command opens the live box
+    fakePc.asks = { asks: [], runs: [{ id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', start: 1 }], now: Date.now() / 1000, output: 'panel' };
+    await global.SWComputers.poll(); await settle();
+    const box = q('.pc-live')[0];
+    assert.ok(box, 'live output box');
+    assert.match(box.textContent, /building…/);
+    q('.icon-btn', box)[0].click();
+    S.pc = { on: false };
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

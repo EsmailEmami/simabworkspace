@@ -1665,7 +1665,7 @@ class FrontendJs(unittest.TestCase):
         node = find_node()
         if not node:
             self.skipTest("node not found")
-        for f in ("app.js", "chat.js", "files.js", "tasks.js", "voice.js", "sounds.js"):
+        for f in ("app.js", "chat.js", "files.js", "tasks.js", "computers.js", "voice.js", "sounds.js"):
             r = subprocess.run([node, "--check", str(ROOT / "gui" / "static" / f)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -2442,7 +2442,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.48.2"', text)
+        self.assertIn('VERSION="1.49.0"', text)
 
 
 if __name__ == "__main__":

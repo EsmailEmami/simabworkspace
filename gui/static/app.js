@@ -2108,6 +2108,7 @@
       { label: 'Continue last chat', disabled: !r, action: function () { resumeLatest(p.name); } },
       { label: 'Sessions — running and past…', disabled: !r, k: runningOf(p.name).length ? runningOf(p.name).length + ' running' : '', action: function () { claudeSessionsDialog(p); } },
       { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
+      { label: 'Builds run on…', disabled: !r, action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
       { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
@@ -4832,6 +4833,7 @@
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
+        { label: 'Computers — builds on your own computers…', action: function () { if (window.SWComputers) window.SWComputers.open(); } },
         { label: 'Grid: all tabs side by side', action: gridAll },
         { label: 'Single section', disabled: L.groups.length < 2, action: mergeAll },
         { label: 'Hide sidebar', k: 'Alt+M', action: toggleWorkMode },
@@ -4919,6 +4921,7 @@
       S.projectsKey = JSON.stringify(st.projects);
       S.wsl = st.wsl;
       S.home = st.home || '';
+      S.pc = st.pc || { on: false };
       S.defaultIgnores = st.defaultIgnores || [];
       S.lastTabs = WID ? [] : st.lastTabs;
       S.version = st.version;

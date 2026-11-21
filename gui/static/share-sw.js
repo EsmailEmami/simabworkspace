@@ -42,7 +42,7 @@ function targetOf(id) {
 
 var portLists = {};        // project → {at, p: promise of [{port, t}]} (its own first)
 function portsOf(t) {
-  var sl = t.split('/')[0], c = portLists[sl];
+  var sl = t.split('/').slice(0, 2).join('/'), c = portLists[sl];
   if (!c || Date.now() - c.at > 30000) {
     c = portLists[sl] = { at: Date.now(), p: fetch('/__simab/ports?t=' + encodeURIComponent(t), { credentials: 'include' })
       .then(function (r) { return r.ok ? r.json() : []; }).catch(function () { return []; }) };

@@ -329,7 +329,6 @@
   // ---- Share on your domain: ports of your computer at https://DOMAIN/<project>/<name> (server.py "share")
   function shareRows() {
     var doms = h('div', { class: 'devices' }), ports = h('div', { class: 'devices' });
-    var dom = h('input', { class: 'inp mono', placeholder: 'projects.example.com' });
     var proj = h('select', { class: 'inp' }), name = h('input', { class: 'inp mono', placeholder: 'front' });
     var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, placeholder: '3001' });
     var ACCESS = [['private', 'Only me'], ['ask', 'Ask me'], ['public', 'Anyone']];
@@ -350,10 +349,8 @@
     }
     function field(label, el) { return h('div', { class: 'field' }, h('label', null, label), el); }
     function render(d) {
-      doms.replaceChildren.apply(doms, d.domains.map(function (x) {
-        return h('div', { class: 'dev' }, h('span', { class: 'grow mono' }, x),
-          h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/domain', { domain: x, on: false }).then(render).catch(fail); } }, 'Remove'));
-      }));
+      doms.replaceChildren(d.base ? h('div', { class: 'muted' }, 'Your links: ', h('span', { class: 'mono' }, d.base + '/<project>/<name>'))
+        : h('div', { class: 'muted' }, 'The links appear here once the server’s admin sets the apps address (web version: --share-domain).'));
       ports.replaceChildren.apply(ports, d.shares.map(function (x) {
         var url = x.urls[0] || '';
         var box = accessSel(x.access);
@@ -384,10 +381,8 @@
     }
     load();
     return h('div', null,
-      h('p', { class: 'muted' }, h('small', null, 'Open ports of your computer from anywhere: point a domain of yours to the server of the web version (like its own address), add it here, then add a port. Works while your computer is on and the port runs. Same list in the app and on the web.')),
+      h('p', { class: 'muted' }, h('small', null, 'Open ports of your computer from anywhere. Works while your computer is on and the port runs. The apps address shows only these ports — never your workspace. Same list in the app and on the web.')),
       doms,
-      h('div', { class: 'row' }, field('Domain', dom),
-        h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/domain', { domain: dom.value, on: true }).then(function (d) { dom.value = ''; render(d); }).catch(fail); } }, 'Add domain')),
       ports,
       h('div', null, h('button', { class: 'btn sm', onclick: status }, 'Check again')),
       h('div', { class: 'row' }, field('Project', proj), field('Name', name), field('Port', port),

@@ -21,7 +21,7 @@ import server as sw  # noqa: E402
 from test_onpc import Forwarder, wait_for  # noqa: E402
 from test_gui_server import find_node  # noqa: E402
 
-DOM = "projects.example.com"
+DOM = "apps.example.com"
 MAIN = "workspace.example.com"
 
 
@@ -38,9 +38,9 @@ class Helpers(unittest.TestCase):
 
     def test_location(self):
         self.assertEqual(sw.share_location("http://localhost:3000/login?a=1", ""), "/login?a=1")
-        self.assertEqual(sw.share_location("/login", "/esi/front"), "/esi/front/login")
-        self.assertEqual(sw.share_location("https://accounts.google.com/x", "/esi/front"), "https://accounts.google.com/x")
-        self.assertEqual(sw.share_location("//cdn.x/y", "/esi/front"), "//cdn.x/y")
+        self.assertEqual(sw.share_location("/login", "/esi/esi/front"), "/esi/esi/front/login")
+        self.assertEqual(sw.share_location("https://accounts.google.com/x", "/esi/esi/front"), "https://accounts.google.com/x")
+        self.assertEqual(sw.share_location("//cdn.x/y", "/esi/esi/front"), "//cdn.x/y")
 
     def test_inject_first_in_head(self):
         out = sw.share_inject(b"<!doctype html><html><HEAD lang=x><script src=/a.js></script></head>", "esi/front")
@@ -153,7 +153,7 @@ class EndToEnd(unittest.TestCase):
         self.fwd = Forwarder(os.path.join(t, "pc.sock"), self.pc.port)
         self.fwd.start()
         # the web version
-        self.gate = sw.WebGate(Path(t) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False)
+        self.gate = sw.WebGate(Path(t) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False, share_domain=DOM)
         self.gate.secure = False
         self.tok = self.gate.login("1.2.3.4", {"host": "127.0.0.1", "port": "22", "user": "esi", "password": "x"})
         self.wsid = self.gate.ws_of(self.tok)
@@ -164,7 +164,7 @@ class EndToEnd(unittest.TestCase):
         self.web = sw.make_web_server(self.gate, "127.0.0.1", 0)
         threading.Thread(target=self.web.serve_forever, daemon=True).start()
         self.port = self.web.server_address[1]
-        hub.api(self.wsid, "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
+        hub.note_main(MAIN)
         for name, port, pub in (("front", self.devport, True), ("api", self.devport, False), ("ws", self.ws.getsockname()[1], True),
                                 ("off", 1, True)):
             hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": name, "port": port, "public": pub, "on": True}, MAIN)
@@ -193,38 +193,38 @@ class EndToEnd(unittest.TestCase):
     NAV = {"X-Simab-SW": "1", "X-Simab-Nav": "1", "Sec-Fetch-Mode": "navigate"}
 
     def test_entry_installs_the_worker_and_remembers_the_project(self):
-        r, d = self.req("GET", "/esi/front/page?x=1", {"Sec-Fetch-Mode": "navigate"})
+        r, d = self.req("GET", "/esi/esi/front/page?x=1", {"Sec-Fetch-Mode": "navigate"})
         self.assertEqual(r.status, 200)
         self.assertIn(b"sessionStorage.setItem('__simabT', t)", d)
-        self.assertIn(b'"esi/front"', d)
+        self.assertIn(b'"esi/esi/front"', d)
         self.assertIn(b'"/page?x=1"', d)
-        self.assertIn("__simab_last=esi/front", r.getheader("Set-Cookie"))
+        self.assertIn("__simab_last=esi/esi/front", r.getheader("Set-Cookie"))
         self.assertEqual(DevServer.seen, [], "the entry page does not reach the computer")
         r, d = self.req("GET", "/__simab/sw.js")
         self.assertEqual((r.status, r.getheader("Service-Worker-Allowed")), (200, "/"))
         self.assertIn(b"X-Simab-SW", d)
 
     def test_page_through_the_worker_gets_the_shim(self):
-        r, d = self.req("GET", "/__simab/p/esi/front/", dict(self.NAV, **{"Accept-Encoding": "gzip"}))
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/", dict(self.NAV, **{"Accept-Encoding": "gzip"}))
         self.assertEqual(r.status, 200)
-        self.assertIn(b'<head><script src="/__simab/shim.js" data-t="esi/front" data-p="', d)
-        self.assertIn(b"&quot;:&quot;esi/front&quot;", d)
+        self.assertIn(b'<head><script src="/__simab/shim.js" data-t="esi/esi/front" data-p="', d)
+        self.assertIn(b"&quot;:&quot;esi/esi/front&quot;", d)
         self.assertNotIn(b"esi/api", d, "private ports are not listed for a browser that is not signed in")
         self.assertIsNone(r.getheader("Content-Security-Policy"))
         self.assertEqual(int(r.getheader("Content-Length")), len(d))
         _, path, hd = DevServer.seen[-1]
         self.assertEqual((path, hd["Host"], hd["Accept-Encoding"]), ("/", f"localhost:{self.devport}", "identity"))
         self.assertNotIn("X-Simab-SW", hd)
-        r, d = self.req("GET", "/__simab/p/esi/front/gz", dict(self.NAV))
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/gz", dict(self.NAV))
         self.assertIn(b"shim.js", d)
         self.assertIsNone(r.getheader("Content-Encoding"))
 
     def test_assets_cookies_and_bodies(self):
-        r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/assets/a.js", self.SW)
         self.assertEqual((r.status, d), (200, b"console.log(1)"))
-        r, _ = self.req("GET", "/__simab/p/esi/front/set", self.SW)
-        self.assertEqual(r.getheader("Set-Cookie"), "esi.sid=1; HttpOnly; Path=/")
-        r, d = self.req("GET", "/__simab/p/esi/front/echo?q=1", dict(self.SW, Cookie="esi.sid=1; mmd.sid=2; __simab_share=zz",
+        r, _ = self.req("GET", "/__simab/p/esi/esi/front/set", self.SW)
+        self.assertEqual(r.getheader("Set-Cookie"), "esi.esi.sid=1; HttpOnly; Path=/")
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/echo?q=1", dict(self.SW, Cookie="esi.esi.sid=1; mmd.x.sid=2; __simab_share.esi=zz",
                                                                     Origin=f"http://{DOM}", Referer=f"http://{DOM}/products"))
         hd = json.loads(d)["headers"]
         self.assertEqual(json.loads(d)["path"], "/echo?q=1")
@@ -232,11 +232,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(hd["Origin"], f"http://localhost:{self.devport}")
         self.assertEqual(hd["Referer"], f"http://localhost:{self.devport}/products")
         self.assertEqual(hd["X-Forwarded-Host"], DOM)
-        r, d = self.req("POST", "/__simab/p/esi/front/echo", self.SW, body=b"hello")
+        r, d = self.req("POST", "/__simab/p/esi/esi/front/echo", self.SW, body=b"hello")
         self.assertEqual(d, b"POST:hello")
-        r, d = self.req("PUT", "/esi/front/echo", body=b"x")          # an API client, straight to the entry path
+        r, d = self.req("PUT", "/esi/esi/front/echo", body=b"x")          # an API client, straight to the entry path
         self.assertEqual(d, b"PUT:x")
-        r, d = self.req("GET", "/__simab/p/esi/front/chunk", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/chunk", self.SW)
         self.assertEqual(d, b"abcd")
 
     def test_https_port_and_calls_from_the_panel(self):
@@ -254,41 +254,41 @@ class EndToEnd(unittest.TestCase):
         p = tls.server_address[1]
         self.store.db.put("pc", dict(self.pc.pc.cfg(), always={"esi": [f"share port {p} on the internet", f"share port {self.devport} on the internet"]}))
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "secure", "port": p, "tls": True, "public": True, "on": True}, MAIN)
-        r, d = self.req("GET", "/__simab/p/esi/secure/echo", dict(self.SW, **{"X-Simab-From": "esi/front", "Origin": f"http://{DOM}"}))
+        r, d = self.req("GET", "/__simab/p/esi/esi/secure/echo", dict(self.SW, **{"X-Simab-From": "esi/esi/front", "Origin": f"http://{DOM}"}))
         self.assertEqual(r.status, 200, d)
         hd = json.loads(d)["headers"]
         self.assertEqual(hd["Origin"], f"http://localhost:{self.devport}", "as if the panel on the computer called it")
         self.assertEqual(hd["Host"], f"localhost:{p}")
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "front", "port": p, "tls": False, "public": True, "on": True}, MAIN)
-        r, d = self.req("GET", "/__simab/p/esi/front/echo", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/echo", self.SW)
         self.assertEqual(r.status, 502, "plain HTTP to an HTTPS port")
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "secure", "port": self.devport, "tls": True, "public": True, "on": True}, MAIN)
-        r, d = self.req("GET", "/__simab/p/esi/secure/echo", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/secure/echo", self.SW)
         self.assertEqual((r.status, d), (502, b"this port does not speak HTTPS \xe2\x80\x94 turn HTTPS off for it"))
 
     def test_ports_list(self):
-        r, d = self.req("GET", "/__simab/ports?t=esi%2Ffront")
-        self.assertEqual(sorted(x["t"] for x in json.loads(d)), ["esi/front", "esi/off", "esi/ws"], "private ones only when signed in")
+        r, d = self.req("GET", "/__simab/ports?t=esi%2Fesi%2Ffront")
+        self.assertEqual(sorted(x["t"] for x in json.loads(d)), ["esi/esi/front", "esi/esi/off", "esi/esi/ws"], "private ones only when signed in")
 
     def test_redirects(self):
-        r, _ = self.req("GET", "/__simab/p/esi/front/go", self.SW)
+        r, _ = self.req("GET", "/__simab/p/esi/esi/front/go", self.SW)
         self.assertEqual((r.status, r.getheader("X-Simab-Location")), (200, "/login"))
-        r, _ = self.req("GET", "/esi/front/go")
-        self.assertEqual((r.status, r.getheader("Location")), (302, "/esi/front/login"))
+        r, _ = self.req("GET", "/esi/esi/front/go")
+        self.assertEqual((r.status, r.getheader("Location")), (302, "/esi/esi/front/login"))
 
     def test_other_pages_and_fallback(self):
         r, d = self.req("GET", "/products", {"Sec-Fetch-Mode": "navigate"})
         self.assertEqual(r.status, 200)
         self.assertIn(b"sessionStorage.getItem('__simabT')", d)
-        r, d = self.req("GET", "/assets/a.js", {"Cookie": "__simab_last=esi/front"})   # no service worker in this browser
+        r, d = self.req("GET", "/assets/a.js", {"Cookie": "__simab_last=esi/esi/front"})   # no service worker in this browser
         self.assertEqual(d, b"console.log(1)")
         r, _ = self.req("GET", "/assets/a.js")
         self.assertEqual(r.status, 404)
-        r, d = self.req("GET", "/__simab/p/esi/nope/", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/nope/", self.SW)
         self.assertEqual(r.status, 404)
 
     def test_port_not_running(self):
-        r, d = self.req("GET", "/__simab/p/esi/off/", self.NAV)
+        r, d = self.req("GET", "/__simab/p/esi/esi/off/", self.NAV)
         self.assertEqual(r.status, 502)
         self.assertIn(b"nothing is running on port 1", d)
         self.assertIn(b"<html>", d, "a page for the browser")
@@ -301,7 +301,7 @@ class EndToEnd(unittest.TestCase):
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "db", "port": free, "public": True, "on": True}, MAIN)
         hub = self.pc.pc
         out = []
-        ts = [threading.Thread(target=lambda: out.append(self.req("GET", "/__simab/p/esi/db/", self.SW)[1])) for _ in range(3)]
+        ts = [threading.Thread(target=lambda: out.append(self.req("GET", "/__simab/p/esi/esi/db/", self.SW)[1])) for _ in range(3)]
         for t in ts:
             t.start()
         self.assertTrue(wait_for(lambda: hub.asks))
@@ -313,7 +313,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(out, [f"port {free} was not allowed on {hub.cfg()['name']}".encode()] * 3)
         def one():
             try:
-                out.append(self.req("GET", "/__simab/p/esi/db/", self.SW)[0].status)
+                out.append(self.req("GET", "/__simab/p/esi/esi/db/", self.SW)[0].status)
             except Exception as e:  # noqa: BLE001
                 out.append(repr(e))
         th = threading.Thread(target=one)
@@ -346,13 +346,13 @@ class EndToEnd(unittest.TestCase):
         p = x.getsockname()[1]
         self.store.db.put("pc", dict(self.pc.pc.cfg(), always={"esi": [f"share port {p} on the internet"]}))
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "raw", "port": p, "public": True, "on": True}, MAIN)
-        r, d = self.req("GET", "/__simab/p/esi/raw/", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/raw/", self.SW)
         x.close()
         self.assertEqual((r.status, d), (502, b"this port did not answer like a web server"))
 
     def test_older_app_on_the_computer(self):
         with mock.patch.object(sw.PcHub, "serve_proxy", lambda hub, h: h._json(404, {"error": "not found"})):
-            r, d = self.req("GET", "/__simab/p/esi/front/", self.SW)
+            r, d = self.req("GET", "/__simab/p/esi/esi/front/", self.SW)
         self.assertEqual(r.status, 502)
         self.assertIn(b"update Simab Workspace on your computer", d)
 
@@ -364,13 +364,13 @@ class EndToEnd(unittest.TestCase):
 
     def test_wrong_secret_is_refused_by_the_computer(self):
         self.link = dict(self.link, secret="x" * 40)
-        r, d = self.req("GET", "/__simab/p/esi/front/", self.SW)
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/", self.SW)
         self.assertEqual(r.status, 502)
         self.assertIn(b"does not know this server user", d)
 
     def test_websocket(self):
         s = socket.create_connection(("127.0.0.1", self.port))
-        s.sendall(f"GET /__simab/p/esi/ws/hmr HTTP/1.1\r\nHost: {DOM}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        s.sendall(f"GET /__simab/p/esi/esi/ws/hmr HTTP/1.1\r\nHost: {DOM}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                   "Sec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
         s.settimeout(10)
         head = b""
@@ -385,13 +385,13 @@ class EndToEnd(unittest.TestCase):
         s.close()
 
     def test_private_share_needs_a_sign_in_of_the_workspace(self):
-        r, _ = self.req("GET", "/esi/api/x", {"Sec-Fetch-Mode": "navigate"})
+        r, _ = self.req("GET", "/esi/esi/api/x", {"Sec-Fetch-Mode": "navigate"})
         self.assertEqual(r.status, 302)
         loc = r.getheader("Location")
-        self.assertTrue(loc.startswith(f"http://{MAIN}/__simab/share-auth?d={DOM}&to="), loc)
-        r, _ = self.req("GET", "/__simab/p/esi/api/x", self.SW)
+        self.assertTrue(loc.startswith(f"http://{MAIN}/__simab/share-auth?u=esi&to="), loc)
+        r, _ = self.req("GET", "/__simab/p/esi/esi/api/x", self.SW)
         self.assertEqual(r.status, 401)
-        r, _ = self.req("GET", "/__simab/p/esi/api/x", self.NAV)
+        r, _ = self.req("GET", "/__simab/p/esi/esi/api/x", self.NAV)
         self.assertTrue(r.getheader("X-Simab-Location").startswith(f"http://{MAIN}/__simab/share-auth"))
         # on the workspace's own domain: not signed in → a sign-in page
         path = loc.split(MAIN, 1)[1]
@@ -402,12 +402,12 @@ class EndToEnd(unittest.TestCase):
         back = r.getheader("Location")
         self.assertTrue(back.startswith(f"http://{DOM}/__simab/auth?c="), back)
         r, _ = self.req("GET", back.split(DOM, 1)[1])
-        self.assertEqual((r.status, r.getheader("Location")), (302, "/esi/api/x"))
+        self.assertEqual((r.status, r.getheader("Location")), (302, "/esi/esi/api/x"))
         cookie = r.getheader("Set-Cookie").split(";")[0]
-        self.assertTrue(cookie.startswith("__simab_share="))
+        self.assertTrue(cookie.startswith("__simab_share.esi="))
         r, _ = self.req("GET", back.split(DOM, 1)[1])
         self.assertEqual(r.status, 403, "a code works once")
-        r, d = self.req("GET", "/__simab/p/esi/api/x", dict(self.SW, Cookie=cookie))
+        r, d = self.req("GET", "/__simab/p/esi/esi/api/x", dict(self.SW, Cookie=cookie))
         self.assertEqual((r.status, json.loads(d)["path"]), (200, "/x"))
         self.assertNotIn("Cookie", json.loads(d)["headers"], "the sign-in cookie never reaches the computer")
         self.assertFalse(self.hub.token_ok(cookie.split("=", 1)[1], self.wsid, "other.example.com"))
@@ -416,13 +416,13 @@ class EndToEnd(unittest.TestCase):
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "front", "port": self.devport, "access": "ask", "on": True}, MAIN)
 
     def visitor_asks(self):
-        r, d = self.req("GET", "/esi/front/", {"Sec-Fetch-Mode": "navigate"})
+        r, d = self.req("GET", "/esi/esi/front/", {"Sec-Fetch-Mode": "navigate"})
         self.assertEqual(r.status, 200)
         self.assertIn(b"Asking the owner", d)
         self.assertIn(b"I am the owner", d)
-        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/front"}))
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/front"}))
         aid = json.loads(d)["id"]
-        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/front"}))
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/front"}))
         self.assertEqual(json.loads(d)["id"], aid, "the same visitor asks once")
         return aid
 
@@ -442,19 +442,19 @@ class EndToEnd(unittest.TestCase):
         r, d = self.req("GET", "/__simab/ask?id=" + aid)
         self.assertEqual(json.loads(d), {"state": "allowed"})
         cookie = r.getheader("Set-Cookie")
-        self.assertTrue(cookie.startswith("__simab_g.esi.front="), cookie)
+        self.assertTrue(cookie.startswith("__simab_g.esi.esi.front="), cookie)
         self.assertIn("Max-Age=3600", cookie)
         r, _ = self.req("GET", "/__simab/ask?id=" + aid)
         self.assertIsNone(r.getheader("Set-Cookie"), "the cookie is given once")
         c = cookie.split(";")[0]
-        r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", dict(self.SW, Cookie=c))
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/assets/a.js", dict(self.SW, Cookie=c))
         self.assertEqual((r.status, d), (200, b"console.log(1)"))
-        r, d = self.req("GET", "/__simab/p/esi/api/x", dict(self.SW, Cookie=c))
+        r, d = self.req("GET", "/__simab/p/esi/esi/api/x", dict(self.SW, Cookie=c))
         self.assertEqual(r.status, 401, "only that link")
         st = self.hub.api(self.wsid, "GET", "", {}, MAIN)
         self.assertEqual([(g["t"], g["exp"] > time.time()) for g in st["guests"]], [("esi/front", True)])
         self.hub.api(self.wsid, "POST", "/revoke", {"id": st["guests"][0]["id"]}, MAIN)
-        r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", dict(self.NAV, Cookie=c))
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/assets/a.js", dict(self.NAV, Cookie=c))
         self.assertIn(b"Asking the owner", d, "revoked: asks again")
 
     def test_ask_me_answered_on_the_phone(self):
@@ -478,7 +478,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_owner_and_others(self):
         self.ask_share()
-        r, _ = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/api"}))
+        r, _ = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/api"}))
         self.assertEqual(r.status, 404, "a private link does not ask")
         r, _ = self.req("GET", "/__simab/ask?id=nope")
         self.assertEqual(r.status, 404)
@@ -486,7 +486,7 @@ class EndToEnd(unittest.TestCase):
         for i in range(5):
             self.hub.asks[f"{i:012x}"] = {"id": f"{i:012x}", "ws": "other", "t": "a/b", "ip": "127.0.0.1", "until": time.time() + 99,
                                           "answer": "", "_ua": str(i)}
-        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/x1"}))
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/x1"}))
         self.assertEqual(r.status, 429)
 
     def test_workspace_domain_is_unchanged(self):
@@ -499,38 +499,37 @@ class EndToEnd(unittest.TestCase):
 class Settings(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False)
+        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False, share_domain=DOM)
         self.hub = self.gate.share
 
     def tearDown(self):
         self.gate.shutdown()
         self.tmp.cleanup()
 
-    def test_domains(self):
-        st = self.hub.api("a", "POST", "/domain", {"domain": "https://Projects.Example.com/", "on": True}, MAIN)
-        self.assertEqual(st["domains"], [DOM])
-        self.assertEqual(self.hub.domain(DOM + ":443")["ws"], "a")
+    def test_apps_address(self):
+        self.assertTrue(self.hub.is_host(DOM + ":443") and not self.hub.is_host(MAIN))
         with self.assertRaises(sw.ApiError) as e:
-            self.hub.api("b", "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
-        self.assertEqual(e.exception.status, 409)
-        for bad in (MAIN, "127.0.0.1", "nodot", ""):
-            with self.assertRaises(sw.ApiError):
-                self.hub.api("a", "POST", "/domain", {"domain": bad, "on": True}, MAIN)
-        self.hub.api("a", "POST", "/domain", {"domain": DOM, "on": False}, MAIN)
-        self.assertIsNone(self.hub.domain(DOM))
+            self.hub.api("a", "POST", "/domain", {"domain": "x.example.com", "on": True}, MAIN)
+        self.assertEqual(e.exception.status, 404, "users do not add domains: the admin sets one for everybody")
+        self.hub.note_main(MAIN + ":550")
+        self.hub.note_main(DOM)
+        self.assertEqual(self.hub.main_host, MAIN + ":550", "never the apps address itself")
+        self.assertEqual(sw.ShareHub(self.gate).main_host, MAIN + ":550", "kept")
+        self.assertEqual(self.hub._split("/esi/shop/front/a/b"), ("esi", "shop", "front", "/a/b"))
+        self.assertEqual(self.hub._split("/esi/shop"), ("", "", "", ""))
+        self.assertEqual(self.hub._split("/../shop/front"), ("", "", "", ""))
 
     def test_ports(self):
-        self.hub.api("a", "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "name": "Front", "port": "3001", "on": True}, MAIN)
         self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False, "access": "private",
-                                         "urls": [f"https://{DOM}/my-shop/front"]}])
+                                         "urls": []}], "no user for this workspace: no link")
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "slug": "shop", "name": "front", "port": 3001, "public": True,
                                                  "old": {"slug": "my-shop", "name": "front"}, "on": True}, MAIN)
         self.assertEqual([(x["slug"], x["public"]) for x in st["shares"]], [("shop", True)])
         for bad in ({"name": "", "port": 1}, {"name": "x", "port": 0}, {"name": "x", "port": 70000}):
             with self.assertRaises(sw.ApiError):
                 self.hub.api("a", "POST", "/port", dict({"project": "p", "on": True}, **bad), MAIN)
-        self.assertEqual(self.hub.api("b", "GET", "", {}, MAIN), {"domains": [], "shares": [], "guests": []})
+        self.assertEqual(self.hub.api("b", "GET", "", {}, MAIN), {"base": "", "shares": [], "guests": []})
         st = self.hub.api("a", "POST", "/port", {"project": "p", "name": "q", "port": 1, "access": "ask", "on": True}, MAIN)
         self.assertEqual([x["access"] for x in st["shares"] if x["name"] == "q"], ["ask"])
         st = self.hub.api("a", "POST", "/port", {"slug": "shop", "name": "front", "on": False}, MAIN)
@@ -592,7 +591,7 @@ class SharedSettings(unittest.TestCase):
         self.keygen = mock.patch.object(sw, "ensure_ssh_key", lambda p: None)
         self.keygen.start()
         self.app = sw.App(sw.Store(Path(self.tmp.name) / "gui.json"), sw.ServerConf("esi", "h"))
-        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False)
+        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False, share_domain=DOM)
         tok = self.gate.login("1.2.3.4", {"host": "127.0.0.1", "port": "22", "user": "esi", "password": "x"})
         self.ws = self.gate.ws_of(tok)
         self.web = self.gate.app_for(tok)
@@ -605,46 +604,42 @@ class SharedSettings(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_app_edits_the_web_follows(self):
-        st = self.app.share_api("POST", "/domain", {"domain": DOM, "on": True})
-        self.assertEqual((st["domains"], st["web"]), ([DOM], False))
+        with self.assertRaises(sw.ApiError):
+            self.app.share_api("POST", "/domain", {"domain": "x.example.com", "on": True})
         st = self.app.share_api("POST", "/port", {"project": "avahesab", "name": "panel", "port": 6001, "access": "ask", "on": True})
-        self.assertEqual(st["shares"][0]["urls"], [f"https://{DOM}/avahesab/panel"])
+        self.assertEqual((st["shares"][0]["urls"], st["web"]), ([], False), "no link until the web version said its address")
         f = Path(self.home, ".config/simabworkspace/share.json")
         self.assertEqual(oct(f.stat().st_mode & 0o777), "0o600")
         self.assertEqual(json.loads(f.read_text())["shares"][0]["access"], "ask")
-        self.assertIsNone(self.gate.share.domain(DOM), "not yet: the web version reads it every 30 s")
+        self.assertIsNone(self.gate.share.find(self.ws, "avahesab", "panel"), "not yet: the web version reads it every 30 s")
         self.gate.share.pull(self.ws, self.web)
-        self.assertEqual(self.gate.share.domain(DOM)["ws"], self.ws)
         self.assertEqual(self.gate.share.find(self.ws, "avahesab", "panel")["access"], "ask")
+        st = self.app.share_api("GET", "", {})
+        self.assertEqual(st["base"], f"https://{DOM}/esi")
+        self.assertEqual(st["shares"][0]["urls"], [f"https://{DOM}/esi/avahesab/panel"], "the app shows the link")
         # the web version edits: the file and its tables at once
         st = self.web.share_api("POST", "/port", {"project": "avahesab", "name": "api", "port": 6000, "tls": True, "on": True}, MAIN)
         self.assertEqual([x["name"] for x in st["shares"]], ["api", "panel"])
         self.assertTrue(self.gate.share.find(self.ws, "avahesab", "api")["tls"])
-        self.assertEqual(self.gate.share.domain(DOM)["main"], MAIN)
-        self.assertEqual(len(self.app.share_api("GET", "", {})["shares"]), 2, "the app sees it")
-        self.app.share_api("POST", "/domain", {"domain": DOM, "on": False})
+        self.assertEqual(self.gate.share.main_host, MAIN)
+        self.app.share_api("POST", "/port", {"slug": "avahesab", "name": "api", "on": False})
         self.gate.share.pull(self.ws, self.web)
-        self.assertIsNone(self.gate.share.domain(DOM))
+        self.assertIsNone(self.gate.share.find(self.ws, "avahesab", "api"))
 
     def test_first_read_keeps_what_the_web_had(self):
-        self.gate.share.api(self.ws, "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
         self.gate.share.api(self.ws, "POST", "/port", {"project": "p", "name": "f", "port": 3001, "on": True}, MAIN)
         self.gate.share.pull(self.ws, self.web)
         st = self.app.share_api("GET", "", {})
-        self.assertEqual((st["domains"], [x["name"] for x in st["shares"]]), ([DOM], ["f"]))
+        self.assertEqual(([x["name"] for x in st["shares"]], st["base"]), (["f"], f"https://{DOM}/esi"))
 
-    def test_domain_of_another_workspace(self):
-        self.gate.share.db.run("INSERT INTO web_share_domains (domain, ws, main) VALUES (?, 'other', 'x')", (DOM,))
-        with self.assertRaises(sw.ApiError) as e:
-            self.web.share_api("POST", "/domain", {"domain": DOM, "on": True}, MAIN)
-        self.assertEqual(e.exception.status, 409)
+    def test_bad_entries_are_dropped(self):
         Path(self.home, ".config/simabworkspace").mkdir(parents=True)
-        Path(self.home, ".config/simabworkspace/share.json").write_text(json.dumps({"domains": [DOM, "Bad Domain"], "shares": [
+        Path(self.home, ".config/simabworkspace/share.json").write_text(json.dumps({"base": "javascript:x", "shares": [
             {"slug": "a", "name": "b", "port": "x"}, {"slug": "a", "name": "c", "port": 5, "access": "weird"}]}))
         self.gate.share.pull(self.ws, self.web)
-        self.assertEqual(self.gate.share.domain(DOM)["ws"], "other", "never taken from another workspace")
         self.assertEqual(self.gate.share.find(self.ws, "a", "c")["access"], "private")
         self.assertIsNone(self.gate.share.find(self.ws, "a", "b"))
+        self.assertEqual(self.app.share_api("GET", "", {})["base"], f"https://{DOM}/esi")
 
     def test_status_on_this_computer(self):
         x = socket.socket()

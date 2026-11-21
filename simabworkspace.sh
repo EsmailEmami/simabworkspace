@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.64.0 2026-11-21  Share: one apps address for everybody (web --share-domain), links https://APPS/<user>/<project>/<name>; no domains per user
 #    1.63.2 2026-11-21  Settings in tabs (one per section); dev servers show every port they serve; QR code in the authenticator setup dialogs
 #    1.63.1 2026-11-21  Share on your domain in the app too (Settings), same list as the web (share.json on the server), live state per link; one answer per port is enough
 #    1.63.0 2026-11-21  Share on your domain: https://DOMAIN/<project>/<name> opens a port of your computer (private or public), many projects on one domain
@@ -377,7 +378,7 @@
 
 set -u -o pipefail
 
-VERSION="1.63.2"
+VERSION="1.64.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

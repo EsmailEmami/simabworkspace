@@ -40,7 +40,7 @@
     window.WebSocket = P;
   }
 
-  var CP = t.split('/')[0] + '.';     // localhost cookies are the same on every port: one jar per project
+  var CP = t.split('/').slice(0, 2).join('.') + '.';     // localhost cookies are the same on every port: one jar per project
   var cd = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
   if (cd && cd.get && cd.set) {
     Object.defineProperty(document, 'cookie', {

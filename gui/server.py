@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.63.2"
+VERSION = "1.64.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -8329,7 +8329,7 @@ class App:
             return {"status": self.share_status(self.share_data()), "web": self.web}
         if method == "GET" and sub == "":
             data = self.share_data()
-        elif method == "POST" and sub in ("/domain", "/port"):
+        elif method == "POST" and sub == "/port":
             data = share_edit(self.share_data(), sub, body, host if self.web else "")
             if hook:
                 hook(data, host, True)
@@ -8339,8 +8339,9 @@ class App:
         if hook:
             hook(data, host, False)
         data.pop("missing", None)
+        data.pop("domains", None)
         for x in data["shares"]:
-            x["urls"] = [f"https://{d}/{x['slug']}/{x['name']}" for d in data["domains"]]
+            x["urls"] = [f"{data['base']}/{x['slug']}/{x['name']}"] if data.get("base") else []
         data["web"] = self.web
         return data
 
@@ -10712,6 +10713,7 @@ def ua_label(ua: str) -> str:
 # HTML pages get /__simab/shim.js first: WebSockets to the same project, cookies + localStorage per project.
 # Private shares: a sign-in of the workspace on the main domain → one-time code → own cookie on DOMAIN.
 SHARE_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?")
+SHARE_USER_RE = re.compile(r"[a-z0-9_][a-z0-9._-]{0,31}")
 SHARE_DOMAIN_RE = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 SHARE_COOKIE = "__simab_share"
 SHARE_LAST = "__simab_last"         # the last project opened here: for a browser without service workers
@@ -10805,25 +10807,15 @@ def share_clean(data) -> dict:
         seen.add((sl, nm))
         shares.append({"slug": sl, "name": nm, "project": str(x.get("project") or sl)[:200], "port": port,
                        "access": x.get("access") if x.get("access") in SHARE_ACCESS else "private", "tls": bool(x.get("tls"))})
-    return {"domains": doms, "shares": shares[:SHARE_MAX]}
+    base = data.get("base") if isinstance(data.get("base"), str) and re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?/[a-z0-9._-]+", data.get("base") or "") else ""
+    return {"domains": doms, "shares": shares[:SHARE_MAX], "base": base}
 
 
 def share_edit(data: dict, sub: str, body: dict, host: str = "", hosts=()) -> dict:
     """One change from Settings → Share on your domain (POST share/domain or share/port)."""
     data = share_clean(data)
     if sub == "/domain":
-        d = share_domain_clean(body.get("domain"))
-        doms = [x for x in data["domains"] if x != d]
-        if body.get("on"):
-            if not SHARE_DOMAIN_RE.fullmatch(d):
-                raise ApiError(400, "enter a domain like projects.example.com")
-            if d == (host or "").lower().split(":")[0] or any(x.split(":")[0] == d for x in hosts or ()):
-                raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
-            if len(doms) >= 10:
-                raise ApiError(400, "at most 10 domains")
-            doms.append(d)
-        data["domains"] = sorted(doms)
-        return data
+        raise ApiError(404, "the apps address is set by the server's admin")
     if sub != "/port":
         raise ApiError(404, "not found")
     slug = share_slug(body.get("slug") or body.get("project"))
@@ -11006,7 +10998,51 @@ class ShareHub:
                     "name TEXT NOT NULL, label TEXT NOT NULL, ip TEXT NOT NULL, created REAL NOT NULL, exp REAL NOT NULL, last REAL NOT NULL)")
         self.asks = {}              # id -> a visitor waiting for "Ask me"
         self.mains = {}             # ws -> the workspace's own address (where private links sign in)
+        self.host = share_domain_clean(getattr(gate, "share_domain", "") or "")
+        self.db.run("CREATE TABLE IF NOT EXISTS web_share_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+        r = self.db.rows("SELECT v FROM web_share_meta WHERE k = 'main'")
+        self.main_host = r[0][0] if r else ""
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_tokens (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, domain TEXT NOT NULL, exp REAL NOT NULL)")
+
+    # the apps address (set by the server's admin: `web --share-domain`) and its users --------------
+    def is_host(self, host: str) -> bool:
+        return bool(self.host) and share_domain_clean(host) == self.host
+
+    def base(self, ws: str) -> str:
+        u = self.user_of(ws)
+        return f"https://{self.host}/{u}" if self.host and u else ""
+
+    def _users(self) -> dict:
+        """user name → workspace (the newest one if the same name signs in to several servers)."""
+        c = getattr(self, "_users_cache", None)
+        if c and time.time() - c[0] < 30:
+            return c[1]
+        out, when = {}, {}
+        for d in self.gate.root.iterdir() if self.gate.root.is_dir() else []:
+            f = d / "workspace.json"
+            try:
+                meta = json.loads(f.read_text())
+                t = f.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            u = str(meta.get("user") or "").lower()
+            if SHARE_USER_RE.fullmatch(u) and t >= when.get(u, 0):
+                out[u], when[u] = d.name, t
+        self._users_cache = (time.time(), out)
+        return out
+
+    def ws_of_user(self, user: str) -> str:
+        return self._users().get((user or "").lower(), "")
+
+    def user_of(self, ws: str) -> str:
+        return next((u for u, w in self._users().items() if w == ws), "")
+
+    def note_main(self, host: str):
+        """The workspace's own address (where private links sign in): the Host of the signed-in web."""
+        host = (host or "").lower()
+        if host and host != self.main_host and not self.is_host(host):
+            self.main_host = host
+            self.db.run("INSERT OR REPLACE INTO web_share_meta (k, v) VALUES ('main', ?)", (host,))
 
     # settings (Settings → Share on your domain) ---------------------------------------------------
     def domain(self, host: str):
@@ -11014,26 +11050,32 @@ class ShareHub:
         r = self.db.rows("SELECT domain, ws, main FROM web_share_domains WHERE domain = ?", (d,)) if d else []
         return {"domain": r[0][0], "ws": r[0][1], "main": r[0][2]} if r else None
 
-    def find(self, ws: str, slug: str, name: str):
+    def find(self, ws: str, slug: str, name: str, user: str = ""):
+        sh = self._find(ws, slug, name)
+        if sh:
+            sh["user"] = user or self.user_of(ws)
+        return sh
+
+    def _find(self, ws: str, slug: str, name: str):
         r = self.db.rows("SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
         if not r:
             return None
         return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4]),
                 "tls": bool(r[0][5]), "ask": bool(r[0][6]), "access": "public" if r[0][4] else "ask" if r[0][6] else "private"}
 
-    def ports(self, ws: str, slug: str, signed: bool) -> list:
+    def ports(self, ws: str, slug: str, signed: bool, user: str = "") -> list:
         """[{port, t}] of this workspace, this project first: a page that calls localhost:PORT (its API)
         gets that shared port. Private ones only for a signed-in browser."""
         out = []
         for sl, name, port, pub in self.db.rows("SELECT slug, name, port, public FROM web_shares WHERE ws = ? ORDER BY slug != ?, slug, name", (ws, slug)):
             if pub or signed:
-                out.append({"port": port, "t": f"{sl}/{name}"})
+                out.append({"port": port, "t": f"{user or self.user_of(ws)}/{sl}/{name}"})
         return out
 
     def data_of(self, ws: str) -> dict:
         """This workspace's domains + shared ports, as kept in the user's share.json on the server."""
         st = self.state(ws)
-        return {"domains": st["domains"], "shares": [{k: x[k] for k in ("slug", "name", "project", "port", "access", "tls")}
+        return {"shares": [{k: x[k] for k in ("slug", "name", "project", "port", "access", "tls")}
                                                      for x in st["shares"]]}
 
     def main_of(self, ws: str) -> str:
@@ -11044,31 +11086,9 @@ class ShareHub:
         """share.json of the user (edited in the app or here) → the tables requests are answered from.
         check: only refuse what cannot be (a domain of another workspace, the workspace's own address)."""
         if host:
-            self.mains[ws] = host.lower()
-        main = self.main_of(ws)
-        doms = []
-        for d in data.get("domains") or []:
-            other = self.domain(d)
-            if other and other["ws"] != ws:
-                if check:
-                    raise ApiError(409, f"{d} is used by another workspace")
-                continue
-            if d == main.split(":")[0] or any(x.split(":")[0] == d for x in self.gate.hosts):
-                if check:
-                    raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
-                continue
-            doms.append(d)
+            self.note_main(host)
         if check:
             return
-        old = {d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ?", (ws,))}
-        for d in old - set(doms):
-            self.db.run("DELETE FROM web_share_domains WHERE domain = ? AND ws = ?", (d, ws))
-            self.db.run("DELETE FROM web_share_tokens WHERE domain = ? AND ws = ?", (d, ws))
-        for d in doms:
-            if d not in old:
-                self.db.run("INSERT OR REPLACE INTO web_share_domains (domain, ws, main) VALUES (?, ?, ?)", (d, ws, main))
-            elif main:
-                self.db.run("UPDATE web_share_domains SET main = ? WHERE domain = ? AND ws = ?", (main, d, ws))
         self.db.run("DELETE FROM web_shares WHERE ws = ?", (ws,))
         for x in data.get("shares") or []:
             a = x.get("access") if x.get("access") in SHARE_ACCESS else "private"
@@ -11084,13 +11104,18 @@ class ShareHub:
             return
         if data.get("missing"):
             mine = self.data_of(ws)
-            if mine["domains"] or mine["shares"]:
+            if mine["shares"]:
                 try:
-                    app.share_save(mine)
+                    app.share_save(dict(mine, base=self.base(ws)))
                 except (ApiError, OSError, ValueError):
                     pass
             return
         self.sync(ws, data)
+        if self.base(ws) != data.get("base", ""):           # the app shows the links with it
+            try:
+                app.share_save(dict(data, base=self.base(ws)))
+            except (ApiError, OSError, ValueError):
+                pass
 
     def pull_loop(self):
         while True:
@@ -11134,24 +11159,24 @@ class ShareHub:
         return out
 
     def state(self, ws: str) -> dict:
-        doms = [d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ? ORDER BY domain", (ws,))]
+        base = self.base(ws)
         shares = []
         for slug, name, project, port, pub, tls, ask in self.db.rows(
                 "SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
             shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub), "tls": bool(tls),
                            "access": "public" if pub else "ask" if ask else "private",
-                           "urls": [f"https://{d}/{slug}/{name}" for d in doms]})
+                           "urls": [f"{base}/{slug}/{name}"] if base else []})
         now = time.time()
         guests = [{"id": hh[:16], "t": f"{sl}/{nm}", "label": label, "ip": ip, "created": cr, "exp": exp, "last": last}
                   for hh, sl, nm, label, ip, cr, exp, last in self.db.rows(
                       "SELECT hash, slug, name, label, ip, created, exp, last FROM web_share_guests WHERE ws = ? AND (exp = 0 OR exp > ?) "
                       "ORDER BY created DESC", (ws, now))]
-        return {"domains": doms, "shares": shares, "guests": guests}
+        return {"base": base, "shares": shares, "guests": guests}
 
     def api(self, ws: str, method: str, sub: str, body: dict, host: str) -> dict:
         if method == "GET" and sub == "":
             return self.state(ws)
-        if method == "POST" and sub in ("/domain", "/port"):
+        if method == "POST" and sub == "/port":
             data = share_edit(self.data_of(ws), sub, body, host, self.gate.hosts)
             self.sync(ws, data, host, check=True)
             self.sync(ws, data, host)
@@ -11186,7 +11211,7 @@ class ShareHub:
         tok = secrets.token_urlsafe(32)
         self.db.run("INSERT INTO web_share_tokens (hash, ws, domain, exp) VALUES (?, ?, ?, ?)",
                     (hashlib.sha256(tok.encode()).hexdigest(), v[0], domain, time.time() + SHARE_DAYS * 86400))
-        return tok
+        return tok, v[0]
 
     def token_ok(self, tok: str, ws: str, domain: str) -> bool:
         if not tok or len(tok) > 200:
@@ -11196,7 +11221,7 @@ class ShareHub:
 
     # "Ask me": someone without a sign-in asks, the owner allows from the phone / computer ----------------
     def guest_ok(self, h, ws: str, sh: dict) -> bool:
-        tok = self._cookie(h, f"__simab_g.{sh['slug']}.{sh['name']}")
+        tok = self._cookie(h, f"__simab_g.{sh['user']}.{sh['slug']}.{sh['name']}")
         if not tok or len(tok) > 200:
             return False
         hh = hashlib.sha256(tok.encode()).hexdigest()
@@ -11217,7 +11242,7 @@ class ShareHub:
 
     def new_ask(self, h, ws: str, sh: dict) -> dict:
         ip, ua = h._client_ip(), h.headers.get("User-Agent") or ""
-        t = f"{sh['slug']}/{sh['name']}"
+        t = f"{sh['slug']}/{sh['name']}"            # as the owner reads it (the user is theirs)
         now = time.time()
         with self.lock:
             mine = [a for a in self.asks.values() if a["ws"] == ws and a["t"] == t and a["ip"] == ip and a["_ua"] == ua
@@ -11227,7 +11252,7 @@ class ShareHub:
             if len([a for a in self.asks.values() if a["ws"] == ws and not a["answer"] and a["until"] > now]) >= 20 or \
                     len([a for a in self.asks.values() if a["ip"] == ip and a["until"] > now]) >= 5:
                 raise ApiError(429, "too many requests — try again in a few minutes")
-            a = {"id": secrets.token_hex(6), "ws": ws, "t": t, "project": sh["project"], "label": ua_label(ua), "ip": ip,
+            a = {"id": secrets.token_hex(6), "ws": ws, "t": t, "user": sh["user"], "project": sh["project"], "label": ua_label(ua), "ip": ip,
                  "at": now, "until": now + SHARE_ASK_WAIT, "answer": "", "_ua": ua, "_tok": ""}
             self.asks[a["id"]] = a
         threading.Thread(target=self._tell, args=(a,), daemon=True).start()
@@ -11317,15 +11342,16 @@ class ShareHub:
                 b = json.loads(h.rfile.read(min(n, 4096)).decode("utf-8") or "{}") if n else {}
             except ValueError:
                 b = {}
-            sl, _, nm = str(b.get("t") or "").partition("/")
-            sh = self.find(ws, sl, nm) if sl and nm else None
+            us, sl, nm, _ = self._split("/" + str(b.get("t") or "") + "/")
+            ws = self.ws_of_user(us)
+            sh = self.find(ws, sl, nm, us) if ws and sl else None
             if not sh or sh["access"] != "ask":
                 return h._json(404, {"error": "this link does not ask"})
             return h._json(200, {"id": self.new_ask(h, ws, sh)["id"], "wait": SHARE_ASK_WAIT})
         aid = urllib.parse.parse_qs(q).get("id", [""])[0]
         with self.lock:
             a = self.asks.get(aid)
-            if not a or a["ws"] != ws or a["ip"] != h._client_ip():
+            if not a or a["ip"] != h._client_ip():
                 return h._json(404, {"state": "gone"})
             state = "denied" if a["answer"] == "deny" else "allowed" if a["answer"] else "gone" if a["until"] < time.time() else "waiting"
             tok, a["_tok"] = a["_tok"], ""
@@ -11335,11 +11361,11 @@ class ShareHub:
             sl, nm = a["t"].split("/")
             body = json.dumps({"state": state}).encode()
             return h._send(200, body, "application/json", {"Set-Cookie":
-                           f"__simab_g.{sl}.{nm}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{sec}"})
+                           f"__simab_g.{a['user']}.{sl}.{nm}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{sec}"})
         return h._json(200, {"state": state})
 
     def _wait_page(self, h, sd: dict, sh: dict, to: str, sw: bool):
-        t = f"{sh['slug']}/{sh['name']}"
+        t = f"{sh['user']}/{sh['slug']}/{sh['name']}"
         js = SHARE_WAIT_JS.replace("@@T@@", share_js(t)).replace("@@IN@@", share_js(self._signin_url(sd, f"/{t}{to}")))
         return h._send(200, share_page("Asking…", "Asking the owner of this link to let you in…", js), MIME[".html"])
 
@@ -11455,11 +11481,13 @@ class ShareHub:
         raise ApiError(502, why or "your computer refused the connection")
 
     # requests on a share domain ---------------------------------------------------------------------
-    def handle(self, h, method: str, sd: dict):
-        ws, domain = sd["ws"], sd["domain"]
+    def handle(self, h, method: str):
+        """A request on the apps address: https://APPS/<user>/<project>/<name>/… — nothing of the workspace
+        itself is served here (no sign-in, no API, no files): only the shared ports."""
         url = urllib.parse.urlsplit(h.path)
         path, q = url.path, url.query
         hd = h.headers
+        domain = self.host
         nav = hd.get("Sec-Fetch-Mode") == "navigate" or (not hd.get("Sec-Fetch-Mode") and method == "GET"
                                                          and "text/html" in (hd.get("Accept") or ""))
         try:
@@ -11468,52 +11496,66 @@ class ShareHub:
             if path == "/__simab/shim.js" and method == "GET":
                 return h._send(200, (STATIC / "share-shim.js").read_bytes(), MIME[".js"], {"Cache-Control": "max-age=300"})
             if path == "/__simab/ask" and method in ("GET", "POST"):
-                return self._ask_api(h, method, ws, q)
+                return self._ask_api(h, method, "", q)
             if path == "/__simab/auth" and method == "GET":
                 qs = urllib.parse.parse_qs(q)
-                tok = self.take_code((qs.get("c") or [""])[0], domain)
+                got = self.take_code((qs.get("c") or [""])[0], domain)
                 to = (qs.get("to") or ["/"])[0]
                 to = to if to.startswith("/") and not to.startswith("//") else "/"
-                if not tok:
+                if not got:
                     return h._send(403, share_page("Sign-in", "This sign-in link was used already or is too old — open the link again."),
                                    MIME[".html"])
+                tok, ws = got
                 sec = "; Secure" if self.gate.secure else ""
                 return h._send(302, b"", "text/plain", {"Location": to, "Set-Cookie":
-                               f"{SHARE_COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SHARE_DAYS * 86400}{sec}"})
+                               f"{SHARE_COOKIE}.{self.user_of(ws)}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SHARE_DAYS * 86400}{sec}"})
+            sw_req = path.startswith("/__simab/p/")
+            if path == "/__simab/ports" and method == "GET":
+                user, slug, _, _ = self._split("/" + urllib.parse.parse_qs(q).get("t", [""])[0] + "/")
+            elif sw_req:
+                user, slug, name, sub = self._split(path[len("/__simab/p"):])
+            else:
+                user, slug, name, sub = self._split(path)
+            ws = self.ws_of_user(user) if user else ""
+            if not ws:
+                if nav and not sw_req:
+                    return h._send(200, share_page("Not found", "Nothing is shared at this address.", SHARE_LOST_JS), MIME[".html"])
+                last = self._cookie(h, SHARE_LAST)                  # a browser without service workers
+                lu, ls, ln_, _ = self._split("/" + last + "/")
+                lws = self.ws_of_user(lu) if lu else ""
+                sh = self.find(lws, ls, ln_, lu) if lws else None
+                if sh and not sw_req:
+                    with self.gate.lock:
+                        app = self.gate._app(lws)
+                    if app is not None:
+                        sd = {"ws": lws, "domain": domain, "user": lu}
+                        return self._serve(h, method, lws, domain, sd, app, sh, path, q, f"/__simab/p/{last}", False)
+                return h._send(404, share_page("Not found", "Nothing is shared at this address."), MIME[".html"])
+            sd = {"ws": ws, "domain": domain, "user": user}
+            if path == "/__simab/ports":
+                signed = self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{user}"), ws, domain)
+                return h._json(200, self.ports(ws, slug, signed, user))
             with self.gate.lock:
                 app = self.gate._app(ws)
-            if app is None:
-                return h._send(404, share_page("Not found", "Nothing is shared here."), MIME[".html"])
-            if path == "/__simab/ports" and method == "GET":
-                slug = urllib.parse.parse_qs(q).get("t", [""])[0].split("/")[0]
-                signed = self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
-                return h._json(200, self.ports(ws, slug, signed))
-            if path.startswith("/__simab/p/"):
-                slug, name, sub = self._split(path[len("/__simab/p"):])
-                sh = self.find(ws, slug, name) if slug else None
+            sh = self.find(ws, slug, name, user) if app is not None and slug else None
+            if sw_req:
                 if not sh:
                     return h._send(404, share_page("Not found", "This link is not shared (any more)."), MIME[".html"])
                 if hd.get("X-Simab-SW") == "1":
                     swnav = hd.get("X-Simab-Nav") == "1"
-                    s2, n2, sub2 = self._split(sub)
-                    other = self.find(ws, s2, n2) if swnav and s2 else None
+                    u2, s2, n2, sub2 = self._split(sub)
+                    w2 = self.ws_of_user(u2) if swnav and u2 else ""
+                    other = self.find(w2, s2, n2, u2) if w2 else None
                     if other:
-                        return self._entry(h, ws, domain, sd, other, sub2, q, sw=True)
+                        return self._entry(h, w2, domain, dict(sd, ws=w2, user=u2), other, sub2, q, sw=True)
                     return self._serve(h, method, ws, domain, sd, app, sh, sub, q, "", swnav, sw=True)
-                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/__simab/p/{slug}/{name}", nav)
-            slug, name, sub = self._split(path)
-            sh = self.find(ws, slug, name) if slug else None
+                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/__simab/p/{user}/{slug}/{name}", nav)
             if sh:
                 if nav and method == "GET":
                     return self._entry(h, ws, domain, sd, sh, sub, q)
-                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/{slug}/{name}", False)
+                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/{user}/{slug}/{name}", False)
             if nav:
                 return h._send(200, share_page("Not found", "Nothing is shared at this address.", SHARE_LOST_JS), MIME[".html"])
-            last = self._cookie(h, SHARE_LAST)
-            s2, _, n2 = last.partition("/")
-            sh = self.find(ws, s2, n2) if s2 and n2 else None
-            if sh:
-                return self._serve(h, method, ws, domain, sd, app, sh, path, q, f"/__simab/p/{s2}/{n2}", False)
             return h._send(404, b"not found", "text/plain")
         except ApiError as e:
             if nav:
@@ -11524,10 +11566,12 @@ class ShareHub:
 
     @staticmethod
     def _split(path: str):
-        parts = path.split("/", 3)
-        if len(parts) < 3 or not SHARE_SLUG_RE.fullmatch(parts[1]) or not SHARE_SLUG_RE.fullmatch(parts[2]):
-            return "", "", ""
-        return parts[1], parts[2], "/" + (parts[3] if len(parts) > 3 else "")
+        """/<user>/<project>/<name>/rest → (user, project, name, "/rest"); anything else → empty."""
+        parts = path.split("/", 4)
+        if len(parts) < 4 or not SHARE_USER_RE.fullmatch(parts[1]) or not SHARE_SLUG_RE.fullmatch(parts[2]) \
+                or not SHARE_SLUG_RE.fullmatch(parts[3]):
+            return "", "", "", ""
+        return parts[1], parts[2], parts[3], "/" + (parts[4] if len(parts) > 4 else "")
 
     @staticmethod
     def _cookie(h, name: str) -> str:
@@ -11538,17 +11582,16 @@ class ShareHub:
         return ""
 
     def _allowed(self, h, ws, domain, sh) -> bool:
-        return sh["public"] or self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain) or (sh.get("ask") and self.guest_ok(h, ws, sh))
+        return (sh["public"] or self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain)
+                or (sh.get("ask") and self.guest_ok(h, ws, sh)))
 
     def _signin_url(self, sd: dict, to: str) -> str:
-        if not sd.get("main"):
-            sd = dict(sd, main=self.main_of(sd["ws"]))
         scheme = "https" if self.gate.secure else "http"
-        return (f"{scheme}://{sd['main']}/__simab/share-auth?d={urllib.parse.quote(sd['domain'])}"
+        return (f"{scheme}://{self.main_host}/__simab/share-auth?u={urllib.parse.quote(sd['user'])}"
                 f"&to={urllib.parse.quote(to)}")
 
     def _entry(self, h, ws, domain, sd, sh, sub, q, sw=False):
-        t = f"{sh['slug']}/{sh['name']}"
+        t = f"{sh['user']}/{sh['slug']}/{sh['name']}"
         to = sub + ("?" + q if q else "")
         if not self._allowed(h, ws, domain, sh):
             if sh.get("ask"):
@@ -11561,7 +11604,7 @@ class ShareHub:
                        {"Set-Cookie": f"{SHARE_LAST}={t}; Path=/; HttpOnly; SameSite=Lax{sec}"})
 
     def _serve(self, h, method, ws, domain, sd, app, sh, sub, q, base, nav, sw=False):
-        t = f"{sh['slug']}/{sh['name']}"
+        t = f"{sh['user']}/{sh['slug']}/{sh['name']}"
         if not self._allowed(h, ws, domain, sh):
             if nav and sh.get("ask"):
                 return self._wait_page(h, sd, sh, sub + ("?" + q if q else ""), sw)
@@ -11578,11 +11621,11 @@ class ShareHub:
         body = h.rfile.read(n) if n else b""
         upgrade = (hd.get("Upgrade") or "").lower() == "websocket"
         origin = ("https://" if self.gate.secure else "http://") + (hd.get("Host") or "")
-        prefix = f"{sh['slug']}."            # cookies of localhost are the same on every port: one jar per project
+        prefix = f"{sh['user']}.{sh['slug']}."      # cookies of localhost are the same on every port: one jar per project
         page = sh
-        fs, _, fn = (hd.get("X-Simab-From") or "").partition("/")
-        if fs and fn and (fs, fn) != (sh["slug"], sh["name"]):
-            page = self.find(ws, fs, fn) or sh            # the page that calls this port (its panel)
+        fu, fs, fn, _ = self._split("/" + (hd.get("X-Simab-From") or "") + "/")
+        if fu == sh["user"] and fs and (fs, fn) != (sh["slug"], sh["name"]):
+            page = self.find(ws, fs, fn, fu) or sh        # the page that calls this port (its panel)
         local = f"{'https' if page.get('tls') else 'http'}://localhost:{page['port']}"
         lines = [f"{method} {sub}{'?' + q if q else ''} HTTP/1.1", f"Host: localhost:{sh['port']}"]
         for k, v in hd.items():
@@ -11622,8 +11665,8 @@ class ShareHub:
                 return self._upgrade(h, s)
             pmap = {}
             if nav:
-                signed = self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
-                for x in self.ports(ws, sh["slug"], signed):
+                signed = self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain)
+                for x in self.ports(ws, sh["slug"], signed, sh["user"]):
                     pmap.setdefault(str(x["port"]), x["t"])
             return self._answer(h, method, s, t, prefix, base, nav, sw, pmap)
         finally:
@@ -11726,7 +11769,9 @@ class WebGate:
     FAILS_PER_IP = 5
     FAILS_ALL = 30
 
-    def __init__(self, root: Path, hosts=None, trust_proxy=False, secure=True, verify=None, start_loops=True, cert_download=""):
+    def __init__(self, root: Path, hosts=None, trust_proxy=False, secure=True, verify=None, start_loops=True, cert_download="",
+                 share_domain=""):
+        self.share_domain = share_domain        # the apps address: https://APPS/<user>/<project>/<name> (Share)
         self.cert_download = cert_download      # the server's own certificate, offered for installing on a device
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -11985,10 +12030,12 @@ def serve_web(args: list):
     ap.add_argument("--proxy", action="store_true", help="behind an HTTPS proxy (nginx…): plain HTTP, trust X-Real-IP")
     ap.add_argument("--data", default="", help="folder for workspaces (default ~/.config/simabworkspace/web)")
     ap.add_argument("--cert-download", default="", help="certificate (PEM, no key) people may download to trust this server")
+    ap.add_argument("--share-domain", default="", help="address for shared ports of the users' computers: https://THIS/<user>/<project>/<name> "
+                                                       "(its own domain, never the workspace's: the apps must not reach the workspace)")
     a = ap.parse_args(args)
     install_crash_logging()
     root = Path(a.data or (config_dir() / "web")).expanduser()
-    gate = WebGate(root, [h.strip() for h in a.hosts.split(",")], trust_proxy=a.proxy, secure=True)
+    gate = WebGate(root, [h.strip() for h in a.hosts.split(",")], trust_proxy=a.proxy, secure=True, share_domain=a.share_domain)
     cert, key = a.cert, a.key
     if not a.proxy and not cert:
         cert, key = self_signed_cert(root, a.name or "localhost")
@@ -12072,14 +12119,14 @@ class Handler(BaseHTTPRequestHandler):
         if not ws:
             return self._send(401, share_page("Sign in", "Sign in to the workspace in this browser first, then open the link again.",
                                               '<p><a href="/">Sign in</a></p>'), MIME[".html"])
-        sd = gate.share.domain((query.get("d") or [""])[0])
-        if not sd or sd["ws"] != ws:
-            return self._send(403, share_page("Not yours", "This domain belongs to another workspace."), MIME[".html"])
+        if not gate.share.host or gate.share.ws_of_user((query.get("u") or [""])[0]) != ws:
+            return self._send(403, share_page("Not yours", "This link belongs to another user — sign in as that user."), MIME[".html"])
         to = (query.get("to") or ["/"])[0]
         to = to if to.startswith("/") and not to.startswith("//") else "/"
         scheme = "https" if gate.secure else "http"
-        return self._send(302, b"", "text/plain", {"Location": f"{scheme}://{sd['domain']}/__simab/auth?c="
-                                                   f"{gate.share.code(ws, sd['domain'])}&to={urllib.parse.quote(to)}"})
+        host = gate.share.host
+        return self._send(302, b"", "text/plain", {"Location": f"{scheme}://{host}/__simab/auth?c="
+                                                   f"{gate.share.code(ws, host)}&to={urllib.parse.quote(to)}"})
 
     def _set_cookie(self, value: str, max_age: int) -> dict:
         secure = "; Secure" if self.gate.secure else ""
@@ -12107,9 +12154,8 @@ class Handler(BaseHTTPRequestHandler):
         path, query = url.path, urllib.parse.parse_qs(url.query)
         gate = self.gate
         try:
-            sd = gate.share.domain(self.headers.get("Host") or "")
-            if sd:                      # Share on your domain: a port of the user's computer
-                return gate.share.handle(self, method, sd)
+            if gate.share.is_host(self.headers.get("Host") or ""):    # the apps address: shared ports only
+                return gate.share.handle(self, method)
             if method not in ("GET", "POST", "DELETE"):
                 raise ApiError(405, "method not allowed")
             if path == "/__simab/share-auth" and method == "GET":
@@ -12148,6 +12194,7 @@ class Handler(BaseHTTPRequestHandler):
                 if app is None:
                     return self._json(401, {"error": "sign in", "login": True})
                 self.app = app
+                gate.share.note_main(self.headers.get("Host") or "")
                 if path == "/ws":
                     return self._websocket(query)
                 if self.headers.get("X-SW") != "1":

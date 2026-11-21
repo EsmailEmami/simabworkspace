@@ -192,6 +192,7 @@
       }));
       var out = h('select', { class: 'inp' }, OUTPUTS.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
       out.value = c.output;
+      var autoOpen = h('input', { type: 'checkbox', checked: !!c.autoOpen });
       var allow = h('textarea', { class: 'inp mono', rows: 4, placeholder: 'npm run *\nng build*' });
       allow.value = (c.allow || []).join('\n');
       var deny = h('textarea', { class: 'inp mono', rows: 4 });
@@ -215,6 +216,8 @@
       kids(ruleBox, [
         h('div', { class: 'field' }, h('label', null, 'When Claude wants to run a command here'), modeBox),
         h('div', { class: 'field' }, h('label', null, 'Output'), out),
+        h('label', { class: 'check' }, autoOpen, h('span', null, 'Open dev servers in the browser by themselves',
+          h('small', null, 'Otherwise a message offers to open them when Claude starts one (onpc --bg).'))),
         h('div', { class: 'pc-grid' },
           h('div', { class: 'field' }, h('label', null, 'Always allowed — one per line, * = anything'), allow),
           h('div', { class: 'field' }, h('label', null, 'Never allowed — wins over everything'), deny)),
@@ -223,7 +226,7 @@
         h('div', { class: 'pc-actions' },
           h('span', { class: 'muted' }, 'A question waits 2 minutes, then the command is not run.'),
           h('button', { class: 'btn primary', onclick: function () {
-            save({ mode: mode.value, output: out.value, allow: lines(allow.value), deny: lines(deny.value),
+            save({ mode: mode.value, output: out.value, autoOpen: autoOpen.checked, allow: lines(allow.value), deny: lines(deny.value),
               projects: all.checked ? [] : boxes.filter(function (b) { return b.el.checked; }).map(function (b) { return b.n; }) })
               .then(function () { toast('Saved', 'ok'); load(); });
           } }, 'Save rules'))]);
@@ -446,6 +449,7 @@
       if (live) refreshLive();
       decorate();
       devServers(x.bg || []);
+      devUp(x.bg || [], x.autoOpen);
       linkWatch(x.link);
     }).catch(function () {});
   }
@@ -522,6 +526,21 @@
     (S.tabs || []).forEach(function (t) {
       if (!t.setDevServers || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
       t.setDevServers(live2.filter(function (x) { return x.project === t.info.spec.project; }), DEV_ACT);
+    });
+  }
+
+  // a dev server got its address: open it in the browser (setting) or offer it once
+  var upSeen = null;
+  function devUp(list, auto) {
+    var first = upSeen === null;
+    upSeen = upSeen || {};
+    list.forEach(function (x) {
+      var k = x.name + ':' + x.start;
+      if (x.state !== 'running' || !x.url || upSeen[k]) return;
+      upSeen[k] = 1;
+      if (first) return;                  // running before this window opened: not new
+      if (auto) { window.open(x.url, '_blank', 'noopener'); toast(x.name + ' is running — opened ' + x.url, 'ok'); return; }
+      toast(x.name + ' is running at ' + x.url + ' — click to open', 'ok', { sticky: true, onclick: function () { window.open(x.url, '_blank', 'noopener'); } });
     });
   }
 

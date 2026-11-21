@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.54.1 2026-11-21  Dev servers: open it when it is up (a message, or by itself with a setting)
 #    1.54.0 2026-11-21  Questions of your computers in the web version and as phone notifications
 #    1.53.1 2026-11-21  Local only chats reopen with their history (Claude folder name from the full path)
 #    1.53.0 2026-11-21  Connect a computer from the web version: one line with a one-time link (no password)
@@ -360,7 +361,7 @@
 
 set -u -o pipefail
 
-VERSION="1.54.0"
+VERSION="1.54.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

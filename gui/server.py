@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.54.0"
+VERSION = "1.54.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5411,7 +5411,7 @@ PC_OUTPUTS = ("chat", "panel")
 PC_ANSWERS = ("once", "always", "hour", "deny")
 PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "allow": [],
               "deny": ["sudo *", "git push*", "rm -rf /*", "rm -rf ~*"], "projects": [], "always": {},
-              "output": "chat"}
+              "output": "chat", "autoOpen": False}
 PC_ID_RE = re.compile(r"[0-9a-f]{12}")
 PC_HINT = (
     "This project's commands run on the user's own computer, not on this server. The files here are "
@@ -6152,6 +6152,8 @@ class PcHub:
             old = (c["on"], c["name"])
             if "on" in patch:
                 c["on"] = bool(patch["on"])
+            if "autoOpen" in patch:
+                c["autoOpen"] = bool(patch["autoOpen"])
             if "name" in patch:
                 c["name"] = clean_str(patch["name"], 40, "name", required=True)
             if "mode" in patch:
@@ -6655,7 +6657,7 @@ class PcHub:
         for r in runs:
             r["session"] = tabs.get(r.get("chat") or "", "") if r.get("chat") else ""   # its output shows in that chat
         c = self.cfg()
-        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"],
+        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"], "autoOpen": c["autoOpen"],
                 "bg": self.bg_list(), "link": self.state}
 
     def run_info(self, rid: str) -> dict:

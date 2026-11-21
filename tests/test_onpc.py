@@ -422,6 +422,9 @@ class Link(unittest.TestCase):
                 self.assertTrue(wait_for(lambda: hub.state == "connected" and len(argvs) > n + 1, 12), "reconnects")
                 hub.stop()
             self.assertEqual(st["config"]["allow"], ["npm run *"])
+            self.assertFalse(st["config"]["autoOpen"])
+            self.assertTrue(hub.update({"autoOpen": 1})["config"]["autoOpen"])
+            self.assertTrue(hub.pending()["autoOpen"])
             self.assertNotIn("secret", st["config"])
             self.assertEqual(calls[0][0], sw.PC_SETUP_PY)
             dev = calls[0][1]["device"]

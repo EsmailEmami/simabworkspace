@@ -1685,6 +1685,19 @@ const tests = {
     assert.strictEqual(q('a', chips[0])[0].getAttribute('href'), 'http://localhost:8050');
     q('button', chips[0])[0].click(); await settle();
     assert.strictEqual(fakePc.stopped, 'web');
+    // a new dev server got its address: offered once (or opened by itself with the setting)
+    fakePc.asks = Object.assign({}, fakePc.asks, { bg: [{ name: 'api', project: 'cheshmeh', cmd: 'go run .', url: 'http://localhost:5010', state: 'running', start: 7 }] });
+    await global.SWComputers.poll(); await settle();
+    await global.SWComputers.poll(); await settle();
+    assert.strictEqual(q('.toast').filter((t) => /api is running at http:\/\/localhost:5010/.test(t.textContent)).length, 1, 'once');
+    const opened = [];
+    const oldOpen = global.window.open;
+    global.window.open = (u) => opened.push(u);
+    fakePc.asks = Object.assign({}, fakePc.asks, { autoOpen: true, bg: [{ name: 'web2', project: 'cheshmeh', cmd: 'ng serve', url: 'http://localhost:4300', state: 'running', start: 8 }] });
+    await global.SWComputers.poll(); await settle();
+    assert.deepStrictEqual(opened, ['http://localhost:4300']);
+    global.window.open = oldOpen;
+    fakePc.asks = Object.assign({}, fakePc.asks, { autoOpen: false });
     // the computer's link drops while Claude works: said at once in the chat; back → Continue
     chat.busy = true;
     fakePc.asks = Object.assign({}, fakePc.asks, { bg: [], link: 'error' });

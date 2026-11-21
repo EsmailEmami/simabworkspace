@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.48.0"
+VERSION = "1.48.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5790,6 +5790,7 @@ class App:
         tok = os.environ.pop("SIMAB_TOKEN", "")
         self.token = tok if re.fullmatch(r"[A-Za-z0-9_-]{20,64}", tok or "") else secrets.token_urlsafe(24)
         self.port = 0
+        self.alt_hosts = set()        # WSL: "<vm ip>:<port>" — Windows reaches us there when localhost forwarding is broken
         self.sessions = {}            # id -> Session (insertion order = tab order)
         self.windows = {}             # extra windows: id -> {"seen": time, "n": number shown to the user}
         self.lock = threading.RLock()
@@ -8362,7 +8363,7 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self) -> bool:
         port = self.server.server_address[1]
         host = (self.headers.get("Host") or "").lower()
-        return host in (f"127.0.0.1:{port}", f"localhost:{port}")
+        return host in (f"127.0.0.1:{port}", f"localhost:{port}") or host in self.app.alt_hosts
 
     def _token_ok(self, token: str) -> bool:
         return bool(token) and hmac.compare_digest(token.encode(), self.app.token.encode())
@@ -8824,7 +8825,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(401, "bad token")
             port = self.server.server_address[1]
             origin = self.headers.get("Origin") or ""
-            if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+            if origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}") and \
+                    origin[len("http://"):] not in self.app.alt_hosts:
                 raise ApiError(403, "bad origin")
         key = self.headers.get("Sec-WebSocket-Key")
         if (self.headers.get("Upgrade") or "").lower() != "websocket" or not key:
@@ -8888,6 +8890,52 @@ def make_server(app: App, port: int = 0, wait: float = 0) -> ThreadingHTTPServer
     app.port = httpd.server_address[1]
     app.httpd = httpd
     return httpd
+
+
+def wsl_vm_ip() -> str:
+    """WSL2 (NAT mode): the VM's private address Windows can always reach, even when
+    WSL's localhost forwarding is broken (VPN, firewall). "" when not WSL or not private."""
+    if not is_wsl():
+        return ""
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "eth0"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"\binet (\d+\.\d+\.\d+\.\d+)/", out)
+    if not m:
+        return ""
+    import ipaddress
+    ip = ipaddress.ip_address(m.group(1))
+    # 172.16/12 is WSL's NAT range; mirrored mode puts the LAN address here — never listen on that
+    return str(ip) if ip in ipaddress.ip_network("172.16.0.0/12") else ""
+
+
+def serve_wsl_alt(app: App) -> str:
+    """Second listener on the WSL VM address (same port, same token)."""
+    ip = wsl_vm_ip()
+    if not ip:
+        return ""
+    try:
+        alt = ThreadingHTTPServer((ip, app.port), app.httpd.RequestHandlerClass)
+    except OSError as e:
+        log_line(f"WSL address {ip}:{app.port} not served: {e}")
+        return ""
+    alt.daemon_threads = True
+    app.alt_hosts.add(f"{ip}:{app.port}")
+    threading.Thread(target=alt.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
+    return ip
+
+
+def windows_reaches(port: int) -> bool:
+    """WSL: can Windows open 127.0.0.1:port? (False when localhost forwarding is broken.)"""
+    ps = (f"$c=New-Object Net.Sockets.TcpClient; try {{ if ($c.ConnectAsync('127.0.0.1',{int(port)}).Wait(1500))"
+          " { 'ok' } } catch {} finally { $c.Close() }")
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                             text=True, timeout=15, cwd="/mnt/c" if os.path.isdir("/mnt/c") else None).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True       # cannot tell — keep localhost
+    return "ok" in out
 
 
 def code_fingerprint() -> str:
@@ -8989,7 +9037,7 @@ def serve(foreground_msg=True):
     if store.settings.get("port") != app.port:
         store.update_settings({"port": app.port})
     st = {"pid": os.getpid(), "port": app.port, "token": app.token, "version": VERSION,
-          "code": code_fingerprint(), "path": str(HERE)}
+          "code": code_fingerprint(), "path": str(HERE), "wslIp": serve_wsl_alt(app)}
     state_file().parent.mkdir(parents=True, exist_ok=True)
     tmp = state_file().with_suffix(".tmp")
     tmp.write_text(json.dumps(st))
@@ -9099,6 +9147,8 @@ def browser_candidates(url: str, profile: str) -> list:
 
 def open_window(st):
     url = app_url(st)
+    if is_wsl() and st.get("wslIp") and shutil.which("powershell.exe") and not windows_reaches(st["port"]):
+        url = url.replace("127.0.0.1", st["wslIp"], 1)
     store = Store()
     custom = (store.settings.get("browser") or "").strip()
     profile = str(config_dir() / "window-profile")

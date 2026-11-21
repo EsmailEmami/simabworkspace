@@ -2397,6 +2397,37 @@ class StayingAlive(unittest.TestCase):
             sw.start_wsl_keepalive()
             self.assertEqual(p.call_args[0][0][0], "powershell.exe")
 
+    def test_wsl_vm_ip_only_nat_range(self):
+        def run(out):
+            return mock.patch.object(sw.subprocess, "run", return_value=mock.Mock(stdout=out))
+        with mock.patch.object(sw, "is_wsl", return_value=True):
+            with run("2: eth0    inet 172.25.144.7/20 brd 172.25.159.255 scope global eth0"):
+                self.assertEqual(sw.wsl_vm_ip(), "172.25.144.7")
+            with run("2: eth0    inet 192.168.1.20/24 brd 192.168.1.255 scope global eth0"):   # mirrored: LAN address
+                self.assertEqual(sw.wsl_vm_ip(), "")
+        with mock.patch.object(sw, "is_wsl", return_value=False):
+            self.assertEqual(sw.wsl_vm_ip(), "")
+
+    def test_wsl_window_falls_back_to_vm_ip(self):
+        st = {"port": 45027, "token": "tok", "wslIp": "172.25.144.7"}
+        for reaches, host in ((False, "172.25.144.7"), (True, "127.0.0.1")):
+            with mock.patch.object(sw, "is_wsl", return_value=True), mock.patch.object(sw, "Store"), \
+                    mock.patch.object(sw, "windows_reaches", return_value=reaches), \
+                    mock.patch.object(sw.shutil, "which", return_value="/x/cmd.exe"), \
+                    mock.patch.object(sw.subprocess, "Popen") as p, mock.patch("builtins.print"):
+                sw.Store.return_value.settings = {}
+                sw.open_window(st)
+                self.assertIn(f"--app=http://{host}:45027/#t=tok", p.call_args[0][0])
+
+    def test_wsl_alt_host_is_accepted(self):
+        app = mock.Mock(alt_hosts={"172.25.144.7:45027"})
+        h = type("H", (sw.Handler,), {"app": app})
+        o = h.__new__(h)
+        o.server = mock.Mock(server_address=("127.0.0.1", 45027))
+        for host, ok in (("172.25.144.7:45027", True), ("127.0.0.1:45027", True), ("10.0.0.5:45027", False)):
+            o.headers = {"Host": host}
+            self.assertEqual(o._host_ok(), ok, host)
+
     def test_crashes_are_logged_with_a_time(self):
         code = ("import sys,threading; sys.path.insert(0, %r); import server as s; s.install_crash_logging(); "
                 "t=threading.Thread(target=lambda: 1/0); t.start(); t.join()") % str(ROOT / "gui")
@@ -2411,7 +2442,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.48.0"', text)
+        self.assertIn('VERSION="1.48.1"', text)
 
 
 if __name__ == "__main__":

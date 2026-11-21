@@ -597,7 +597,7 @@ const tests = {
     assert.strictEqual(q('.hrow', modal).length, 1, 'the title is searched too');
     search.value = 'پرداخت'; search.dispatch('input');
     assert.strictEqual(q('.hrow', modal).length, 1);
-    const btns = q('.btn', q('.hrow', modal)[0]).map((b) => b.textContent);
+    const btns = q('.btn', q('.hrow', modal)[0]).filter((b) => !b.classList.contains('hdel')).map((b) => b.textContent);
     assert.deepStrictEqual(btns, ['Open'], 'opens in our own chat panel — no text terminal');
     q('.btn', q('.hrow', modal)[0])[0].click();
     await settle();

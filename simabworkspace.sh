@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.49.3 2026-11-21  Computers: connects even when ~/.ssh/config has a RemoteForward that fails on the server (Mac)
 #    1.49.2 2026-11-21  Computers: a question goes only to the chat that ran the command (no dialog over other tabs), with sound
 #    1.49.1 2026-11-21  Computers: reconnect fixed, clearer dialog, sidebar mark, question in the chat, modes like Claude (same as chat, ask, ask new, auto)
 #    1.49.0 2026-11-21  Computers: builds run on your own computers (onpc), Claude stays on the server
@@ -348,7 +349,7 @@
 
 set -u -o pipefail
 
-VERSION="1.49.2"
+VERSION="1.49.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

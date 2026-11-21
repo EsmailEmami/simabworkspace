@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.49.2"
+VERSION = "1.49.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5683,9 +5683,11 @@ def pc_decide(c: dict, project: str, cmd: str, hour: dict, now: float):
 
 
 def pc_link_argv(conf: ServerConf, sock: str, port: int) -> list:
+    """No ExitOnForwardFailure: a RemoteForward in the user's ~/.ssh/config that fails on the server
+    ("remote port forwarding failed for listen port 47123", a user's Mac) would end OUR link too.
+    ClearAllForwardings would also drop our -R. So the link is checked on the server instead (_verify)."""
     return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
-        "-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
-        "-R", f"{sock}:127.0.0.1:{port}", conf.target]
+        "-N", "-T", "-o", "StreamLocalBindUnlink=yes", "-R", f"{sock}:127.0.0.1:{port}", conf.target]
 
 
 def pc_shell_argv(cmd: str) -> list:
@@ -5831,9 +5833,22 @@ class PcHub:
                 continue
             while self.wanted and p.poll() is None:
                 if self.state != "connected" and time.time() - started > 2.5:
+                    why = self._verify()
+                    if why:                         # ssh is up but our socket is not there
+                        self.state, self.error = "error", why[:200] + f" — retrying in {pause}s"
+                        try:
+                            p.terminate()
+                        except OSError:
+                            pass
+                        break
                     self.state, self.error, self.since = "connected", "", time.time()
                     pause = 2
                 self.wake.wait(0.5)
+            if self.state == "error" and self.wanted:
+                if self.wake.wait(pause):
+                    return
+                pause = min(pause * 2, 60)
+                continue
             if not self.wanted:
                 return
             err = ""
@@ -5847,6 +5862,18 @@ class PcHub:
             if self.wake.wait(pause):
                 return
             pause = min(pause * 2, 60)
+
+    def _verify(self) -> str:
+        """"" when the server reaches this computer through its socket, else why not."""
+        try:
+            r = self.remote(self.app.conf, PC_ADMIN_PY, ["list"], multiplex=False, timeout=20, stdin=b"{}")
+        except ApiError as e:
+            return e.message
+        me = self.cfg()["id"]
+        d = next((x for x in (r or {}).get("devices") or [] if x.get("id") == me), None)
+        if d and d.get("online"):
+            return ""
+        return "the server cannot reach this computer through the link (its socket was not opened)"
 
     # a command from the server ------------------------------------------------
     def map_path(self, cwd: str):

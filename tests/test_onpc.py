@@ -68,7 +68,7 @@ class Rules(unittest.TestCase):
         self.assertIn("-R", a)
         self.assertEqual(a[a.index("-R") + 1], "/home/esi/.cache/simabworkspace/pc/abc.sock:127.0.0.1:15550")
         self.assertIn("StreamLocalBindUnlink=yes", a)
-        self.assertIn("ExitOnForwardFailure=yes", a)
+        self.assertNotIn("ExitOnForwardFailure=yes", a, "a failing RemoteForward of ~/.ssh/config must not end our link")
         self.assertNotIn("ClearAllForwardings=yes", a)
 
 
@@ -318,8 +318,12 @@ class Link(unittest.TestCase):
             app.port = 15999
             calls, argvs = [], []
 
+            reach = {"ok": True}
+
             def remote(conf, code, args, **kw):
                 calls.append((code, json.loads(kw["stdin"])))
+                if code == sw.PC_ADMIN_PY:          # the check after connecting
+                    return {"devices": [{"id": hub.cfg()["id"], "online": reach["ok"]}]}
                 return {"home": "/home/esi", "dir": "/home/esi/.cache/simabworkspace/pc", "real": {}}
 
             class P:
@@ -333,6 +337,17 @@ class Link(unittest.TestCase):
             with mock.patch.object(app, "projects", return_value=[]):
                 st = hub.update({"on": True, "name": "work-pc", "mode": "every", "allow": ["npm run *", " "], "output": "panel"})
                 self.assertTrue(wait_for(lambda: hub.state == "connected", 6))
+                self.assertEqual(calls[-1][0], sw.PC_ADMIN_PY, "connected only after the server reached us")
+                hub.stop()
+                # ssh is up but the socket did not open: an error, then it tries again
+                reach["ok"] = False
+                n = len(argvs)
+                hub.update({"on": False})
+                hub.update({"on": True})
+                self.assertTrue(wait_for(lambda: hub.state == "error", 6))
+                self.assertIn("cannot reach this computer", hub.error)
+                reach["ok"] = True
+                self.assertTrue(wait_for(lambda: hub.state == "connected" and len(argvs) > n + 1, 12), "reconnects")
                 hub.stop()
             self.assertEqual(st["config"]["allow"], ["npm run *"])
             self.assertNotIn("secret", st["config"])

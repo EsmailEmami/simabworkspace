@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-claude', 'btn-tasks', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync'].forEach((id) => {
+  'btn-claude', 'btn-tasks', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync', 'pc-net'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);
@@ -161,6 +161,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/devices') res = fakePc.devs;
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
+  else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
   else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
   else if (url.startsWith('/api/pc/run/')) res = { id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', out: 'building…', start: 1, code: null };
@@ -1665,8 +1666,18 @@ const tests = {
     assert.strictEqual(q('.pc-live').length, 0, 'no floating box over other tabs');
     fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' };
     SW.closeTab(chat, true); await settle();
+    // the link's quality next to "simab": 5 bars + what goes over it now
+    fakePc.net = { state: 'connected', rtt: 95, bars: 4, down: 2048, up: 3 * 1048576 };
+    await global.SWComputers.pollNet(); await settle();
+    const net = document.body.querySelector('#pc-net');
+    assert.ok(!net.classList.contains('hidden'));
+    assert.strictEqual(q('.nb', net).filter((b) => b.classList.contains('on')).length, 4);
+    assert.match(net.textContent, /↓2\.0 KB\/s ↑3\.0 MB\/s/);
+    assert.match(net.title || net.getAttribute('title'), /95 ms/);
     S.pc = { on: false };
     delete pr.localOnly;
+    await global.SWComputers.pollNet();
+    assert.ok(net.classList.contains('hidden'), 'only with Local only projects on a connected computer');
     // a project built on the computers: its run commands run here, even one saved as "server"
     pr.buildsOn = 'computers';
     pr.commands = [{ id: 'c9', name: 'api', cmd: 'go run .', where: 'server', cwd: '', url: '' }];

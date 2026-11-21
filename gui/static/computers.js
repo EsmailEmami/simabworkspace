@@ -418,7 +418,30 @@
   setTimeout(refreshInfo, 1500);
   setInterval(function () { if (!document.hidden) refreshInfo(); }, INFO_POLL);
 
+  // ------------------------------------------------------------------ the link's quality (sidebar, next to "simab")
+  // Local only projects live and die by this computer's internet: 5 bars from the round trip to the
+  // server, and what goes over the link right now (↓ from the server, ↑ to it).
+  function rate(b) { return b < 1024 ? Math.round(b) + ' B/s' : b < 1048576 ? (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB/s' : (b / 1048576).toFixed(1) + ' MB/s'; }
+  function netBox(n) {
+    var el = document.getElementById('pc-net');
+    if (!el) return;
+    var show = !S.web && S.pc && S.pc.on && (S.projects || []).some(function (p) { return p.localOnly; });
+    el.classList.toggle('hidden', !show);
+    if (!show || !n) return;
+    var bars = [1, 2, 3, 4, 5].map(function (i) { return h('i', { class: 'nb b' + i + (i <= n.bars ? ' on' : '') }); });
+    el.className = 'pc-net q' + n.bars;
+    el.replaceChildren(h('span', { class: 'nbars' }, bars),
+      h('span', { class: 'nrate' }, '↓' + rate(n.down) + ' ↑' + rate(n.up)));
+    el.title = n.state !== 'connected' ? 'This computer is not connected to the server — Local only projects cannot work'
+      : 'Connection to the server: ' + (n.rtt == null ? 'no answer' : n.rtt + ' ms round trip') + '\nNow: ↓ ' + rate(n.down) + ' from the server, ↑ ' + rate(n.up) + ' to it';
+  }
+  function pollNet() {
+    if (S.web || !S.pc || !S.pc.on || !(S.projects || []).some(function (p) { return p.localOnly; })) { netBox(null); return Promise.resolve(); }
+    return api('GET', 'pc/net').then(netBox).catch(function () { netBox({ state: 'off', bars: 0, down: 0, up: 0 }); });
+  }
+  setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
+
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, decorate: decorate, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

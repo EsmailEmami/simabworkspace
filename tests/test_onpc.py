@@ -432,6 +432,7 @@ class LocalOnly(EndToEnd):
         self.assertEqual(self.mount(), {"lo": "ok"}, "already mounted: left alone")
         # Claude's own tools on the server = plain files here
         self.assertEqual(Path(self.mnt, "src", "a.txt").read_text(), "hello\n")
+        self.assertGreater(self.hub.meter[1], 0, "what the server read is counted (sidebar speed)")
         Path(self.mnt, "src", "b.txt").write_text("from claude\n")
         self.assertEqual(Path(self.laptop, "src", "b.txt").read_text(), "from claude\n", "written on the computer")
         Path(self.mnt, "src", "c.tmp").write_text("new")
@@ -546,3 +547,36 @@ class LocalOnlyApp(unittest.TestCase):
         for on in ("computers", "local"):
             built = sw.build_spec(dict(spec), sw.ServerConf("esi", "h"), self.store, [dict(proj, buildsOn=on)])
             self.assertEqual(built["spec"]["where"], "local", on)
+
+
+class LinkQuality(unittest.TestCase):
+    def test_rtt_bars_and_traffic(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(5)
+        port = srv.getsockname()[1]
+        self.assertIsInstance(sw.pc_rtt("127.0.0.1", port), float)
+        srv.close()
+        self.assertIsNone(sw.pc_rtt("127.0.0.1", port), "nobody answers")
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": t}):
+            app = sw.App(sw.Store(Path(t) / "gui.json"), sw.ServerConf("esi", "127.0.0.1", 22))
+            hub = app.pc
+            hub.state, hub.wanted = "connected", True
+            for rtt, bars in ((20, 5), (90, 4), (200, 3), (400, 2), (900, 1), (None, 0)):
+                hub.net["rtt"] = rtt
+                self.assertEqual(hub.net_info()["bars"], bars, rtt)
+            with mock.patch.object(sw, "pc_rtt", return_value=33.0):
+                th = threading.Thread(target=hub._net_loop, args=(0.2,), daemon=True)
+                th.start()
+                time.sleep(0.3)
+                hub.meter[0] += 100000                    # Claude reads files: down from the server's view = to it
+                hub.meter[1] += 50000
+                self.assertTrue(wait_for(lambda: hub.net["down"] > 0 and hub.net["up"] > 0, 3))
+                self.assertEqual(hub.net_info()["rtt"], 33.0)
+                self.assertEqual(hub.net_info()["bars"], 5)
+                hub.wanted = False
+                hub.wake.set()
+                th.join(3)
+            self.assertEqual(hub.net["down"], 0.0, "reset when the link stops")
+            hub.state = "error"
+            self.assertEqual(hub.net_info()["bars"], 0)

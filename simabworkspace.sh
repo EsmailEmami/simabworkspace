@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.50.3 2026-11-21  Sidebar: link quality of this computer (5 bars) + live ↓/↑ speed, for Local only projects
 #    1.50.2 2026-11-21  Chat: where the work runs (⌂ local / ⚒ builds on PC) and the live output of a command on your computer inside its Bash card
 #    1.50.1 2026-11-21  Sidebar: different marks for Local only (⌂ local) and builds on your computers (⚒ PC)
 #    1.50.0 2026-11-21  Local only projects: files stay on your computer, Claude on the server works on them with all its tools; run commands follow; mode in the question card
@@ -352,7 +353,7 @@
 
 set -u -o pipefail
 
-VERSION="1.50.2"
+VERSION="1.50.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

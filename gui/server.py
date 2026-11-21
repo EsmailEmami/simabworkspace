@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.50.2"
+VERSION = "1.50.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5903,6 +5903,9 @@ class PcHub:
         self.hour = {}                 # project -> everything allowed until (time)
         self.runs = collections.deque(maxlen=20)
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
+        self.meter = [0, 0]            # bytes over the link: [from the server (down), to the server (up)]
+        self.net = {"rtt": None, "down": 0.0, "up": 0.0}
+        self._net_thread = None
 
     # settings ---------------------------------------------------------------
     def cfg(self) -> dict:
@@ -6023,6 +6026,9 @@ class PcHub:
                     self.state, self.error, self.since = "connected", "", time.time()
                     pause = 2
                     threading.Thread(target=self.mount, daemon=True).start()
+                    if not (self._net_thread and self._net_thread.is_alive()):
+                        self._net_thread = threading.Thread(target=self._net_loop, daemon=True)
+                        self._net_thread.start()
                 self.wake.wait(0.5)
             if self.state == "error" and self.wanted:
                 if self.wake.wait(pause):
@@ -6042,6 +6048,30 @@ class PcHub:
             if self.wake.wait(pause):
                 return
             pause = min(pause * 2, 60)
+
+    # the link's quality: round trip to the server (TCP connect to its ssh port) + traffic per second
+    def _net_loop(self, tick=1.0):
+        last, t0, n, rtts = list(self.meter), time.time(), 0, []
+        while self.wanted:
+            if self.wake.wait(tick):
+                if not self.wanted:
+                    break
+            now = time.time()
+            dt = max(now - t0, 1e-3)
+            cur = list(self.meter)
+            self.net["down"], self.net["up"] = (cur[0] - last[0]) / dt, (cur[1] - last[1]) / dt
+            last, t0 = cur, now
+            if n % 3 == 0:
+                rtts = (rtts + [pc_rtt(self.app.conf.host, self.app.conf.port)])[-3:]
+                ok = [x for x in rtts if x is not None]
+                self.net["rtt"] = sorted(ok)[len(ok) // 2] if ok and rtts[-1] is not None else None
+            n += 1
+        self.net.update(rtt=None, down=0.0, up=0.0)
+
+    def net_info(self) -> dict:
+        rtt = self.net["rtt"] if self.state == "connected" else None
+        bars = 0 if rtt is None else 5 if rtt < 60 else 4 if rtt < 120 else 3 if rtt < 250 else 2 if rtt < 500 else 1
+        return {"state": self.state, "rtt": rtt, "bars": bars, "down": round(self.net["down"]), "up": round(self.net["up"])}
 
     # Local only projects: their folders mounted on the server --------------------
     def local_projects(self) -> list:
@@ -6088,7 +6118,7 @@ class PcHub:
         h.end_headers()
         h.wfile.flush()
         h.close_connection = True
-        SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid")).serve()
+        SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid"), meter=self.meter).serve()
 
     def _verify(self) -> str:
         """"" when the server reaches this computer through its socket, else why not."""
@@ -6169,6 +6199,7 @@ class PcHub:
         wlock = threading.Lock()
 
         def frame(kind: bytes, data=b"", code=None):
+            self.meter[1] += len(data) + 5
             with wlock:
                 if code is not None:
                     h.wfile.write(kind + struct.pack(">i", code))
@@ -6291,6 +6322,16 @@ class PcHub:
         raise ApiError(404, "no such command")
 
 
+def pc_rtt(host: str, port) -> float:
+    """Milliseconds for a TCP handshake with the server's ssh port (None = not reachable)."""
+    t = time.time()
+    try:
+        with socket.create_connection((host, int(port or 22)), timeout=3):
+            return round((time.time() - t) * 1000, 1)
+    except (OSError, ValueError):
+        return None
+
+
 def pc_hung_up(conn) -> bool:
     import select
     try:
@@ -6328,7 +6369,8 @@ class SftpServer:
     """SFTP version 3 on a pair of binary streams, confined to `root`. Paths are /-separated,
     "/" = root. Symlinks may not lead out of root."""
 
-    def __init__(self, root: str, rfile, wfile, uid=None, gid=None):
+    def __init__(self, root: str, rfile, wfile, uid=None, gid=None, meter=None):
+        self.meter = meter if meter is not None else [0, 0]      # [bytes from the server, bytes to it]
         self.root = os.path.realpath(root)
         self.ids = (uid, gid) if isinstance(uid, int) and isinstance(gid, int) else None   # the server user's
         self.r, self.w = rfile, wfile
@@ -6343,10 +6385,12 @@ class SftpServer:
             if not c:
                 raise EOFError
             b += c
+        self.meter[0] += n
         return b
 
     def _send(self, kind: int, rid, payload: bytes):
         body = bytes([kind]) + (struct.pack(">I", rid) if rid is not None else b"") + payload
+        self.meter[1] += len(body) + 4
         self.w.write(struct.pack(">I", len(body)) + body)
         self.w.flush()
 
@@ -8792,6 +8836,8 @@ class App:
             return self.pc.update(body)
         if key == ("GET", "asks"):
             return self.pc.pending()
+        if key == ("GET", "net"):
+            return self.pc.net_info()
         if key == ("POST", "answer"):
             return self.pc.answer(body.get("id"), body.get("answer"))
         if key == ("GET", "run") and len(rest) == 2:

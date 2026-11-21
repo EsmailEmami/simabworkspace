@@ -1241,3 +1241,11 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-run-h { font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
 .pc-run-h.run { color: var(--warn); } .pc-run-h.ok { color: var(--ok); } .pc-run-h.err { color: var(--err); }
 .pc-run-live .pc-out { max-height: 260px; padding: 6px 8px; }
+.pc-net { display: inline-flex; align-items: center; gap: 6px; font: 10px var(--mono); color: var(--muted); cursor: default; white-space: nowrap; overflow: hidden; }
+.pc-net .nbars { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 11px; }
+.pc-net .nb { width: 3px; background: var(--line2); border-radius: 1px; }
+.pc-net .b1 { height: 3px; } .pc-net .b2 { height: 5px; } .pc-net .b3 { height: 7px; } .pc-net .b4 { height: 9px; } .pc-net .b5 { height: 11px; }
+.pc-net.q5 .nb.on, .pc-net.q4 .nb.on { background: var(--ok); }
+.pc-net.q3 .nb.on { background: var(--warn); }
+.pc-net.q2 .nb.on, .pc-net.q1 .nb.on { background: var(--err); }
+.pc-net.q0 .nrate { color: var(--err); }

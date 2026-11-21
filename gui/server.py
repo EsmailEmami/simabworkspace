@@ -8313,13 +8313,13 @@ class App:
     def share_data(self) -> dict:
         if not self.conf.configured:
             raise ApiError(400, "the server is not configured")
-        r = remote_python(self.conf, SHARE_PY, ["get"], multiplex=bool(self.store.settings.get("sshMultiplex")))
+        r = remote_python(self.conf, SHARE_CFG_PY, ["get"], multiplex=bool(self.store.settings.get("sshMultiplex")))
         if isinstance(r, dict) and r.get("missing"):
             return {"missing": True, "domains": [], "shares": []}
         return share_clean(r)
 
     def share_save(self, data: dict) -> dict:
-        r = remote_python(self.conf, SHARE_PY, ["put"], stdin=json.dumps(share_clean(data)).encode(),
+        r = remote_python(self.conf, SHARE_CFG_PY, ["put"], stdin=json.dumps(share_clean(data)).encode(),
                           multiplex=bool(self.store.settings.get("sshMultiplex")))
         return share_clean(r)
 
@@ -10764,7 +10764,7 @@ def share_pipe(rfile, conn, other):
             pass
 
 
-SHARE_PY = r'''
+SHARE_CFG_PY = r'''
 import os, sys, json
 d = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "simabworkspace")
 f = os.path.join(d, "share.json")

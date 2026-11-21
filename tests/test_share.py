@@ -336,6 +336,12 @@ class EndToEnd(unittest.TestCase):
         x.close()
         self.assertEqual((r.status, d), (502, b"this port did not answer like a web server"))
 
+    def test_older_app_on_the_computer(self):
+        with mock.patch.object(sw.PcHub, "serve_proxy", lambda hub, h: h._json(404, {"error": "not found"})):
+            r, d = self.req("GET", "/__simab/p/esi/front/", self.SW)
+        self.assertEqual(r.status, 502)
+        self.assertIn(b"update Simab Workspace on your computer", d)
+
     def test_wrong_secret_is_refused_by_the_computer(self):
         self.link = dict(self.link, secret="x" * 40)
         r, d = self.req("GET", "/__simab/p/esi/front/", self.SW)
@@ -386,6 +392,83 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn("Cookie", json.loads(d)["headers"], "the sign-in cookie never reaches the computer")
         self.assertFalse(self.hub.token_ok(cookie.split("=", 1)[1], self.wsid, "other.example.com"))
 
+    def ask_share(self):
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "front", "port": self.devport, "access": "ask", "on": True}, MAIN)
+
+    def visitor_asks(self):
+        r, d = self.req("GET", "/esi/front/", {"Sec-Fetch-Mode": "navigate"})
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"Asking the owner", d)
+        self.assertIn(b"I am the owner", d)
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/front"}))
+        aid = json.loads(d)["id"]
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/front"}))
+        self.assertEqual(json.loads(d)["id"], aid, "the same visitor asks once")
+        return aid
+
+    def test_ask_me_answered_on_the_computer(self):
+        self.ask_share()
+        aid = self.visitor_asks()
+        self.assertEqual([a["id"] for a in self.hub.api(self.wsid, "GET", "/asks", {}, MAIN)["asks"]], [aid], "on the web / phone")
+        hub = self.pc.pc
+        self.assertTrue(wait_for(lambda: hub.pending()["guests"]), "and on the computer")
+        g = hub.pending()["guests"][0]
+        self.assertEqual(g["id"], aid)
+        self.assertIn("Someone wants to open esi/front", g["text"])
+        r, d = self.req("GET", "/__simab/ask?id=" + aid)
+        self.assertEqual(json.loads(d), {"state": "waiting"})
+        self.pc.pc_api("POST", ["guest"], {"id": aid, "answer": "hour"})
+        self.assertTrue(wait_for(lambda: self.hub.asks[aid]["answer"] == "hour"))
+        r, d = self.req("GET", "/__simab/ask?id=" + aid)
+        self.assertEqual(json.loads(d), {"state": "allowed"})
+        cookie = r.getheader("Set-Cookie")
+        self.assertTrue(cookie.startswith("__simab_g.esi.front="), cookie)
+        self.assertIn("Max-Age=3600", cookie)
+        r, _ = self.req("GET", "/__simab/ask?id=" + aid)
+        self.assertIsNone(r.getheader("Set-Cookie"), "the cookie is given once")
+        c = cookie.split(";")[0]
+        r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", dict(self.SW, Cookie=c))
+        self.assertEqual((r.status, d), (200, b"console.log(1)"))
+        r, d = self.req("GET", "/__simab/p/esi/api/x", dict(self.SW, Cookie=c))
+        self.assertEqual(r.status, 401, "only that link")
+        st = self.hub.api(self.wsid, "GET", "", {}, MAIN)
+        self.assertEqual([(g["t"], g["exp"] > time.time()) for g in st["guests"]], [("esi/front", True)])
+        self.hub.api(self.wsid, "POST", "/revoke", {"id": st["guests"][0]["id"]}, MAIN)
+        r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", dict(self.NAV, Cookie=c))
+        self.assertIn(b"Asking the owner", d, "revoked: asks again")
+
+    def test_ask_me_answered_on_the_phone(self):
+        self.ask_share()
+        aid = self.visitor_asks()
+        hub = self.pc.pc
+        self.assertTrue(wait_for(lambda: hub.pending()["guests"]))
+        self.hub.api(self.wsid, "POST", "/answer", {"id": aid, "answer": "deny"}, MAIN)
+        self.assertTrue(wait_for(lambda: not hub.pending()["guests"]), "the computer's question goes away")
+        r, d = self.req("GET", "/__simab/ask?id=" + aid)
+        self.assertEqual(json.loads(d), {"state": "denied"})
+        self.assertEqual(self.hub.api(self.wsid, "GET", "/asks", {}, MAIN)["asks"], [])
+        with self.assertRaises(sw.ApiError):
+            self.hub.api(self.wsid, "POST", "/answer", {"id": aid, "answer": "maybe"}, MAIN)
+        aid2 = self.visitor_asks()
+        self.assertNotEqual(aid2, aid)
+        self.hub.api(self.wsid, "POST", "/answer", {"id": aid2, "answer": "always"}, MAIN)
+        r, _ = self.req("GET", "/__simab/ask?id=" + aid2)
+        self.assertIn("Max-Age=34560000", r.getheader("Set-Cookie"))
+        self.assertEqual(self.hub.api(self.wsid, "GET", "", {}, MAIN)["guests"][0]["exp"], 0)
+
+    def test_owner_and_others(self):
+        self.ask_share()
+        r, _ = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/api"}))
+        self.assertEqual(r.status, 404, "a private link does not ask")
+        r, _ = self.req("GET", "/__simab/ask?id=nope")
+        self.assertEqual(r.status, 404)
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "x1", "port": self.devport, "access": "ask", "on": True}, MAIN)
+        for i in range(5):
+            self.hub.asks[f"{i:012x}"] = {"id": f"{i:012x}", "ws": "other", "t": "a/b", "ip": "127.0.0.1", "until": time.time() + 99,
+                                          "answer": "", "_ua": str(i)}
+        r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/x1"}))
+        self.assertEqual(r.status, 429)
+
     def test_workspace_domain_is_unchanged(self):
         r, d = self.req("GET", "/api/web-info", host=MAIN)
         self.assertEqual(r.status, 200)
@@ -419,7 +502,7 @@ class Settings(unittest.TestCase):
     def test_ports(self):
         self.hub.api("a", "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "name": "Front", "port": "3001", "on": True}, MAIN)
-        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False,
+        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False, "access": "private",
                                          "urls": [f"https://{DOM}/my-shop/front"]}])
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "slug": "shop", "name": "front", "port": 3001, "public": True,
                                                  "old": {"slug": "my-shop", "name": "front"}, "on": True}, MAIN)
@@ -427,9 +510,11 @@ class Settings(unittest.TestCase):
         for bad in ({"name": "", "port": 1}, {"name": "x", "port": 0}, {"name": "x", "port": 70000}):
             with self.assertRaises(sw.ApiError):
                 self.hub.api("a", "POST", "/port", dict({"project": "p", "on": True}, **bad), MAIN)
-        self.assertEqual(self.hub.api("b", "GET", "", {}, MAIN), {"domains": [], "shares": []})
+        self.assertEqual(self.hub.api("b", "GET", "", {}, MAIN), {"domains": [], "shares": [], "guests": []})
+        st = self.hub.api("a", "POST", "/port", {"project": "p", "name": "q", "port": 1, "access": "ask", "on": True}, MAIN)
+        self.assertEqual([x["access"] for x in st["shares"] if x["name"] == "q"], ["ask"])
         st = self.hub.api("a", "POST", "/port", {"slug": "shop", "name": "front", "on": False}, MAIN)
-        self.assertEqual(st["shares"], [])
+        self.assertEqual([x["name"] for x in st["shares"]], ["q"])
 
     def test_idle_links_close(self):
         killed = []

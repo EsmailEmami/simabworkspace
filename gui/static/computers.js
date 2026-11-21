@@ -615,11 +615,45 @@
       });
       if (live) refreshLive();
       decorate();
+      guestAsks(x.guests || [], function (id, ans) { return api('POST', 'pc/guest', { id: id, answer: ans }); });
       devServers(x.bg || []);
       devUp(x.bg || [], x.autoOpen);
       linkWatch(x.link);
     }).catch(function () {});
   }
+  // ---- Share on your domain, "Ask me": someone opens a link without the sign-in → this window asks
+  var guestShown = {};
+  var GUEST = [['deny', 'Deny'], ['hour', 'Allow 1 hour'], ['day', 'Allow 24 hours'], ['always', 'Always']];
+  function guestAsks(list, send) {
+    var open = {};
+    (list || []).forEach(function (g) {
+      open[g.id] = 1;
+      if (guestShown[g.id]) return;
+      var text = g.text || ('Someone wants to open ' + g.t + ' — ' + g.label + ' · ' + g.ip);
+      var md = SW.openModal({ title: 'Someone wants to open your link', size: 'sm', body: [h('p', null, text),
+        h('p', { class: 'muted' }, h('small', null, 'Not allowed if nobody answers in 5 minutes.'))],
+        foot: GUEST.map(function (b) {
+          return h('button', { class: 'btn' + (b[0] === 'deny' ? '' : ' primary'), onclick: function () {
+            md.close();
+            send(g.id, b[0]).then(function () { toast(b[0] === 'deny' ? 'Not let in' : 'Let in', 'ok'); }).catch(fail);
+          } }, b[1]);
+        }) });
+      guestShown[g.id] = md;
+      if (window.SWSound && window.SWSound.play) { try { window.SWSound.play('question', 'link'); } catch (e) { /* no sound */ } }
+    });
+    Object.keys(guestShown).forEach(function (id) {
+      if (!open[id]) { try { guestShown[id].close(); } catch (e) { /* closed */ } delete guestShown[id]; }
+    });
+  }
+  if (S.web) {
+    setInterval(function () {
+      if (document.hidden) return;
+      api('GET', 'account/share/asks').then(function (d) {
+        guestAsks(d.asks, function (id, ans) { return api('POST', 'account/share/answer', { id: id, answer: ans }); });
+      }).catch(function () {});
+    }, 3000);
+  }
+
   function startPoll() {
     if (pollTimer || S.web) return;
     var first = true;

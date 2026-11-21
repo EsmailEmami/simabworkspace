@@ -6417,6 +6417,7 @@ class PcHub:
         self.home = ""
         self.real = {}                 # project -> its real path on the server
         self.asks = {}                 # id -> waiting permission question
+        self.guests = {}               # id -> someone asks to open a shared link (Share on your domain, "Ask me")
         self.hour = {}                 # project -> everything allowed until (time)
         self.runs = collections.deque(maxlen=20)
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
@@ -6785,6 +6786,44 @@ class PcHub:
             with self.lock:
                 waits.pop((project, port), None)
         return w["ok"]
+
+    def serve_guest(self, h):
+        """POST /pc/guest from the web version: {op: ask, id, text, until} waits for the answer of this
+        computer's user (or the web's: {op: drop, id}) → {answer: hour | day | always | deny | gone}."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        gid = b.get("id") if isinstance(b.get("id"), str) and re.fullmatch(r"[0-9a-f]{12}", b.get("id") or "") else ""
+        if not gid:
+            return h._json(400, {"error": "bad request"})
+        if b.get("op") == "drop":
+            self.guest_answer(gid, "gone")
+            return h._json(200, {"ok": True})
+        until = min(float(b.get("until") or 0), time.time() + SHARE_ASK_WAIT)
+        g = {"id": gid, "text": str(b.get("text") or "")[:300], "until": until, "answer": "", "_ev": threading.Event()}
+        with self.lock:
+            self.guests[gid] = g
+        g["_ev"].wait(max(0.0, until - time.time()))
+        with self.lock:
+            self.guests.pop(gid, None)
+        if g["answer"] in SHARE_ANSWERS:
+            self.audit("guest", f"{g['answer']}: {g['text']}")
+        return h._json(200, {"answer": g["answer"] or "gone"})
+
+    def guest_answer(self, gid, ans) -> dict:
+        if ans not in SHARE_ANSWERS + ("gone",):
+            raise ApiError(400, "invalid answer")
+        with self.lock:
+            g = self.guests.get(gid) if isinstance(gid, str) else None
+            if not g:
+                raise ApiError(404, "this question is no longer open")
+            if not g["answer"]:
+                g["answer"] = ans
+                g["_ev"].set()
+        return {"ok": True}
 
     def serve_proxy(self, h):
         """POST /pc/proxy {port} from the web version (Share on your domain): after the "200", the bytes of
@@ -7311,6 +7350,7 @@ class PcHub:
     def pending(self) -> dict:
         with self.lock:
             asks = [{k: v for k, v in a.items() if not k.startswith("_")} for a in self.asks.values() if not a["answer"]]
+            guests = [{k: v for k, v in g.items() if not k.startswith("_")} for g in self.guests.values() if not g["answer"]]
         tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.app.sessions.items()) if (x.spec or {}).get("relay")}
         for a in asks:
             a["session"] = tabs.get(a["chat"], "") if a["chat"] else ""     # the chat tab that ran onpc (asked only there)
@@ -7318,7 +7358,7 @@ class PcHub:
         for r in runs:
             r["session"] = tabs.get(r.get("chat") or "", "") if r.get("chat") else ""   # its output shows in that chat
         c = self.cfg()
-        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"], "autoOpen": c["autoOpen"],
+        return {"asks": asks, "guests": guests, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"], "autoOpen": c["autoOpen"],
                 "bg": self.bg_list(), "link": self.state}
 
     def run_info(self, rid: str) -> dict:
@@ -9947,6 +9987,8 @@ class App:
             return self.pc.update(body)
         if key == ("GET", "asks"):
             return self.pc.pending()
+        if key == ("POST", "guest") and not self.web:         # this computer's user answers a visitor of a shared link
+            return self.pc.guest_answer(body.get("id"), body.get("answer"))
         if key == ("GET", "net"):
             return self.pc.net_info()
         if key == ("POST", "speed"):
@@ -10618,6 +10660,10 @@ SHARE_IDLE = 600                    # an ssh link with no connection for 10 min 
 SHARE_BODY_MAX = 64 << 20
 SHARE_HTML_MAX = 20 << 20
 SHARE_MAX = 50
+SHARE_ASK_WAIT = 300                # a visitor waits at most 5 min for "Ask me"
+SHARE_ANSWERS = ("hour", "day", "always", "deny")
+SHARE_TTL = {"hour": 3600, "day": 86400, "always": 0}
+SHARE_ACCESS = ("private", "ask", "public")
 SHARE_HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te",
              "trailer", "transfer-encoding", "upgrade"}
 SHARE_DROP_IN = {"host", "content-length", "x-real-ip", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
@@ -10739,6 +10785,30 @@ function go() { if (sw.controller) claim(); else if (++tries < 200) setTimeout(g
 sw.register('/__simab/sw.js', { scope: '/' }).then(function () { return sw.ready; }).then(go, direct);
 })();</script>"""
 
+# "Ask me": the visitor waits here while the owner is asked on the phone / computer
+SHARE_WAIT_JS = """<p><button id="again" style="display:none">Ask again</button> <a href=@@IN@@ style="margin-left:1em">I am the owner — sign in</a></p>
+<script>(function(){
+var t = @@T@@, m = document.getElementById('m'), again = document.getElementById('again');
+function say(x) { m.textContent = x; }
+function poll(id) {
+  fetch('/__simab/ask?id=' + id, { credentials: 'include' }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d.state === 'allowed') { say('Allowed — opening…'); location.reload(); }
+    else if (d.state === 'denied') say('The owner did not let you in.');
+    else if (d.state === 'waiting') setTimeout(function () { poll(id); }, 2000);
+    else { say('No answer from the owner.'); again.style.display = ''; }
+  }, function () { setTimeout(function () { poll(id); }, 4000); });
+}
+function ask() {
+  again.style.display = 'none';
+  say('Asking the owner of this link to let you in…');
+  fetch('/__simab/ask', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ t: t }) })
+    .then(function (r) { return r.json(); }).then(function (d) { if (d.id) poll(d.id); else { say(d.error || 'Not possible now.'); again.style.display = ''; } },
+      function () { say('Could not ask — check your connection.'); again.style.display = ''; });
+}
+again.onclick = ask;
+ask();
+})();</script>"""
+
 # any other page opened in a tab: back through the entry of this tab's project
 SHARE_LOST_JS = """<script>(function(){
 var t = null; try { t = sessionStorage.getItem('__simabT'); } catch (e) {}
@@ -10761,10 +10831,14 @@ class ShareHub:
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_domains (domain TEXT PRIMARY KEY, ws TEXT NOT NULL, main TEXT NOT NULL)")
         self.db.run("CREATE TABLE IF NOT EXISTS web_shares (ws TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, "
                     "project TEXT NOT NULL, port INTEGER NOT NULL, public INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, slug, name))")
-        try:
-            self.db.run("ALTER TABLE web_shares ADD COLUMN tls INTEGER NOT NULL DEFAULT 0")
-        except sqlite3.Error:
-            pass                    # there already
+        for col in ("tls INTEGER NOT NULL DEFAULT 0", "ask INTEGER NOT NULL DEFAULT 0"):
+            try:
+                self.db.run("ALTER TABLE web_shares ADD COLUMN " + col)
+            except sqlite3.Error:
+                pass                # there already
+        self.db.run("CREATE TABLE IF NOT EXISTS web_share_guests (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, slug TEXT NOT NULL, "
+                    "name TEXT NOT NULL, label TEXT NOT NULL, ip TEXT NOT NULL, created REAL NOT NULL, exp REAL NOT NULL, last REAL NOT NULL)")
+        self.asks = {}              # id -> a visitor waiting for "Ask me"
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_tokens (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, domain TEXT NOT NULL, exp REAL NOT NULL)")
 
     # settings (Settings → Share on your domain) ---------------------------------------------------
@@ -10774,9 +10848,11 @@ class ShareHub:
         return {"domain": r[0][0], "ws": r[0][1], "main": r[0][2]} if r else None
 
     def find(self, ws: str, slug: str, name: str):
-        r = self.db.rows("SELECT slug, name, project, port, public, tls FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+        r = self.db.rows("SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+        if not r:
+            return None
         return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4]),
-                "tls": bool(r[0][5])} if r else None
+                "tls": bool(r[0][5]), "ask": bool(r[0][6]), "access": "public" if r[0][4] else "ask" if r[0][6] else "private"}
 
     def ports(self, ws: str, slug: str, signed: bool) -> list:
         """[{port, t}] of this workspace, this project first: a page that calls localhost:PORT (its API)
@@ -10790,11 +10866,17 @@ class ShareHub:
     def state(self, ws: str) -> dict:
         doms = [d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ? ORDER BY domain", (ws,))]
         shares = []
-        for slug, name, project, port, pub, tls in self.db.rows(
-                "SELECT slug, name, project, port, public, tls FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
+        for slug, name, project, port, pub, tls, ask in self.db.rows(
+                "SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
             shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub), "tls": bool(tls),
+                           "access": "public" if pub else "ask" if ask else "private",
                            "urls": [f"https://{d}/{slug}/{name}" for d in doms]})
-        return {"domains": doms, "shares": shares}
+        now = time.time()
+        guests = [{"id": hh[:16], "t": f"{sl}/{nm}", "label": label, "ip": ip, "created": cr, "exp": exp, "last": last}
+                  for hh, sl, nm, label, ip, cr, exp, last in self.db.rows(
+                      "SELECT hash, slug, name, label, ip, created, exp, last FROM web_share_guests WHERE ws = ? AND (exp = 0 OR exp > ?) "
+                      "ORDER BY created DESC", (ws, now))]
+        return {"domains": doms, "shares": shares, "guests": guests}
 
     def api(self, ws: str, method: str, sub: str, body: dict, host: str) -> dict:
         if method == "GET" and sub == "":
@@ -10839,8 +10921,19 @@ class ShareHub:
             n = self.db.rows("SELECT COUNT(*) FROM web_shares WHERE ws = ?", (ws,))[0][0]
             if n >= SHARE_MAX and not self.find(ws, slug, name):
                 raise ApiError(400, f"at most {SHARE_MAX} shared ports")
-            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (ws, slug, name, project, port, 1 if body.get("public") else 0, 1 if body.get("tls") else 0))
+            access = body.get("access") if body.get("access") in SHARE_ACCESS else "public" if body.get("public") else "private"
+            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls, ask) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (ws, slug, name, project, port, 1 if access == "public" else 0, 1 if body.get("tls") else 0, 1 if access == "ask" else 0))
+            return self.state(ws)
+        if method == "GET" and sub == "/asks":
+            return {"asks": self.open_asks(ws), "now": time.time()}
+        if method == "POST" and sub == "/answer":
+            return self.answer(ws, body.get("id"), body.get("answer"))
+        if method == "POST" and sub == "/revoke":
+            gid = str(body.get("id") or "")
+            if not re.fullmatch(r"[0-9a-f]{16}", gid):
+                raise ApiError(400, "bad request")
+            self.db.run("DELETE FROM web_share_guests WHERE ws = ? AND substr(hash, 1, 16) = ?", (ws, gid))
             return self.state(ws)
         raise ApiError(404, "not found")
 
@@ -10869,6 +10962,155 @@ class ShareHub:
             return False
         r = self.db.rows("SELECT ws, domain, exp FROM web_share_tokens WHERE hash = ?", (hashlib.sha256(tok.encode()).hexdigest(),))
         return bool(r) and r[0][0] == ws and r[0][1] == domain and r[0][2] > time.time()
+
+    # "Ask me": someone without a sign-in asks, the owner allows from the phone / computer ----------------
+    def guest_ok(self, h, ws: str, sh: dict) -> bool:
+        tok = self._cookie(h, f"__simab_g.{sh['slug']}.{sh['name']}")
+        if not tok or len(tok) > 200:
+            return False
+        hh = hashlib.sha256(tok.encode()).hexdigest()
+        r = self.db.rows("SELECT ws, slug, name, exp, last FROM web_share_guests WHERE hash = ?", (hh,))
+        if not r or r[0][:3] != (ws, sh["slug"], sh["name"]) or (r[0][3] and r[0][3] < time.time()):
+            return False
+        if time.time() - r[0][4] > 60:
+            self.db.run("UPDATE web_share_guests SET last = ? WHERE hash = ?", (time.time(), hh))
+        return True
+
+    def open_asks(self, ws: str) -> list:
+        now = time.time()
+        with self.lock:
+            for k in [k for k, a in self.asks.items() if a["until"] < now - 60]:
+                del self.asks[k]
+            return [{k: v for k, v in a.items() if not k.startswith("_")} for a in self.asks.values()
+                    if a["ws"] == ws and not a["answer"] and a["until"] > now]
+
+    def new_ask(self, h, ws: str, sh: dict) -> dict:
+        ip, ua = h._client_ip(), h.headers.get("User-Agent") or ""
+        t = f"{sh['slug']}/{sh['name']}"
+        now = time.time()
+        with self.lock:
+            mine = [a for a in self.asks.values() if a["ws"] == ws and a["t"] == t and a["ip"] == ip and a["_ua"] == ua
+                    and not a["answer"] and a["until"] > now]
+            if mine:
+                return mine[0]
+            if len([a for a in self.asks.values() if a["ws"] == ws and not a["answer"] and a["until"] > now]) >= 20 or \
+                    len([a for a in self.asks.values() if a["ip"] == ip and a["until"] > now]) >= 5:
+                raise ApiError(429, "too many requests — try again in a few minutes")
+            a = {"id": secrets.token_hex(6), "ws": ws, "t": t, "project": sh["project"], "label": ua_label(ua), "ip": ip,
+                 "at": now, "until": now + SHARE_ASK_WAIT, "answer": "", "_ua": ua, "_tok": ""}
+            self.asks[a["id"]] = a
+        threading.Thread(target=self._tell, args=(a,), daemon=True).start()
+        return a
+
+    def _tell(self, a: dict):
+        """Phone / browsers of the workspace (push) and the user's computer (its own question)."""
+        with self.gate.lock:
+            app = self.gate._app(a["ws"])
+        if app is None:
+            return
+        text = f"Someone wants to open {a['t']} — {a['label']} · {a['ip']}"
+        if getattr(app, "pusher", None):
+            subs = app._push_subs()
+            if subs:
+                with app.lock:
+                    app.push_seq += 1
+                    app.push_msgs.append({"seq": app.push_seq, "at": time.time(), "title": "Someone wants to open your link",
+                                          "body": text[:200], "tag": "guest:" + a["id"], "tab": ""})
+                threading.Thread(target=app._push_send, args=(subs,), daemon=True).start()
+        try:
+            ans = self.pc_guest(a["ws"], app, a["project"], {"op": "ask", "id": a["id"], "text": text, "until": a["until"]})
+        except (ApiError, OSError, ValueError):
+            return
+        if ans in SHARE_ANSWERS:
+            try:
+                self.answer(a["ws"], a["id"], ans, tell_pc=False)
+            except ApiError:
+                pass
+
+    def pc_guest(self, ws: str, app, project: str, call: dict) -> str:
+        ln = self.link(ws, app, self.device(app, project))
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(SHARE_ASK_WAIT + 15)
+        try:
+            s.connect(ln["sock"])
+            body = json.dumps(call).encode()
+            s.sendall(("POST /pc/guest HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                       "Content-Length: %d\r\n\r\n" % (ln["port"], ln["secret"], len(body))).encode() + body)
+            data = b""
+            while True:
+                d = s.recv(65536)
+                if not d:
+                    break
+                data += d
+        finally:
+            s.close()
+        head, _, rest = data.partition(b"\r\n\r\n")
+        return (json.loads(rest.decode("utf-8", "replace") or "{}") or {}).get("answer") or ""
+
+    def answer(self, ws: str, aid, ans, tell_pc=True) -> dict:
+        if ans not in SHARE_ANSWERS:
+            raise ApiError(400, "invalid answer")
+        with self.lock:
+            a = self.asks.get(aid) if isinstance(aid, str) else None
+            if not a or a["ws"] != ws:
+                raise ApiError(404, "this request is no longer open")
+            if a["answer"]:
+                return {"ok": True, "answer": a["answer"]}
+            a["answer"] = ans
+            if ans != "deny":
+                tok = secrets.token_urlsafe(32)
+                a["_tok"] = tok
+        if ans != "deny":
+            now = time.time()
+            sl, nm = a["t"].split("/")
+            self.db.run("INSERT INTO web_share_guests (hash, ws, slug, name, label, ip, created, exp, last) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (hashlib.sha256(tok.encode()).hexdigest(), ws, sl, nm, a["label"], a["ip"], now,
+                         now + SHARE_TTL[ans] if SHARE_TTL[ans] else 0, now))
+        if tell_pc:                         # the computer's question is no longer needed
+            def drop():
+                with self.gate.lock:
+                    app = self.gate._app(ws)
+                try:
+                    if app is not None:
+                        self.pc_guest(ws, app, a["project"], {"op": "drop", "id": a["id"]})
+                except (ApiError, OSError, ValueError):
+                    pass
+            threading.Thread(target=drop, daemon=True).start()
+        return {"ok": True, "answer": ans}
+
+    def _ask_api(self, h, method: str, ws: str, q: str):
+        """The waiting page of a visitor: POST {t} → {id}; GET ?id= → {state} (+ its cookie once allowed)."""
+        if method == "POST":
+            n = int(h.headers.get("Content-Length") or 0)
+            try:
+                b = json.loads(h.rfile.read(min(n, 4096)).decode("utf-8") or "{}") if n else {}
+            except ValueError:
+                b = {}
+            sl, _, nm = str(b.get("t") or "").partition("/")
+            sh = self.find(ws, sl, nm) if sl and nm else None
+            if not sh or sh["access"] != "ask":
+                return h._json(404, {"error": "this link does not ask"})
+            return h._json(200, {"id": self.new_ask(h, ws, sh)["id"], "wait": SHARE_ASK_WAIT})
+        aid = urllib.parse.parse_qs(q).get("id", [""])[0]
+        with self.lock:
+            a = self.asks.get(aid)
+            if not a or a["ws"] != ws or a["ip"] != h._client_ip():
+                return h._json(404, {"state": "gone"})
+            state = "denied" if a["answer"] == "deny" else "allowed" if a["answer"] else "gone" if a["until"] < time.time() else "waiting"
+            tok, a["_tok"] = a["_tok"], ""
+        if state == "allowed" and tok:
+            ttl = SHARE_TTL[a["answer"]] or 400 * 86400
+            sec = "; Secure" if self.gate.secure else ""
+            sl, nm = a["t"].split("/")
+            body = json.dumps({"state": state}).encode()
+            return h._send(200, body, "application/json", {"Set-Cookie":
+                           f"__simab_g.{sl}.{nm}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{sec}"})
+        return h._json(200, {"state": state})
+
+    def _wait_page(self, h, sd: dict, sh: dict, to: str, sw: bool):
+        t = f"{sh['slug']}/{sh['name']}"
+        js = SHARE_WAIT_JS.replace("@@T@@", share_js(t)).replace("@@IN@@", share_js(self._signin_url(sd, f"/{t}{to}")))
+        return h._send(200, share_page("Asking…", "Asking the owner of this link to let you in…", js), MIME[".html"])
 
     # the way to the computer --------------------------------------------------------------------------
     def device(self, app, project: str) -> str:
@@ -10977,6 +11219,8 @@ class ShareHub:
         except (OSError, ValueError, AttributeError):
             pass
         s.close()
+        if len(first) >= 2 and first[1] == b"404":          # an older app there: no /pc/proxy yet
+            raise ApiError(502, f"update Simab Workspace on your computer to {VERSION} or newer, then open the link again")
         raise ApiError(502, why or "your computer refused the connection")
 
     # requests on a share domain ---------------------------------------------------------------------
@@ -10992,6 +11236,8 @@ class ShareHub:
                 return h._send(200, (STATIC / "share-sw.js").read_bytes(), MIME[".js"], {"Service-Worker-Allowed": "/"})
             if path == "/__simab/shim.js" and method == "GET":
                 return h._send(200, (STATIC / "share-shim.js").read_bytes(), MIME[".js"], {"Cache-Control": "max-age=300"})
+            if path == "/__simab/ask" and method in ("GET", "POST"):
+                return self._ask_api(h, method, ws, q)
             if path == "/__simab/auth" and method == "GET":
                 qs = urllib.parse.parse_qs(q)
                 tok = self.take_code((qs.get("c") or [""])[0], domain)
@@ -11061,7 +11307,7 @@ class ShareHub:
         return ""
 
     def _allowed(self, h, ws, domain, sh) -> bool:
-        return sh["public"] or self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
+        return sh["public"] or self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain) or (sh.get("ask") and self.guest_ok(h, ws, sh))
 
     def _signin_url(self, sd: dict, to: str) -> str:
         scheme = "https" if self.gate.secure else "http"
@@ -11072,6 +11318,8 @@ class ShareHub:
         t = f"{sh['slug']}/{sh['name']}"
         to = sub + ("?" + q if q else "")
         if not self._allowed(h, ws, domain, sh):
+            if sh.get("ask"):
+                return self._wait_page(h, sd, sh, to, sw)
             loc = self._signin_url(sd, f"/{t}{to}")
             return h._send(200 if sw else 302, b"", "text/plain", {"X-Simab-Location" if sw else "Location": loc})
         js = SHARE_ENTRY_JS.replace("@@T@@", share_js(t)).replace("@@TO@@", share_js(to))
@@ -11082,6 +11330,8 @@ class ShareHub:
     def _serve(self, h, method, ws, domain, sd, app, sh, sub, q, base, nav, sw=False):
         t = f"{sh['slug']}/{sh['name']}"
         if not self._allowed(h, ws, domain, sh):
+            if nav and sh.get("ask"):
+                return self._wait_page(h, sd, sh, sub + ("?" + q if q else ""), sw)
             if nav:
                 loc = self._signin_url(sd, f"/{t}{sub}" + ("?" + q if q else ""))
                 return h._send(200 if sw else 302, b"", "text/plain", {"X-Simab-Location" if sw else "Location": loc})
@@ -11766,6 +12016,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_sftp(self)
             if method == "POST" and path == "/pc/proxy":       # Share on your domain: one connection to a port here
                 return self.app.pc.serve_proxy(self)
+            if method == "POST" and path == "/pc/guest":       # Share on your domain: someone asks to open a link
+                return self.app.pc.serve_guest(self)
             if method == "POST" and path == "/pc/term":        # a terminal of this computer in the web version
                 return self.app.pc.serve_term(self)
             if method == "POST" and path == "/pc/remote":      # the web version / phone: questions and answers

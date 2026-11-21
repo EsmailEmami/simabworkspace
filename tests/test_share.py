@@ -411,6 +411,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((r.status, json.loads(d)["path"]), (200, "/x"))
         self.assertNotIn("Cookie", json.loads(d)["headers"], "the sign-in cookie never reaches the computer")
         self.assertFalse(self.hub.token_ok(cookie.split("=", 1)[1], self.wsid, "other.example.com"))
+        on = self.hub.live(self.wsid)["active"]
+        self.assertEqual([(x["t"], x["who"]) for x in on], [("esi/api", "you")], "online now")
 
     def ask_share(self):
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "front", "port": self.devport, "access": "ask", "on": True}, MAIN)
@@ -488,6 +490,12 @@ class EndToEnd(unittest.TestCase):
                                           "answer": "", "_ua": str(i)}
         r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/x1"}))
         self.assertEqual(r.status, 429)
+
+    def test_page_errors_go_to_the_log(self):
+        with mock.patch.object(sw, "log_line") as log:
+            r, _ = self.req("POST", "/__simab/log", body=json.dumps({"t": "esi/esi/front", "at": "/x", "msg": "boom\nline2"}))
+        self.assertEqual(r.status, 204)
+        log.assert_called_once_with("share page esi/esi/front /x: boom line2")
 
     def test_workspace_domain_is_unchanged(self):
         r, d = self.req("GET", "/api/web-info", host=MAIN)
@@ -625,6 +633,24 @@ class SharedSettings(unittest.TestCase):
         self.app.share_api("POST", "/port", {"slug": "avahesab", "name": "api", "on": False})
         self.gate.share.pull(self.ws, self.web)
         self.assertIsNone(self.gate.share.find(self.ws, "avahesab", "api"))
+
+    def test_revoke_from_the_app_and_live_for_the_app(self):
+        self.gate.share.api(self.ws, "POST", "/port", {"project": "p", "name": "f", "port": 3001, "access": "ask", "on": True}, MAIN)
+        now = time.time()
+        self.gate.share.db.run("INSERT INTO web_share_guests (hash, ws, slug, name, label, ip, created, exp, last) VALUES (?, ?, 'p', 'f', 'Chrome', '1.1.1.1', ?, 0, ?)",
+                               ("ab" * 32, self.ws, now, now))
+        self.gate.share.pull(self.ws, self.web)
+        st = self.app.share_api("GET", "", {})
+        self.assertEqual([g["id"] for g in st["live"]["guests"]], ["ab" * 8], "the app sees who was let in")
+        st = self.app.share_api("POST", "/revoke", {"id": "ab" * 8})
+        self.assertEqual(st["live"]["guests"], [], "gone at once in the app")
+        self.assertEqual(len(self.gate.share.state(self.ws)["guests"]), 1, "the web version does it on its next read")
+        self.gate.share.pull(self.ws, self.web)
+        self.assertEqual(self.gate.share.state(self.ws)["guests"], [])
+        self.assertEqual(self.app.share_data()["revoke"], [], "done: the list is emptied")
+        self.assertEqual(self.app.share_api("GET", "", {})["live"]["guests"], [], "and the app's view says so")
+        st = self.web.share_api("GET", "", {}, MAIN)
+        self.assertEqual(set(st["live"]), {"asks", "guests", "active", "at"})
 
     def test_first_read_keeps_what_the_web_had(self):
         self.gate.share.api(self.ws, "POST", "/port", {"project": "p", "name": "f", "port": 3001, "on": True}, MAIN)

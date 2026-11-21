@@ -8329,6 +8329,18 @@ class App:
             return {"status": self.share_status(self.share_data()), "web": self.web}
         if method == "GET" and sub == "":
             data = self.share_data()
+        elif method == "POST" and sub == "/revoke":
+            gid = str(body.get("id") or "")
+            if not re.fullmatch(r"[0-9a-f]{16}", gid):
+                raise ApiError(400, "bad request")
+            rv = getattr(self, "share_revoke", None)
+            if rv:
+                rv(gid)
+                data = self.share_data()
+            else:                                           # the app: the web version does it within 30 s
+                data = self.share_data()
+                data["revoke"] = sorted(set(data.get("revoke") or []) | {gid})
+                data = self.share_save(data)
         elif method == "POST" and sub == "/port":
             data = share_edit(self.share_data(), sub, body, host if self.web else "")
             if hook:
@@ -8343,6 +8355,18 @@ class App:
         for x in data["shares"]:
             x["urls"] = [f"{data['base']}/{x['slug']}/{x['name']}"] if data.get("base") else []
         data["web"] = self.web
+        live = getattr(self, "share_live", None)
+        if live:
+            data["live"] = live()
+        else:
+            try:
+                r = remote_python(self.conf, SHARE_CFG_PY, ["live-get"], multiplex=bool(self.store.settings.get("sshMultiplex")))
+                data["live"] = r if isinstance(r, dict) and not r.get("missing") else {}
+            except (ApiError, OSError, ValueError):
+                data["live"] = {}
+            gone = set(data.get("revoke") or [])               # revoked here, the web version not yet done
+            if gone and data["live"].get("guests"):
+                data["live"]["guests"] = [g for g in data["live"]["guests"] if g.get("id") not in gone]
         return data
 
     def share_status(self, data: dict) -> dict:
@@ -10727,6 +10751,7 @@ SHARE_ASK_WAIT = 300                # a visitor waits at most 5 min for "Ask me"
 SHARE_ANSWERS = ("hour", "day", "always", "deny")
 SHARE_TTL = {"hour": 3600, "day": 86400, "always": 0}
 SHARE_ACCESS = ("private", "ask", "public")
+SHARE_ONLINE = 300                  # "online" = used the link in the last 5 min
 SHARE_HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te",
              "trailer", "transfer-encoding", "upgrade"}
 SHARE_DROP_IN = {"host", "content-length", "x-real-ip", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
@@ -10769,8 +10794,8 @@ def share_pipe(rfile, conn, other):
 SHARE_CFG_PY = r'''
 import os, sys, json
 d = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "simabworkspace")
-f = os.path.join(d, "share.json")
-if sys.argv[1] == "get":
+f = os.path.join(d, "share-live.json" if sys.argv[1].startswith("live-") else "share.json")
+if sys.argv[1] in ("get", "live-get"):
     try:
         with open(f) as fh:
             data = json.load(fh)
@@ -10808,7 +10833,8 @@ def share_clean(data) -> dict:
         shares.append({"slug": sl, "name": nm, "project": str(x.get("project") or sl)[:200], "port": port,
                        "access": x.get("access") if x.get("access") in SHARE_ACCESS else "private", "tls": bool(x.get("tls"))})
     base = data.get("base") if isinstance(data.get("base"), str) and re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?/[a-z0-9._-]+", data.get("base") or "") else ""
-    return {"domains": doms, "shares": shares[:SHARE_MAX], "base": base}
+    revoke = [g for g in (data.get("revoke") or []) if isinstance(g, str) and re.fullmatch(r"[0-9a-f]{16}", g)][:100]
+    return {"domains": doms, "shares": shares[:SHARE_MAX], "base": base, "revoke": revoke}
 
 
 def share_edit(data: dict, sub: str, body: dict, host: str = "", hosts=()) -> dict:
@@ -11102,6 +11128,10 @@ class ShareHub:
             data = app.share_data()
         except (ApiError, OSError, ValueError):
             return
+        try:                                                # who asks / is let in / online: for the app
+            remote_python(app.conf, SHARE_CFG_PY, ["live-put"], stdin=json.dumps(self.live(ws)).encode())
+        except (ApiError, OSError, ValueError):
+            pass
         if data.get("missing"):
             mine = self.data_of(ws)
             if mine["shares"]:
@@ -11111,6 +11141,18 @@ class ShareHub:
                     pass
             return
         self.sync(ws, data)
+        if data.get("revoke"):                              # Revoke from the app (it cannot reach these tables)
+            for gid in data["revoke"]:
+                self.revoke(ws, gid)
+            data = dict(data, revoke=[])
+            try:
+                app.share_save(dict(data, base=self.base(ws)))
+            except (ApiError, OSError, ValueError):
+                pass
+            try:
+                remote_python(app.conf, SHARE_CFG_PY, ["live-put"], stdin=json.dumps(self.live(ws)).encode())
+            except (ApiError, OSError, ValueError):
+                pass
         if self.base(ws) != data.get("base", ""):           # the app shows the links with it
             try:
                 app.share_save(dict(data, base=self.base(ws)))
@@ -11189,7 +11231,7 @@ class ShareHub:
             gid = str(body.get("id") or "")
             if not re.fullmatch(r"[0-9a-f]{16}", gid):
                 raise ApiError(400, "bad request")
-            self.db.run("DELETE FROM web_share_guests WHERE ws = ? AND substr(hash, 1, 16) = ?", (ws, gid))
+            self.revoke(ws, gid)
             return self.state(ws)
         raise ApiError(404, "not found")
 
@@ -11497,6 +11539,18 @@ class ShareHub:
                 return h._send(200, (STATIC / "share-shim.js").read_bytes(), MIME[".js"], {"Cache-Control": "max-age=300"})
             if path == "/__simab/ask" and method in ("GET", "POST"):
                 return self._ask_api(h, method, "", q)
+            if path == "/__simab/log" and method == "POST":           # a shared page's script error (share-shim.js)
+                now = time.time()
+                self._logs = [x for x in getattr(self, "_logs", []) if now - x < 60]
+                if len(self._logs) < 60:
+                    self._logs.append(now)
+                    try:
+                        b = json.loads(h.rfile.read(min(int(hd.get("Content-Length") or 0), 4096)).decode("utf-8", "replace") or "{}")
+                    except ValueError:
+                        b = {}
+                    clean = lambda v: re.sub(r"[\x00-\x1f]", " ", str(v or ""))[:500]
+                    log_line(f"share page {clean(b.get('t'))[:120]} {clean(b.get('at'))[:200]}: {clean(b.get('msg'))}")
+                return h._send(204, b"", "text/plain")
             if path == "/__simab/auth" and method == "GET":
                 qs = urllib.parse.parse_qs(q)
                 got = self.take_code((qs.get("c") or [""])[0], domain)
@@ -11581,9 +11635,38 @@ class ShareHub:
                 return v.strip()
         return ""
 
-    def _allowed(self, h, ws, domain, sh) -> bool:
-        return (sh["public"] or self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain)
-                or (sh.get("ask") and self.guest_ok(h, ws, sh)))
+    def _allowed(self, h, ws, domain, sh) -> str:
+        """"" (not allowed) | you (signed in) | guest (let in with Ask me) | anyone (public link)"""
+        if self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain):
+            return "you"
+        if sh.get("ask") and self.guest_ok(h, ws, sh):
+            return "guest"
+        return "anyone" if sh["public"] else ""
+
+    def saw(self, h, ws: str, sh: dict, who: str):
+        """Who opens this link now (Settings / sidebar: "online")."""
+        key = (ws, sh["slug"], sh["name"], h._client_ip(), ua_label(h.headers.get("User-Agent") or ""), who)
+        now = time.time()
+        with self.lock:
+            seen = self.__dict__.setdefault("seen", {})
+            first = seen.get(key, (now, 0))[0]
+            seen[key] = (first if now - seen.get(key, (0, 0))[1] < SHARE_ONLINE else now, now)
+
+    def live(self, ws: str) -> dict:
+        """Open requests (Ask me), people let in, and who used each link in the last minutes."""
+        now = time.time()
+        with self.lock:
+            seen = self.__dict__.setdefault("seen", {})
+            for k in [k for k, v in seen.items() if now - v[1] > SHARE_ONLINE]:
+                del seen[k]
+            active = [{"t": f"{k[1]}/{k[2]}", "ip": k[3], "label": k[4], "who": k[5], "since": v[0], "last": v[1]}
+                      for k, v in seen.items() if k[0] == ws]
+        active.sort(key=lambda x: -x["last"])
+        return {"asks": self.open_asks(ws), "guests": self.state(ws)["guests"], "active": active, "at": now}
+
+    def revoke(self, ws: str, gid: str):
+        if re.fullmatch(r"[0-9a-f]{16}", gid or ""):
+            self.db.run("DELETE FROM web_share_guests WHERE ws = ? AND substr(hash, 1, 16) = ?", (ws, gid))
 
     def _signin_url(self, sd: dict, to: str) -> str:
         scheme = "https" if self.gate.secure else "http"
@@ -11605,7 +11688,10 @@ class ShareHub:
 
     def _serve(self, h, method, ws, domain, sd, app, sh, sub, q, base, nav, sw=False):
         t = f"{sh['user']}/{sh['slug']}/{sh['name']}"
-        if not self._allowed(h, ws, domain, sh):
+        who = self._allowed(h, ws, domain, sh)
+        if who:
+            self.saw(h, ws, sh, who)
+        if not who:
             if nav and sh.get("ask"):
                 return self._wait_page(h, sd, sh, sub + ("?" + q if q else ""), sw)
             if nav:
@@ -11961,6 +12047,8 @@ class WebGate:
         app.pusher = self.pusher
         app.share_hook = lambda data, host, check, ws=wsid: self.share.sync(ws, data, host, check)
         app.share_probe = lambda shares, ws=wsid, a=app: self.share.probe(ws, a, shares)
+        app.share_live = lambda ws=wsid: self.share.live(ws)
+        app.share_revoke = lambda gid, ws=wsid: self.share.revoke(ws, gid)
         self.apps[wsid] = app
         if self.start_loops:
             threading.Thread(target=self.share.pull, args=(wsid, app), daemon=True).start()

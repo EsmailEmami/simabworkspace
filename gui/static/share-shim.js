@@ -9,6 +9,17 @@
   try { ports = JSON.parse(me.getAttribute('data-p') || '{}') || {}; } catch (e) { /* none */ }
   try { sessionStorage.setItem('__simabT', t); } catch (e) { /* storage off */ }
 
+  // the page's script errors → the owner's server log (no page content, at most 20 a page)
+  var sent = 0;
+  function report(msg) {
+    if (sent++ >= 20 || !navigator.sendBeacon) return;
+    try { navigator.sendBeacon('/__simab/log', JSON.stringify({ t: t, msg: String(msg).slice(0, 500), at: location.pathname })); } catch (e) { /* off */ }
+  }
+  window.addEventListener('error', function (e) {
+    report((e.message || 'error') + (e.filename ? ' @ ' + e.filename.replace(location.origin, '') + ':' + e.lineno : '') +
+      (e.target && e.target !== window && e.target.src ? ' (failed to load ' + e.target.src + ')' : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) { report('unhandled: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)); });
   var swc = navigator.serviceWorker;
   if (swc) {
     swc.addEventListener('message', function (e) {

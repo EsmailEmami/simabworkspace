@@ -98,7 +98,7 @@
   // ------------------------------------------------------------------ the dialog
   function open(focusProject) {
     var body = h('div', { class: 'pc-dlg' });
-    var md = SW.openModal({ title: 'Computers', size: 'pcm', body: body,
+    var md = SW.openModal({ title: 'Computers', size: 'settings pcm', body: body,
       foot: [h('span', { class: 'left muted' }, 'Claude stays on the server · builds run where you choose'),
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
     var me = null, devs = info, timer = null, checking = true;      // until the fresh answer: "checking…" 
@@ -121,17 +121,29 @@
         api('GET', 'pc/access').then(function (x) { acc = x; })]).then(function () { renderThis(); renderRecent(); renderAccess(); }).catch(function () {});
     }, 3000);
 
-    function card(title, sub, content) {
-      return h('section', { class: 'pc-card' }, h('div', { class: 'pc-card-h' }, h('b', null, title), sub ? h('span', { class: 'muted' }, sub) : null), content);
-    }
+    // in tabs like Settings (the same .set-* look): a rail on the left, a row on a phone
     var thisBox = h('div'), devBox = h('div'), buildBox = h('div'), ruleBox = h('div'), recentBox = h('div'), accBox = h('div'), acc = null;
-    kids(body, [
-      S.web ? null : card('This computer', '', thisBox),
-      card('Your computers', 'connected to this server user', devBox),
-      card('Commands run on', 'per project', buildBox),
-      S.web ? null : card('Permission on this computer', 'what Claude may run here', ruleBox),
-      S.web ? null : card('Phone access', 'terminal and run commands from the web version, with this computer’s own MFA code', accBox),
-      S.web ? null : card('Recent commands here', '', recentBox)]);
+    var tabs = [
+      S.web ? null : ['This computer', '', thisBox],
+      ['Your computers', 'connected to this server user', devBox],
+      ['Commands run on', 'per project', buildBox],
+      S.web ? null : ['Permission', 'what Claude may run on this computer', ruleBox],
+      S.web ? null : ['Phone access', 'terminal and run commands from the web version, with this computer’s own MFA code', accBox],
+      S.web ? null : ['Recent commands', 'run on this computer', recentBox]].filter(Boolean);
+    var rail = h('div', { class: 'set-rail' }), panes = h('div', { class: 'set-pane' });
+    function showTab(i) {
+      Array.prototype.forEach.call(rail.children, function (b, j) { b.classList.toggle('active', j === i); });
+      Array.prototype.forEach.call(panes.children, function (p, j) { p.classList.toggle('hidden', j !== i); });
+      localStorage.setItem('sw-pc-tab', tabs[i][0]);
+    }
+    tabs.forEach(function (t, i) {
+      rail.append(h('button', { class: 'set-tab', onclick: function () { showTab(i); } }, t[0]));
+      panes.append(h('div', { class: 'set-group hidden' },
+        h('div', { class: 'set-title' }, t[0], t[1] ? h('span', { class: 'muted' }, t[1]) : null), t[2]));
+    });
+    var names = tabs.map(function (t) { return t[0]; });
+    showTab(focusProject ? names.indexOf('Commands run on') : Math.max(0, names.indexOf(localStorage.getItem('sw-pc-tab') || '')));
+    kids(body, [h('div', { class: 'set-tabs' }, rail, panes)]);
 
     function render() { renderThis(); renderDevs(); renderBuilds(); renderRules(); renderRecent(); renderAccess(); }
 
@@ -294,19 +306,19 @@
       var projs = Object.keys((devs && devs.builds) || {}).sort();
       var all = h('input', { type: 'checkbox', checked: !(c.projects || []).length });
       var boxes = projs.map(function (n) { return { n: n, el: h('input', { type: 'checkbox', checked: (c.projects || []).indexOf(n) >= 0 }) }; });
-      var plist = h('div', { class: 'pc-projs' + (all.checked ? ' hidden' : '') }, boxes.map(function (b) { return h('label', { class: 'check' }, b.el, h('span', null, b.n)); }));
+      var plist = h('div', { class: 'pc-projs' + (all.checked ? ' hidden' : '') }, boxes.map(function (b) { return h('label', { class: 'pc-proj' }, b.el, h('span', null, b.n)); }));
       all.addEventListener('change', function () { plist.classList.toggle('hidden', all.checked); });
       var always = c.always || {};
       var rem = [];
       Object.keys(always).forEach(function (p) { always[p].forEach(function (cmd) { rem.push({ p: p, cmd: cmd }); }); });
       var remBox = h('div', { class: 'pc-rems' }, rem.length ? rem.map(function (r) {
-        return h('div', { class: 'pc-rem' }, h('span', { class: 'muted' }, r.p), h('code', null, r.cmd),
+        return h('div', { class: 'pc-rem' }, h('span', { class: 'pc-tag' }, r.p), h('code', null, r.cmd),
           h('button', { class: 'icon-btn', title: 'Forget', onclick: function () {
             var a = JSON.parse(JSON.stringify(always));
             a[r.p] = a[r.p].filter(function (x) { return x !== r.cmd; });
             save({ always: a }).then(load);
           } }, '✕'));
-      }) : h('div', { class: 'muted' }, 'None yet — “Always allow this” in a question adds one.'));
+      }) : h('div', { class: 'pc-empty' }, 'None yet — “Always allow this” in a question adds one.'));
       kids(ruleBox, [
         h('div', { class: 'field' }, h('label', null, 'When Claude wants to run a command here'), modeBox),
         h('div', { class: 'field' }, h('label', null, 'Output'), out),
@@ -315,9 +327,10 @@
         h('div', { class: 'pc-grid' },
           h('div', { class: 'field' }, h('label', null, 'Always allowed — one per line, * = anything'), allow),
           h('div', { class: 'field' }, h('label', null, 'Never allowed — wins over everything'), deny)),
-        h('div', { class: 'field' }, h('label', null, 'Projects that may run here'), h('label', { class: 'check' }, all, h('span', null, 'All projects')), plist),
+        h('div', { class: 'field' }, h('label', null, 'Projects that may run here'),
+          h('div', { class: 'pc-box' }, h('label', { class: 'check pc-all' }, all, h('span', null, 'All projects', h('small', null, 'Untick to choose them one by one.'))), plist)),
         h('div', { class: 'field' }, h('label', null, 'Remembered commands'), remBox),
-        h('div', { class: 'pc-actions' },
+        h('div', { class: 'pc-actions pc-save' },
           h('span', { class: 'muted' }, 'A question waits 2 minutes, then the command is not run.'),
           h('button', { class: 'btn primary', onclick: function () {
             save({ mode: mode.value, output: out.value, autoOpen: autoOpen.checked, allow: lines(allow.value), deny: lines(deny.value),
@@ -617,6 +630,9 @@
       decorate();
       guestAsks(x.guests || [], function (id, ans) { return api('POST', 'pc/guest', { id: id, answer: ans }); });
       devServers(x.bg || []);
+      var bk = JSON.stringify((x.bg || []).map(function (b) { return [b.name, b.state, b.urls || b.url, b.start]; }));
+      S.localBg = x.bg || [];
+      if (bk !== localKey) { localKey = bk; if (SW.renderProjects) SW.renderProjects(); }
       devUp(x.bg || [], x.autoOpen);
       linkWatch(x.link);
     }).catch(function () {});
@@ -758,7 +774,7 @@
     if (!S.web) return Promise.resolve();
     return api('GET', 'pc/remote-asks').then(function (x) {
       var now = x.now || Date.now() / 1000, openIds = {};
-      var key = JSON.stringify([x.online, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev]; })]);
+      var key = JSON.stringify([x.online, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev, b.urls || b.url]; })]);
       S.remoteOnline = x.online || 0;
       S.remoteBg = x.bg || [];
       S.pcUnlocked = x.unlocked || {};
@@ -781,7 +797,63 @@
         SW.openModal({ title: d.name + ' · ' + d.state + (d.url ? ' · ' + d.url : ''), size: 'wide', body: h('pre', { class: 'pc-out' }, d.out || '(no output yet)') });
       }).catch(fail);
     } };
-  var dismissed = {};
+  var dismissed = {}, localKey = '';
+  // ---- the sidebar: every dev server of a project with its ports, ▤ live output, ■ stop
+  function portOf(u) { var m = /:\/\/[^/]*:(\d+)/.exec(u || ''); return m ? m[1] : /^https/.test(u || '') ? '443' : '80'; }
+  function devLog(x) {
+    if (S.web) return remoteLog(x.dev, x.name, x.name, x.devName);
+    var pre = h('pre', { class: 'pc-out', style: 'min-height:200px' }, 'loading…');
+    var head = h('span', { class: 'muted' });
+    var stop = h('button', { class: 'btn danger', onclick: function () {
+      api('POST', 'pc/bgstop', { name: x.name }).then(function () { toast(x.name + ' stopped', 'ok'); load(); poll(); }).catch(fail);
+    } }, '■ Stop');
+    var md = SW.openModal({ title: '▶ ' + x.name + ' · ' + x.project, size: 'wide', body: h('div', { class: 'rr' }, h('code', null, x.cmd || ''), head, pre),
+      foot: [stop, h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+    function load() {
+      return api('GET', 'pc/bglog/' + encodeURIComponent(x.name)).then(function (d) {
+        head.textContent = d.state === 'running' ? 'running' + (d.url ? ' · ' + d.url : '') : d.state;
+        stop.disabled = d.state !== 'running';
+        var bottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+        pre.textContent = d.out || '(no output yet)';
+        if (bottom) pre.scrollTop = pre.scrollHeight;
+      }).catch(function (e) { head.textContent = e.message || String(e); });
+    }
+    var t = setInterval(load, 1500);
+    md.onclose = function () { clearInterval(t); };
+    load();
+    return md;
+  }
+  function devStop(x) {
+    if (x.state !== 'running') { dismissed[x.name + x.start] = 1; localKey = remoteKey = ''; if (SW.renderProjects) SW.renderProjects(); return; }
+    var go = S.web ? ensureUnlock().then(function (ok) { return ok && api('POST', 'pc/remote-stop', { dev: x.dev, name: x.name }); })
+      : api('POST', 'pc/bgstop', { name: x.name });
+    go.then(function (r) { if (r) toast(x.name + ' stopped', 'ok'); return S.web ? webPoll() : poll(); }).catch(fail);
+  }
+  function devLines(p) {
+    var cmdIds = {};
+    if (S.web) (p.commands || []).forEach(function (c) { cmdIds['run-' + c.id] = 1; });     // shown as their run command
+    return ((S.web ? S.remoteBg : S.localBg) || []).filter(function (x) {
+      return x.project === p.name && !cmdIds[x.name] && (x.state === 'running' || (x.state === 'exited' && !dismissed[x.name + x.start]));
+    }).map(function (x) {
+      var on = x.state === 'running', urls = x.urls && x.urls.length ? x.urls : x.url ? [x.url] : [];
+      var ports = urls.map(function (u) {
+        return S.web ? h('span', { class: 'dev-port', title: u + ' on ' + (x.devName || 'your computer') }, ':' + portOf(u))
+          : h('a', { class: 'dev-port', href: u, target: '_blank', rel: 'noopener', title: 'Open ' + u, onclick: function (e) { e.stopPropagation(); } }, ':' + portOf(u));
+      });
+      return h('div', { class: 'cmd dev-line' + (on ? ' running' : ' ended'), title: x.cmd + (x.devName ? '\non ' + x.devName : '') + '\nclick: live output',
+        onclick: function () { devLog(x); } },
+        h('span', { class: 'ic dev-dot' + (on ? ' on' : '') }, '●'), h('span', { class: 'nm' }, x.name),
+        on ? (ports.length ? ports : h('span', { class: 'tag' }, 'no port yet')) : h('span', { class: 'res err', title: 'stopped by itself' }, '✗' + (x.code != null ? x.code : '')),
+        h('button', { class: 'icon-btn dev-stop', title: on ? 'Stop ' + x.name : 'Hide', onclick: function (e) { e.stopPropagation(); devStop(x); } }, on ? '■' : '✕'));
+    });
+  }
+  function devBadge(p) {
+    var on = ((S.web ? S.remoteBg : S.localBg) || []).filter(function (x) { return x.project === p.name && x.state === 'running'; });
+    if (!on.length) return null;
+    var ports = [];
+    on.forEach(function (x) { (x.urls && x.urls.length ? x.urls : x.url ? [x.url] : []).forEach(function (u) { ports.push(':' + portOf(u)); }); });
+    return h('span', { class: 'gb dev', title: on.length + ' running: ' + on.map(function (x) { return x.name; }).join(', ') + (ports.length ? ' · ' + ports.join(' ') : '') }, '● ' + (ports.length ? ports.join(' ') : on.length));
+  }
   function devServers(list) {
     DEV_ACT.stop = function (x) {
       if (x.state !== 'running') { dismissed[x.name + x.start] = 1; devServers(list); return; }
@@ -850,6 +922,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, devLines: devLines, devBadge: devBadge, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

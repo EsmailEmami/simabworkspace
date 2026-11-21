@@ -301,6 +301,87 @@
       h('div', { class: 'svc' }, h('span', null, 'Two-step sign-in', h('br'), h('small', { class: 'muted' }, 'A code from an authenticator app too — '), totpState), totpBtn),
       h('div', { class: 'svc' }, h('span', null, 'Signed-in devices'), othersBtn), devList);
   }
+  // ---- Share on your domain in the sidebar: each link of a project on the internet, who uses it,
+  // who asks (Ask me); a click opens shareDialog. S.share = GET share (+ live), S.shareSt = GET share/status.
+  var SHARE_WHO = { private: 'only you', ask: 'asks you', public: 'anyone' };
+  var SHARE_DOT = { on: ['on', 'Open now'], 'port-off': ['warn', 'Your computer is connected, but nothing runs on this port'], 'pc-off': ['off', 'Your computer is not connected'] };
+  function shareKey(x) { return x.slug + '/' + x.name; }
+  function shareLive(x, what) {
+    var l = (S.share && S.share.live) || {};
+    return (l[what] || []).filter(function (a) { return a.t === shareKey(x); });
+  }
+  function loadShare(status) {
+    api('GET', 'share').then(function (d) { S.share = d; renderProjects(); }).catch(function () {});
+    if (status) api('GET', 'share/status').then(function (d) { S.shareSt = d.status || {}; renderProjects(); }).catch(function () {});
+  }
+  var shareTick = 0;
+  setTimeout(function () { loadShare(true); }, 2500);
+  setInterval(function () { if (!document.hidden) loadShare(++shareTick % 2 === 0); }, 30000);
+  function shareLines(p) {
+    if (!S.share || !S.share.shares) return [];
+    return S.share.shares.filter(function (x) { return x.project === p.name; }).map(function (x) {
+      var st = SHARE_DOT[(S.shareSt || {})[shareKey(x)]] || ['off', 'Checking…'];
+      var online = shareLive(x, 'active').length, asks = shareLive(x, 'asks').length;
+      return h('div', { class: 'cmd share-line', title: (x.urls[0] || '') + '\n→ ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port + ' on your computer\n' + st[1] + '\nclick: manage',
+        onclick: function () { shareDialog(x); } },
+        h('span', { class: 'ic share-dot ' + st[0] }, '●'), h('span', { class: 'nm' }, '⇡ ' + x.name + ' → :' + x.port),
+        asks ? h('span', { class: 'share-ask', title: asks + ' waiting for your answer' }, asks + ' ?') : null,
+        online ? h('span', { class: 'tag', title: online + ' using it now' }, online + ' online') : null,
+        h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''));
+    });
+  }
+  function shareDialog(x) {
+    var box = h('div', { class: 'share-dlg' });
+    var md = openModal({ title: x.project + ' · ' + x.name + ' on the internet', body: box,
+      foot: [h('button', { class: 'btn danger', onclick: function () {
+        confirmDlg('Stop sharing ' + x.name + '?').then(function (ok) {
+          if (!ok) return;
+          api('POST', 'share/port', { slug: x.slug, name: x.name, on: false }).then(function () { md.close(); loadShare(); }).catch(fail);
+        });
+      } }, 'Stop sharing'), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+    var url = x.urls[0] || '';
+    function ago(t) { var m = Math.round((Date.now() / 1000 - t) / 60); return m < 1 ? 'now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago'; }
+    function answer(a, ans) {
+      var p = S.web ? api('POST', 'account/share/answer', { id: a.id, answer: ans }) : api('POST', 'pc/guest', { id: a.id, answer: ans });
+      p.then(function () { toast(ans === 'deny' ? 'Not let in' : 'Let in', 'ok'); loadShare(); setTimeout(draw, 600); }).catch(fail);
+    }
+    function draw() {
+      var cur = ((S.share && S.share.shares) || []).filter(function (y) { return shareKey(y) === shareKey(x); })[0] || x;
+      var st = SHARE_DOT[(S.shareSt || {})[shareKey(x)]] || ['off', 'Checking…'];
+      var who = h('select', { class: 'inp share-who' }, [['private', 'Only me'], ['ask', 'Ask me'], ['public', 'Anyone']].map(function (a) { return h('option', { value: a[0] }, a[1]); }));
+      who.value = cur.access;
+      who.onchange = function () { api('POST', 'share/port', Object.assign({}, cur, { access: who.value, on: true })).then(function () { loadShare(); toast('Saved', 'ok'); }).catch(fail); };
+      var asks = shareLive(x, 'asks'), online = shareLive(x, 'active'), guests = shareLive(x, 'guests');
+      box.replaceChildren(
+        h('div', { class: 'svc' }, h('span', { class: 'grow' }, url ? h('a', { class: 'mono', href: url, target: '_blank', rel: 'noopener' }, url) : h('span', { class: 'muted' }, 'No link yet (the web version has not said its apps address)'),
+          h('br'), h('small', { class: 'muted' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' on your computer · ', h('span', { class: 'share-dot ' + st[0] }, '● '), st[1])),
+          url ? h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy') : null),
+        h('div', { class: 'svc' }, h('span', null, 'Who can open it'), who),
+        h('div', { class: 'sec' }, 'Asking now (' + asks.length + ')'),
+        asks.length ? h('div', { class: 'devices' }, asks.map(function (a) {
+          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, a.label, h('br'), h('small', { class: 'muted mono' }, a.ip + ' · ' + ago(a.at))),
+            h('button', { class: 'btn sm', onclick: function () { answer(a, 'deny'); } }, 'Deny'),
+            h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'hour'); } }, '1 hour'),
+            h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'day'); } }, '24 hours'),
+            h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'always'); } }, 'Always'));
+        })) : h('div', { class: 'muted' }, h('small', null, cur.access === 'ask' ? 'Nobody is waiting.' : 'Only with “Ask me”: people without your sign-in ask here.')),
+        h('div', { class: 'sec' }, 'Online now (' + online.length + ')'),
+        online.length ? h('div', { class: 'devices' }, online.map(function (a) {
+          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, a.label + ' · ' + ({ you: 'you', guest: 'let in by you', anyone: 'public link' }[a.who] || a.who),
+            h('br'), h('small', { class: 'muted mono' }, a.ip + ' · since ' + ago(a.since) + ' · last ' + ago(a.last))));
+        })) : h('div', { class: 'muted' }, h('small', null, 'Nobody used it in the last 5 minutes.')),
+        h('div', { class: 'sec' }, 'Let in (' + guests.length + ')'),
+        guests.length ? h('div', { class: 'devices' }, guests.map(function (g) {
+          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, g.label, h('br'),
+            h('small', { class: 'muted mono' }, g.ip + ' · ' + (g.exp ? 'until ' + new Date(g.exp * 1000).toLocaleString() : 'until you revoke it'))),
+            h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/revoke', { id: g.id }).then(function () { toast(S.web ? 'Revoked' : 'Revoked — takes effect within 30 s', 'ok'); loadShare(); setTimeout(draw, 600); }).catch(fail); } }, 'Revoke'));
+        })) : h('div', { class: 'muted' }, h('small', null, 'Nobody.')));
+    }
+    draw();
+    loadShare(true);
+    var t = setInterval(function () { if (!document.body.contains(box)) { clearInterval(t); return; } loadShare(); setTimeout(draw, 800); }, 5000);
+  }
+
   // ---- Settings in tabs: every "sec" heading starts a tab (a rail on the left, a row on a phone)
   function settingsTabs(nodes) {
     var groups = [];
@@ -3298,7 +3379,7 @@
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
       localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
       el.classList.toggle('open');
-    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name', dir: 'auto' }, pTitle(p), branchLabel(p)), runningBadge(p), window.SWComputers ? window.SWComputers.badge(p) : null, open ? null : gitBadges(p.name, true),
+    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name', dir: 'auto' }, pTitle(p), branchLabel(p)), runningBadge(p), window.SWComputers ? window.SWComputers.badge(p) : null, open || !window.SWComputers ? null : window.SWComputers.devBadge(p), open ? null : gitBadges(p.name, true),
       sync && sync.conflicts ? h('span', { class: 'gb conflict', title: plural(sync.conflicts, 'sync conflict') + ' — click to resolve', onclick: function (e) { e.stopPropagation(); syncDetails(p); } }, '⇅' + sync.conflicts) : null,
       S.docker[p.name] && S.docker[p.name].bad ? h('span', { class: 'gb conflict', title: plural(S.docker[p.name].bad, 'container') + ' with problems — click', onclick: function (e) { e.stopPropagation(); dockerDialog(p); } }, '▣' + S.docker[p.name].bad) : null,
       more));
@@ -3342,6 +3423,8 @@
     });
     if (!p.commands.length) body.append(h('button', { class: 'add-link', onclick: function () { editCommands(p); } }, '+ run command'));
     projectTunnels(p.name).forEach(function (t) { var tl = tunnelLine(t); if (tl) body.append(tl); });
+    shareLines(p).forEach(function (row) { body.append(row); });
+    if (window.SWComputers) window.SWComputers.devLines(p).forEach(function (row) { body.append(row); });      // dev servers + their ports
     el.append(body);
     return el;
   }

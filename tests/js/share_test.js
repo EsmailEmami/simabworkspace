@@ -49,6 +49,10 @@ async function shim() {
     } },
   };
   ctx.window = ctx;
+  const winOn = {};
+  ctx.addEventListener = (k, f) => { winOn[k] = f; };
+  const beacons = [];
+  ctx.navigator.sendBeacon = (u, b) => { beacons.push([u, JSON.parse(b)]); return true; };
   ctx.localStorage.setItem('u/mmd/front:k', 'other');
   vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'gui/static/share-shim.js'), 'utf8'), ctx);
 
@@ -83,6 +87,13 @@ async function shim() {
   let said = null;
   listeners.message({ data: { simabWho: 1 }, ports: [{ postMessage: (m) => { said = m; } }] });
   assert.strictEqual(said, 'u/esi/front');
+  // its script errors go to the owner's server log, 20 at most
+  winOn.error({ message: 'boom', filename: ORIGIN + '/main.js', lineno: 3 });
+  assert.strictEqual(beacons[0][0], '/__simab/log');
+  assert.strictEqual(beacons[0][1].msg, 'boom @ /main.js:3');
+  assert.strictEqual(beacons[0][1].t, 'u/esi/front');
+  for (let i = 0; i < 30; i++) winOn.unhandledrejection({ reason: new Error('x' + i) });
+  assert.strictEqual(beacons.length, 20);
   // the page's own service worker does not push ours out
   assert.strictEqual(await ctx.navigator.serviceWorker.register('/sw.js'), 'ours');
 }

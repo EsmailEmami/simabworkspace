@@ -185,6 +185,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/remote-stop') { fakePc.remoteStopped = body; res = { ok: true }; }
   else if (url === '/api/pc/pair') res = { code: 'C0de_' + 'x'.repeat(28), until: Date.now() / 1000 + 600 };
   else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
+  else if (url.startsWith('/api/pc/bglog/')) res = { name: 'web', state: 'running', url: 'http://localhost:8050', out: 'compiled' };
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
   else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
   else if (url.startsWith('/api/pc/run/')) res = { id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', out: 'building…', start: 1, code: null };
@@ -758,6 +759,31 @@ const tests = {
     assert.strictEqual(localStorage.getItem('sw-set-tab'), 'Share on your domain');
     localStorage.setItem('sw-set-tab', '');
     document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'sidebar: links of a project on the internet, who asks, who is online'() {
+    const S = global.SW.S;
+    S.share = { base: 'https://apps.x/esi', shares: [{ slug: 'cheshmeh', name: 'panel', project: 'cheshmeh', port: 6001, access: 'ask', tls: false,
+      urls: ['https://apps.x/esi/cheshmeh/panel'] }],
+      live: { asks: [{ id: 'aaaaaaaaaaaa', t: 'cheshmeh/panel', label: 'Chrome on Android', ip: '1.2.3.4', at: Date.now() / 1000 }],
+        active: [{ t: 'cheshmeh/panel', label: 'Chrome on Windows', ip: '5.6.7.8', who: 'you', since: Date.now() / 1000, last: Date.now() / 1000 }],
+        guests: [{ id: '0123456789abcdef', t: 'cheshmeh/panel', label: 'Safari on iPhone', ip: '9.9.9.9', exp: 0 }] } };
+    S.shareSt = { 'cheshmeh/panel': 'on' };
+    global.SW.renderProjects();
+    const line = q('.share-line')[0];
+    assert.ok(line, 'shown under the project');
+    assert.ok(line.textContent.includes('panel → :6001') && line.textContent.includes('1 ?') && line.textContent.includes('1 online'), line.textContent);
+    line.click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.ok(modal.textContent.includes('Asking now (1)') && modal.textContent.includes('Online now (1)') && modal.textContent.includes('Let in (1)'));
+    q('button', modal).find((b) => b.textContent === '1 hour').click();
+    q('button', modal).find((b) => b.textContent === 'Revoke').click();
+    await settle();
+    assert.ok(calls.some((c) => c.url === '/api/pc/guest' && c.body.answer === 'hour' && c.body.id === 'aaaaaaaaaaaa'), 'the app answers on this computer');
+    assert.ok(calls.some((c) => c.url === '/api/share/revoke' && c.body.id === '0123456789abcdef'));
+    q('button', modal).find((b) => b.textContent === 'Close').click();
+    S.share = null;
   },
 
   async 'settings: a sound or a voice per chat state, kept on this device'() {
@@ -1730,7 +1756,25 @@ const tests = {
     assert.strictEqual(chips.length, 1, 'only this project\'s');
     assert.match(chips[0].textContent, /web:8050/);
     assert.strictEqual(q('a', chips[0])[0].getAttribute('href'), 'http://localhost:8050');
-    q('button', chips[0])[0].click(); await settle();
+    // …and in the sidebar under its project: every port, live output, ■ stop
+    fakePc.asks.bg[0].urls = ['http://localhost:8050', 'http://localhost:9090/api'];
+    await global.SWComputers.poll(); await settle();
+    const proj = q('.proj').find((e) => e.dataset.proj === 'cheshmeh');
+    const line = q('.dev-line', proj);
+    assert.strictEqual(line.length, 1, "only this project's");
+    assert.deepStrictEqual(q('.dev-port', line[0]).map((a) => a.textContent), [':8050', ':9090']);
+    assert.strictEqual(q('.dev-port', line[0])[1].getAttribute('href'), 'http://localhost:9090/api');
+    assert.strictEqual(q('.dev-line', q('.proj').find((e) => e.dataset.proj === 'shop')).length, 1);
+    line[0].click(); await settle();
+    const logMd = q('.modal').find((m) => /▶ web · cheshmeh/.test(m.textContent));
+    assert.ok(logMd, 'live output');
+    assert.match(logMd.textContent, /ng serve/);
+    logMd.onclose && logMd.onclose();
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.dev-stop', line[0])[0].click(); await settle();
+    assert.strictEqual(fakePc.stopped, 'web');
+    fakePc.stopped = null;
+    q('button', q('.pc-dev-chip', chat.devsEl)[0])[0].click(); await settle();
     assert.strictEqual(fakePc.stopped, 'web');
     // a new dev server got its address: offered once (or opened by itself with the setting)
     fakePc.asks = Object.assign({}, fakePc.asks, { bg: [{ name: 'api', project: 'cheshmeh', cmd: 'go run .', url: 'http://localhost:5010', state: 'running', start: 7 }] });
@@ -1977,6 +2021,29 @@ const tests = {
     S.pc = { on: false };
   },
 
+  async 'Computers: in tabs like Settings, the chosen tab is remembered, a project opens on Commands run on'() {
+    global.SW.S.web = false;
+    document.body.querySelector('#modal-root').replaceChildren();
+    let dlg = global.SWComputers.open(); await settle();
+    let md = q('.modal').pop();
+    const tabs = q('.set-tab', md).map((b) => b.textContent);
+    assert.deepStrictEqual(tabs, ['This computer', 'Your computers', 'Commands run on', 'Permission', 'Phone access', 'Recent commands']);
+    assert.strictEqual(q('.pc-card', md).length, 0);
+    q('.set-tab', md)[3].click();
+    const vis = q('.set-group', md).filter((g) => !g.classList.contains('hidden'));
+    assert.strictEqual(vis.length, 1);
+    assert.match(vis[0].textContent, /Projects that may run here/);
+    dlg.close();
+    dlg = global.SWComputers.open(); await settle();
+    md = q('.modal').pop();
+    assert.strictEqual(q('.set-tab.active', md)[0].textContent, 'Permission');
+    dlg.close();
+    dlg = global.SWComputers.open('cheshmeh'); await settle();
+    md = q('.modal').pop();
+    assert.strictEqual(q('.set-tab.active', md)[0].textContent, 'Commands run on');
+    localStorage.setItem('sw-pc-tab', '');
+    dlg.close();
+  },
   async 'Computers: Phone access shows who is in from the phone, with Disconnect and the log'() {
     global.SW.S.web = false;
     const now = Date.now() / 1000;
@@ -1987,8 +2054,8 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
     global.SWComputers.open(); await settle();
     const md = q('.modal').pop();
-    const sec = q('.pc-card', md).find((x) => /Phone access/.test(x.textContent));
-    assert.ok(sec, 'its own card on this computer');
+    const sec = q('.set-group', md).find((x) => /Phone access/.test(x.textContent));
+    assert.ok(sec, 'its own tab on this computer');
     assert.match(sec.textContent, /Chrome on Android/);
     assert.match(sec.textContent, /terminal in cheshmeh/);
     assert.match(sec.textContent, /Remote activity \(1\)/);

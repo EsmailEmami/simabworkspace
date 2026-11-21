@@ -764,7 +764,8 @@
       h('div', { class: 'modal-body' }, opts.body),
       opts.foot ? h('div', { class: 'modal-foot' }, opts.foot) : null);
     overlay.append(modal);
-    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+    // a question (opts.sticky) closes only by its answer: a touch beside it must not lose it
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay && !opts.sticky) close(); });
     $('#modal-root').append(overlay);
     var rec = { close: close, onclose: opts.onclose };
     modalStack.push(rec);

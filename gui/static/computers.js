@@ -454,7 +454,7 @@
       close();
     }
     function close() { if (shown[a.id]) { shown[a.id].close(); delete shown[a.id]; } }
-    var md = SW.openModal({ title: 'Run on this computer?', size: 'sm', body: h('div', { class: 'pc-ask' },
+    var md = SW.openModal({ sticky: true,  title: 'Run on this computer?', size: 'sm', body: h('div', { class: 'pc-ask' },
       h('div', { class: 'muted' }, 'Claude (project ', h('b', null, a.project), ') wants to run:'),
       h('pre', { class: 'pc-cmd' }, a.cmd), left),
       foot: [h('button', { class: 'btn danger', onclick: function () { answer('deny'); } }, 'Deny'),
@@ -520,7 +520,7 @@
       if (a.session || (SW.wid && SW.wid()) || toasted[a.id]) return;      // the chat is in another window / already said
       toasted[a.id] = 1;
       toast('Claude (' + a.project + ', a chat not open here) wants to run: ' + a.cmd + ' — click to answer', 'warn',
-        { onclick: function () { if (shown[a.id] || !toasted[a.id]) return; askModal(a); } });
+        { sticky: true, onclick: function () { if (shown[a.id] || !toasted[a.id]) return; askModal(a); } });
       return;
     }
     var views = [];
@@ -646,7 +646,7 @@
       open[g.id] = 1;
       if (guestShown[g.id]) return;
       var text = g.text || ('Someone wants to open ' + g.t + ' — ' + g.label + ' · ' + g.ip);
-      var md = SW.openModal({ title: 'Someone wants to open your link', size: 'sm', body: [h('p', null, text),
+      var md = SW.openModal({ title: 'Someone wants to open your link', size: 'sm', sticky: true, body: [h('p', null, text),
         h('p', { class: 'muted' }, h('small', null, 'Not allowed if nobody answers in 5 minutes.'))],
         foot: GUEST.map(function (b) {
           return h('button', { class: 'btn' + (b[0] === 'deny' ? '' : ' primary'), onclick: function () {

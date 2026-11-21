@@ -41,7 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
-#    1.64.1 2026-11-21  Share: a new tab an app opens itself (after its login) stays on the project; the link window redesigned
+#    1.64.1 2026-11-21  Share: new tabs stay on the project, link window redesigned, Revoke works at once (also on the computer); question windows close only by their answer
 #    1.64.0 2026-11-21  Share: one apps address (web --share-domain) https://APPS/<user>/<project>/<name>; shared links + dev servers in the sidebar; Computers in tabs
 #    1.63.2 2026-11-21  Settings in tabs (one per section); dev servers show every port they serve; QR code in the authenticator setup dialogs
 #    1.63.1 2026-11-21  Share on your domain in the app too (Settings), same list as the web (share.json on the server), live state per link; one answer per port is enough

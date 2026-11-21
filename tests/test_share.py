@@ -458,7 +458,20 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.status, 401, "only that link")
         st = self.hub.api(self.wsid, "GET", "", {}, MAIN)
         self.assertEqual([(g["t"], g["exp"] > time.time()) for g in st["guests"]], [("esi/front", True)])
-        self.hub.api(self.wsid, "POST", "/revoke", {"id": st["guests"][0]["id"]}, MAIN)
+        gid = st["guests"][0]["id"]
+        self.assertEqual([x["who"] for x in self.hub.live(self.wsid)["active"]], ["guest"])
+        self.pc.pc.share_revoke(gid)                                       # revoked in the app: the computer refuses at once
+        r, d = self.req("GET", "/__simab/p/esi/esi/front/assets/a.js", dict(self.SW, Cookie=c))
+        self.assertEqual((r.status, d), (502, b"your access to this link was taken back"))
+        self.assertIn(gid, self.pc.pc.cfg()["shareRevoked"])
+        self.pc.pc.cfg()
+        self.store.db.put("pc", dict(self.pc.pc.cfg(), shareRevoked=[]))
+        held = socket.socket()
+        self.hub.conns = {gid: {held}}
+        self.hub.api(self.wsid, "POST", "/revoke", {"id": gid}, MAIN)
+        self.assertEqual(self.hub.live(self.wsid)["active"], [], "no longer online")
+        self.assertNotIn(gid, self.hub.conns, "its open connections closed")
+        held.close()
         r, d = self.req("GET", "/__simab/p/esi/esi/front/assets/a.js", dict(self.NAV, Cookie=c))
         self.assertIn(b"Asking the owner", d, "revoked: asks again")
 

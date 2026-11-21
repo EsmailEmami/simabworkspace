@@ -787,6 +787,12 @@ const tests = {
     assert.ok(calls.some((c) => c.url === '/api/share/revoke' && c.body.id === '0123456789abcdef'));
     q('button', modal).find((b) => b.textContent === 'Close').click();
     S.share = null;
+    // a question window is closed only by its answer, not by a touch beside it
+    const md = global.SW.openModal({ title: 'Q', sticky: true, body: [] });
+    const ov = q('.overlay').pop();
+    ov.dispatch('mousedown', { target: ov });
+    assert.ok(q('.overlay').includes(ov), 'still open');
+    md.close();
   },
 
   async 'settings: a sound or a voice per chat state, kept on this device'() {

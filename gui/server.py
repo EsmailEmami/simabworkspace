@@ -5446,6 +5446,7 @@ PC_ANSWERS = ("once", "always", "hour", "deny")
 PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "allow": [],
               "deny": ["sudo *", "git push*", "rm -rf /*", "rm -rf ~*"], "projects": [], "always": {},
               "output": "chat", "autoOpen": False,
+              "shareRevoked": [],     # Share on your domain: guests taken back on this computer (refused here)
               "trusted": None,        # projects whose hooked commands follow the chat: set HERE only (None = not yet taken over)
               "mfa": "", "mfaOn": False, "mfaStep": 0}   # this computer's own two-step key: the phone unlocks it
 PC_UNLOCK_TTL = 3600     # an MFA unlock from the phone / web: terminal, run commands, answers — no limits for 1 h
@@ -6851,6 +6852,21 @@ class PcHub:
                 g["_ev"].set()
         return {"ok": True}
 
+    def share_revoke(self, gid: str):
+        """Revoke from this computer's app: refused here at once, its open connections closed."""
+        if not re.fullmatch(r"[0-9a-f]{16}", gid or ""):
+            raise ApiError(400, "bad request")
+        with self.lock:
+            c = self.cfg()
+            c["shareRevoked"] = ([g for g in (c.get("shareRevoked") or []) if g != gid] + [gid])[-500:]
+            self.app.store.db.put("pc", c)
+            conns = list(self.__dict__.setdefault("share_conns", {}).pop(gid, set()))
+        for x in conns:
+            try:
+                x.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     def serve_proxy(self, h):
         """POST /pc/proxy {port} from the web version (Share on your domain): after the "200", the bytes of
         one connection to port PORT of this computer (127.0.0.1, else ::1) go both ways."""
@@ -6867,6 +6883,9 @@ class PcHub:
         project = b.get("project") if isinstance(b.get("project"), str) else ""
         if not 1 <= port <= 65535 or port == self.app.port or not project:
             return h._json(400, {"error": "bad port"})
+        guest = b.get("guest") if isinstance(b.get("guest"), str) and re.fullmatch(r"[0-9a-f]{16}", b.get("guest") or "") else ""
+        if guest and guest in (c.get("shareRevoked") or []):          # taken back here: refused even if the web still lets it in
+            return h._json(403, {"error": "your access to this link was taken back"})
         if not self.share_allowed(project, port):
             return h._json(403, {"error": f"port {port} was not allowed on {c['name'] or 'your computer'}"})
         up = None
@@ -6890,7 +6909,15 @@ class PcHub:
         h.end_headers()
         h.wfile.flush()
         h.close_connection = True
-        share_pipe(h.rfile, h.connection, up)
+        if guest:
+            with self.lock:
+                self.__dict__.setdefault("share_conns", {}).setdefault(guest, set()).update({h.connection, up})
+        try:
+            share_pipe(h.rfile, h.connection, up)
+        finally:
+            if guest:
+                with self.lock:
+                    self.__dict__.setdefault("share_conns", {}).get(guest, set()).difference_update({h.connection, up})
 
     def serve_term(self, h):
         """POST /pc/term {project, cols, rows} from onpc --term: a shell here in that project's folder."""
@@ -8349,7 +8376,8 @@ class App:
             if rv:
                 rv(gid)
                 data = self.share_data()
-            else:                                           # the app: the web version does it within 30 s
+            else:                                           # the app: this computer at once, the web version within 30 s
+                self.pc.share_revoke(gid)
                 data = self.share_data()
                 data["revoke"] = sorted(set(data.get("revoke") or []) | {gid})
                 data = self.share_save(data)
@@ -11275,17 +11303,18 @@ class ShareHub:
         return bool(r) and r[0][0] == ws and r[0][1] == domain and r[0][2] > time.time()
 
     # "Ask me": someone without a sign-in asks, the owner allows from the phone / computer ----------------
-    def guest_ok(self, h, ws: str, sh: dict) -> bool:
+    def guest_ok(self, h, ws: str, sh: dict) -> str:
+        """→ the guest's id (hash[:16]) when this browser was let in to this link, else ""."""
         tok = self._cookie(h, f"__simab_g.{sh['user']}.{sh['slug']}.{sh['name']}")
         if not tok or len(tok) > 200:
-            return False
+            return ""
         hh = hashlib.sha256(tok.encode()).hexdigest()
         r = self.db.rows("SELECT ws, slug, name, exp, last FROM web_share_guests WHERE hash = ?", (hh,))
         if not r or r[0][:3] != (ws, sh["slug"], sh["name"]) or (r[0][3] and r[0][3] < time.time()):
-            return False
+            return ""
         if time.time() - r[0][4] > 60:
             self.db.run("UPDATE web_share_guests SET last = ? WHERE hash = ?", (time.time(), hh))
-        return True
+        return hh[:16]
 
     def open_asks(self, ws: str) -> list:
         now = time.time()
@@ -11501,14 +11530,14 @@ class ShareHub:
             time.sleep(60)
             self.reap()
 
-    def dial(self, ws: str, app, share: dict):
+    def dial(self, ws: str, app, share: dict, guest: str = ""):
         """→ (socket to the port of the computer, link) after the computer said yes."""
         ln = self.link(ws, app, self.device(app, share["project"]))
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(PC_ASK_WAIT + 15)       # the first time, the computer asks its user
         try:
             s.connect(ln["sock"])
-            body = json.dumps({"port": share["port"], "project": share["project"]}).encode()
+            body = json.dumps({"port": share["port"], "project": share["project"], "guest": guest}).encode()
             s.sendall(("POST /pc/proxy HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
                        "Content-Length: %d\r\n\r\n" % (ln["port"], ln["secret"], len(body))).encode() + body)
             head = b""
@@ -11656,13 +11685,16 @@ class ShareHub:
         """"" (not allowed) | you (signed in) | guest (let in with Ask me) | anyone (public link)"""
         if self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain):
             return "you"
-        if sh.get("ask") and self.guest_ok(h, ws, sh):
+        gid = self.guest_ok(h, ws, sh) if sh.get("ask") else ""
+        if gid:
+            h.share_gid = gid
             return "guest"
         return "anyone" if sh["public"] else ""
 
     def saw(self, h, ws: str, sh: dict, who: str):
         """Who opens this link now (Settings / sidebar: "online")."""
-        key = (ws, sh["slug"], sh["name"], h._client_ip(), ua_label(h.headers.get("User-Agent") or ""), who)
+        key = (ws, sh["slug"], sh["name"], h._client_ip(), ua_label(h.headers.get("User-Agent") or ""), who,
+               getattr(h, "share_gid", "") if who == "guest" else "")
         now = time.time()
         with self.lock:
             seen = self.__dict__.setdefault("seen", {})
@@ -11682,8 +11714,20 @@ class ShareHub:
         return {"asks": self.open_asks(ws), "guests": self.state(ws)["guests"], "active": active, "at": now}
 
     def revoke(self, ws: str, gid: str):
-        if re.fullmatch(r"[0-9a-f]{16}", gid or ""):
-            self.db.run("DELETE FROM web_share_guests WHERE ws = ? AND substr(hash, 1, 16) = ?", (ws, gid))
+        """At once: no more requests, open connections (WebSockets…) closed, gone from "online"."""
+        if not re.fullmatch(r"[0-9a-f]{16}", gid or ""):
+            return
+        self.db.run("DELETE FROM web_share_guests WHERE ws = ? AND substr(hash, 1, 16) = ?", (ws, gid))
+        with self.lock:
+            conns = list(self.__dict__.setdefault("conns", {}).pop(gid, set()))
+            seen = self.__dict__.setdefault("seen", {})
+            for k in [k for k in seen if k[0] == ws and k[6] == gid]:
+                del seen[k]
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _signin_url(self, sd: dict, to: str) -> str:
         scheme = "https" if self.gate.secure else "http"
@@ -11750,9 +11794,12 @@ class ShareHub:
         if body or method in ("POST", "PUT", "PATCH"):
             lines.append(f"Content-Length: {len(body)}")
         lines += [f"X-Forwarded-Proto: {origin.split(':')[0]}", f"X-Forwarded-Host: {hd.get('Host') or ''}"]
-        s, ln = self.dial(ws, app, sh)
+        gid = getattr(h, "share_gid", "") if who == "guest" else ""
+        s, ln = self.dial(ws, app, sh, gid)
         with self.lock:
             ln["active"] += 1
+            if gid:                         # closed at once when revoked
+                self.__dict__.setdefault("conns", {}).setdefault(gid, set()).update({s, h.connection})
         try:
             if sh.get("tls"):                # the port speaks HTTPS (its own certificate: not checked, it is localhost)
                 import ssl
@@ -11776,6 +11823,8 @@ class ShareHub:
             with self.lock:
                 ln["active"] -= 1
                 ln["used"] = time.time()
+                if gid:
+                    self.__dict__.setdefault("conns", {}).get(gid, set()).difference_update({s, h.connection})
             try:
                 s.close()
             except OSError:

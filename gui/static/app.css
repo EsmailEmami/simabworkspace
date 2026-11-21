@@ -1222,3 +1222,9 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-live-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12px; font-family: var(--mono); }
 .pc-live-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .pc-live .pc-out { padding: 8px 10px; }
+.pc-perm { border-color: #2a4a5c; background: #0e1517; }
+.pc-perm .pc-cmd { margin: 4px 0 8px; background: var(--bg); }
+.pc-perm-ic { color: var(--accent); font-size: 14px; }
+.pc-perm .pc-left { font-size: 11px; color: var(--faint); margin-left: auto; align-self: center; }
+.seg.pc-modes { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 640px) { .seg.pc-modes { grid-template-columns: 1fr 1fr; } }

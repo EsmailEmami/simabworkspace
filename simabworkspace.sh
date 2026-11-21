@@ -41,7 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
-#    1.49.1 2026-11-21  Computers: reconnect fixed (old socket on the server), clearer dialog, sidebar mark of where a project builds
+#    1.49.1 2026-11-21  Computers: reconnect fixed, clearer dialog, sidebar mark, question in the chat, modes like Claude (same as chat, ask, ask new, auto)
 #    1.49.0 2026-11-21  Computers: builds run on your own computers (onpc), Claude stays on the server
 #    1.48.2 2026-11-21  Chat: background agents stay listed (with progress) after the turn until they finish
 #    1.48.1 2026-11-21  WSL: the window opens on the WSL address when Windows cannot reach 127.0.0.1 (VPN/firewall)

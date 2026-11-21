@@ -44,6 +44,9 @@ class Rules(unittest.TestCase):
     def test_modes(self):
         self.assertEqual(sw.pc_decide(self.cfg(mode="all"), "web", "npm test", {}, 0)[0], "allow")
         self.assertEqual(sw.pc_decide(self.cfg(mode="new"), "web", "npm test", {}, 0)[0], "ask")
+        self.assertEqual(sw.PC_DEFAULT["mode"], "chat", "like the chat by default")
+        self.assertEqual(sw.pc_decide(self.cfg(mode="chat"), "web", "npm test", {}, 0)[0], "ask", "the window decides by the chat's mode")
+        self.assertEqual(sw.pc_decide(self.cfg(mode="chat", always={"web": ["npm test"]}), "web", "npm test", {}, 0)[0], "allow")
         c = self.cfg(mode="new", allow=["npm run *", "ng build*"])
         self.assertEqual(sw.pc_decide(c, "web", "npm run lint && ng build --prod", {}, 0)[0], "allow")
         self.assertEqual(sw.pc_decide(c, "web", "npm run lint && rm x", {}, 0)[0], "ask", "every part must be allowed")

@@ -5380,10 +5380,10 @@ class Tunnel:
 # ~/.cache/simabworkspace/pc/projects.json {real server path: "computers"}; then every chat in
 # it gets PC_HINT as extra system prompt (chat_remote_script asks `onpc --hint`).
 PC_ASK_WAIT = 120
-PC_MODES = ("every", "new", "all")
+PC_MODES = ("chat", "every", "new", "all")       # chat = like the Claude chat that asks (auto → no question)
 PC_OUTPUTS = ("chat", "panel")
 PC_ANSWERS = ("once", "always", "hour", "deny")
-PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "new", "allow": [],
+PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "allow": [],
               "deny": ["sudo *", "git push*", "rm -rf /*", "rm -rf ~*"], "projects": [], "always": {},
               "output": "chat"}
 PC_ID_RE = re.compile(r"[0-9a-f]{12}")
@@ -6006,7 +6006,8 @@ class PcHub:
         with self.lock:
             asks = [{k: v for k, v in a.items() if not k.startswith("_")} for a in self.asks.values() if not a["answer"]]
         runs = [{k: v for k, v in r.items() if k != "out"} for r in list(self.runs)]
-        return {"asks": asks, "runs": runs, "now": time.time(), "output": self.cfg()["output"]}
+        c = self.cfg()
+        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"]}
 
     def run_info(self, rid: str) -> dict:
         for r in list(self.runs):

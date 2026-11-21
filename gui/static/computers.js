@@ -9,7 +9,12 @@
   var SW = window.SW, h = SW.h, api = SW.api, fail = SW.fail, toast = SW.toast, S = SW.S;
   var POLL = 2000;              // permission questions (installed app, only while connected)
   var INFO_POLL = 30000;        // computers + builds per project (sidebar badges)
-  var MODES = [['new', 'Ask for new commands'], ['every', 'Ask every time'], ['all', 'Allow all (except the deny list)']];
+  // like Claude's own permission modes (chat.js MODES); the deny list always wins
+  var MODES = [['chat', 'same as chat', 'Follows the chat that runs it: auto → runs without asking; ask, auto-edit, plan → asks'],
+    ['every', 'ask', 'Asks before every command'],
+    ['new', 'ask new', 'Asks once per command; remembered and allowed ones run'],
+    ['all', 'auto', 'Runs every command without asking']];
+  var AUTO_CHAT = { auto: 1, bypassPermissions: 1 };
   var OUTPUTS = [['chat', 'In the chat only'], ['panel', 'Also live in a box on this computer']];
   var OS = { windows: 'Windows', mac: 'Mac', linux: 'Linux', wsl: 'WSL' };
   var shown = {};               // ask id -> its modal
@@ -161,8 +166,14 @@
     function renderRules() {
       if (S.web || !me) return;
       var c = me.config;
-      var mode = h('select', { class: 'inp' }, MODES.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
-      mode.value = c.mode;
+      var mode = { value: c.mode };
+      var modeBox = h('div', { class: 'seg pc-modes' }, MODES.map(function (m) {
+        var el = h('button', { class: 'segb' + (m[0] === c.mode ? ' on' : ''), onclick: function () {
+          mode.value = m[0];
+          Array.prototype.forEach.call(modeBox.children, function (x) { x.classList.toggle('on', x === el); });
+        } }, h('b', null, m[1]), h('small', null, m[2]));
+        return el;
+      }));
       var out = h('select', { class: 'inp' }, OUTPUTS.map(function (m) { return h('option', { value: m[0] }, m[1]); }));
       out.value = c.output;
       var allow = h('textarea', { class: 'inp mono', rows: 4, placeholder: 'npm run *\nng build*' });
@@ -186,9 +197,8 @@
           } }, '✕'));
       }) : h('div', { class: 'muted' }, 'None yet — “Always allow this” in a question adds one.'));
       kids(ruleBox, [
-        h('div', { class: 'pc-grid' },
-          h('div', { class: 'field' }, h('label', null, 'When Claude wants to run a command'), mode),
-          h('div', { class: 'field' }, h('label', null, 'Output'), out)),
+        h('div', { class: 'field' }, h('label', null, 'When Claude wants to run a command here'), modeBox),
+        h('div', { class: 'field' }, h('label', null, 'Output'), out),
         h('div', { class: 'pc-grid' },
           h('div', { class: 'field' }, h('label', null, 'Always allowed — one per line, * = anything'), allow),
           h('div', { class: 'field' }, h('label', null, 'Never allowed — wins over everything'), deny)),
@@ -233,7 +243,7 @@
       api('POST', 'pc/answer', { id: a.id, answer: v }).catch(function () { /* answered elsewhere */ });
       close();
     }
-    function close() { if (shown[a.id]) { shown[a.id].md.close(); delete shown[a.id]; } }
+    function close() { if (shown[a.id]) { shown[a.id].close(); delete shown[a.id]; } }
     var md = SW.openModal({ title: 'Run on this computer?', size: 'sm', body: h('div', { class: 'pc-ask' },
       h('div', { class: 'muted' }, 'Claude (project ', h('b', null, a.project), ') wants to run:'),
       h('pre', { class: 'pc-cmd' }, a.cmd), left),
@@ -243,10 +253,47 @@
           h('button', { class: 'btn', title: 'Everything in ' + a.project + ' runs without asking for 1 hour', onclick: function () { answer('hour'); } }, 'Allow all 1 hour'),
           h('button', { class: 'btn primary', autofocus: true, onclick: function () { answer('once'); } }, 'Allow once'))] });
     md.onclose = function () { delete shown[a.id]; };
-    shown[a.id] = { md: md, left: left, until: a.until };
+    shown[a.id] = { a: a, left: [left], close: function () { md.close(); } };
     try {
       if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('Claude wants to run a command', { body: a.project + ': ' + a.cmd, icon: 'icon.svg' });
     } catch (e) { /* ignore */ }
+  }
+
+  // The question goes into the chat of that project that is working (the one that ran onpc), right
+  // above its message box like Claude's own permission cards; no such chat here → a dialog (only in
+  // the main window: another window may have the chat).
+  var DONE = { once: 'Allowed once — running on this computer', always: 'Always allowed here — running on this computer',
+    hour: 'Allowed everything in this project for 1 hour — running', deny: 'Denied — not run' };
+  function chatsFor(project) {
+    var tabs = (S.tabs || []).filter(function (t) { return t.pcAskCard && !t.closed && t.info && t.info.spec && t.info.spec.kind === 'chat' && t.info.spec.project === project; });
+    var busy = tabs.filter(function (t) { return t.busy; });
+    return busy.length ? busy : tabs;
+  }
+  function ask(a, mode) {
+    var tabs = chatsFor(a.project);
+    if (!tabs.length) {
+      if (SW.wid && SW.wid()) return;
+      askModal(a);
+      return;
+    }
+    var views = [];
+    if (mode === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; })) {      // the chat is in auto: no question
+      shown[a.id] = { a: a, left: [], answered: 'once', close: function () {} };
+      api('POST', 'pc/answer', { id: a.id, answer: 'once' }).catch(function () {});
+      tabs.filter(function (t) { return AUTO_CHAT[t.mode]; }).slice(0, 1).forEach(function (t) {
+        if (t.system) t.system('⌂ Ran on this computer without asking (chat in auto): ' + a.cmd, 'mark');
+      });
+      return;
+    }
+    function answer(v) {
+      if (!shown[a.id] || shown[a.id].answered) return;
+      shown[a.id].answered = v;
+      api('POST', 'pc/answer', { id: a.id, answer: v }).catch(function () { /* answered elsewhere */ });
+      views.forEach(function (x) { x.close(DONE[v]); });
+      delete shown[a.id];
+    }
+    views = tabs.map(function (t) { return t.pcAskCard(a, answer); });
+    shown[a.id] = { a: a, left: views.map(function (x) { return x.left; }), close: function (text) { views.forEach(function (x) { x.close(text); }); } };
   }
 
   // ------------------------------------------------------------------ live output box
@@ -278,11 +325,16 @@
     return api('GET', 'pc/asks').then(function (x) {
       var now = x.now || Date.now() / 1000;
       var openIds = {};
-      (x.asks || []).forEach(function (a) { openIds[a.id] = 1; if (!shown[a.id]) askModal(a); });
+      (x.asks || []).forEach(function (a) { openIds[a.id] = 1; if (!shown[a.id]) ask(a, x.mode); });
       Object.keys(shown).forEach(function (id) {
         var s = shown[id];
-        if (!openIds[id]) { s.md.close(); delete shown[id]; return; }
-        s.left.textContent = 'Not run if nobody answers in ' + Math.max(0, Math.round(s.until - now)) + 's.';
+        if (!openIds[id]) {                 // answered in another window, or the time ran out
+          var r = (x.runs || []).filter(function (r) { return r.id === s.a.run; })[0];
+          s.close(r && r.state === 'denied' ? 'Not run on this computer' : 'Answered — running on this computer');
+          delete shown[id];
+          return;
+        }
+        s.left.forEach(function (el) { el.textContent = 'not run if nobody answers in ' + Math.max(0, Math.round(s.a.until - now)) + 's'; });
       });
       (x.runs || []).forEach(function (r) {
         if (seenRuns[r.id]) return;

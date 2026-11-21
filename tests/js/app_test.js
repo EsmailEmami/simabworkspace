@@ -1527,20 +1527,57 @@ const tests = {
     assert.ok(!q('.proj-head').some((x) => /shop/.test(x.textContent) && q('.pcb', x).length), 'server projects: no mark');
     const ta = q('textarea', md);
     ta[0].value = 'npm run *\n\n ng build* ';
-    q('select', md).find((x) => /Ask every time/.test(x.textContent)).value = 'every';
+    const modeBtns = q('.segb', md);
+    assert.deepStrictEqual(modeBtns.map((b) => b.querySelector('b').textContent), ['same as chat', 'ask', 'ask new', 'auto'], 'like Claude\'s modes');
+    modeBtns[1].click();
+    assert.ok(modeBtns[1].classList.contains('on') && !modeBtns[0].classList.contains('on'));
     q('button', md).find((b) => b.textContent === 'Save rules').click(); await settle();
     const saved = fakePc.posts.pop();
     assert.deepStrictEqual(saved.allow, ['npm run *', 'ng build*']);
     assert.strictEqual(saved.mode, 'every');
     q('.icon-btn', md)[0].click(); await settle();
-    // Claude asks to run a command here: the question shows; Always allow answers it
-    fakePc.asks = { asks: [{ id: 'q1', project: 'cheshmeh', cmd: 'npm run build', until: Date.now() / 1000 + 100 }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    // Claude asks to run a command here: in the working chat of that project, above its message box
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const chat = S.active; chat.busy = true;
+    fakePc.asks = { asks: [{ id: 'q1', project: 'cheshmeh', cmd: 'npx tsc --noEmit', until: Date.now() / 1000 + 100, run: 'r0' }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    await global.SWComputers.poll(); await settle();
+    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'no dialog when the chat is here');
+    const card = q('.pc-perm', chat.msgs)[0];
+    assert.ok(card, 'the question is a card in the chat');
+    assert.strictEqual(chat.msgs.lastChild, card, 'at the end: right above the message box');
+    assert.match(q('.pc-cmd', card)[0].textContent, /npx tsc --noEmit/);
+    assert.match(card.textContent, /not run if nobody answers in \d+s/);
+    q('button', card).find((b) => b.textContent === 'Always allow this').click(); await settle();
+    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q1', answer: 'always' });
+    assert.ok(card.classList.contains('done'));
+    assert.match(card.textContent, /Always allowed here/);
+    assert.ok(!q('button', card).length, 'buttons gone once answered');
+    // answered elsewhere / time ran out: the card says what happened
+    fakePc.asks = { asks: [{ id: 'q2', project: 'cheshmeh', cmd: 'npm test', until: Date.now() / 1000 + 100, run: 'r2' }], runs: [], now: Date.now() / 1000, output: 'chat' };
+    await global.SWComputers.poll(); await settle();
+    const card2 = q('.pc-perm', chat.msgs).pop();
+    fakePc.asks = { asks: [], runs: [{ id: 'r2', state: 'denied', project: 'cheshmeh', cmd: 'npm test', start: 1 }], now: Date.now() / 1000, output: 'chat' };
+    await global.SWComputers.poll(); await settle();
+    assert.match(card2.textContent, /Not run on this computer/);
+    // "same as chat" and the chat is in auto: runs without a question
+    chat.mode = 'auto';
+    fakePc.asks = { asks: [{ id: 'q4', project: 'cheshmeh', cmd: 'npm run lint', until: Date.now() / 1000 + 100, run: 'r4' }], runs: [], now: Date.now() / 1000, output: 'chat', mode: 'chat' };
+    const nCards = q('.pc-perm', chat.msgs).length;
+    await global.SWComputers.poll(); await settle();
+    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q4', answer: 'once' });
+    assert.strictEqual(q('.pc-perm', chat.msgs).length, nCards, 'no question card');
+    assert.match(chat.msgs.textContent, /without asking \(chat in auto\): npm run lint/);
+    fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat', mode: 'chat' };
+    await global.SWComputers.poll(); await settle();
+    chat.mode = 'default';
+    SW.closeTab(chat, true); await settle();
+    // no chat of that project here: a dialog
+    fakePc.asks = { asks: [{ id: 'q3', project: 'zzz', cmd: 'npm run build', until: Date.now() / 1000 + 100 }], runs: [], now: Date.now() / 1000, output: 'panel' };
     await global.SWComputers.poll(); await settle();
     const ask = q('.modal').pop();
     assert.match(ask.textContent, /Run on this computer\?/);
-    assert.match(q('.pc-cmd', ask)[0].textContent, /npm run build/);
-    q('button', ask).find((b) => b.textContent === 'Always allow this').click(); await settle();
-    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q1', answer: 'always' });
+    q('button', ask).find((b) => b.textContent === 'Allow once').click(); await settle();
+    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q3', answer: 'once' });
     assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'closed');
     // output "panel": a running command opens the live box
     fakePc.asks = { asks: [], runs: [{ id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', start: 1 }], now: Date.now() / 1000, output: 'panel' };

@@ -1365,6 +1365,27 @@
     this.send(m);
   };
 
+  // a command Claude wants to run on this computer (onpc, computers.js): asked in the chat that runs it,
+  // like Claude's own permission cards. answer(v): once | always | hour | deny.
+  P.pcAskCard = function (a, answer) {
+    var self = this, key = 'pc:' + a.id;
+    var left = h('span', { class: 'pc-left' });
+    function b(label, v, cls, tip) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: tip || '', onclick: function () { answer(v); } }, label); }
+    var card = h('div', { class: 'perm-card pc-perm' },
+      h('div', { class: 'perm-title' }, h('span', { class: 'pc-perm-ic' }, '⌂'), 'Run on ', h('b', null, 'this computer'),
+        h('span', { class: 'muted' }, '· ' + a.project)),
+      h('pre', { class: 'pc-cmd' }, a.cmd),
+      h('div', { class: 'perm-actions' },
+        b('Allow once', 'once', 'primary'),
+        b('Always allow this', 'always', '', 'Never ask again for this exact command in ' + a.project),
+        b('Allow all 1 hour', 'hour', '', 'Everything in ' + a.project + ' runs without asking for 1 hour'),
+        b('Deny', 'deny', 'danger'), left));
+    this.perms[key] = card;
+    this.add(card);
+    this.alertUser('Claude wants to run a command on this computer', 'permission');
+    return { left: left, close: function (text) { self.closePerm(key, text); } };
+  };
+
   P.alertUser = function (text, kind) {
     this.stick = true;
     this.scrollEnd();

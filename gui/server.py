@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.56.0"
+VERSION = "1.57.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6131,6 +6131,80 @@ print(json.dumps(cur, ensure_ascii=False))
 '''
 
 
+# History → "in chats": the text of every Claude conversation on the server (newest first).
+# stdin {q, dirs: {project: server path}, only: bool} → {hits: [{project, dir, id, title, snippet, who, mtime}]}
+CHAT_SEARCH_PY = r'''
+import os, sys, json, re, glob
+cfg = json.loads(sys.stdin.read() or "{}")
+q = (cfg.get("q") or "").lower()
+base = os.path.expanduser("~/.claude/projects")
+def dname(x):
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser(x))
+names = {dname(v): k for k, v in (cfg.get("dirs") or {}).items() if v}
+def text_of(e):
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    return " ".join(b.get("text") or "" for b in c if isinstance(b, dict) and b.get("type") == "text") if isinstance(c, list) else ""
+def title_of(f):
+    with open(f, errors="replace") as fh:
+        for n, line in enumerate(fh):
+            if n > 400:
+                break
+            if '"user"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") != "user" or e.get("isMeta"):
+                continue
+            t = text_of(e).strip()
+            if t and not t.startswith("<"):
+                return t.splitlines()[0][:90]
+    return ""
+files = []
+for d in (os.listdir(base) if os.path.isdir(base) else []):
+    if cfg.get("only") and d not in names:
+        continue
+    for f in glob.glob(os.path.join(base, d, "*.jsonl")):
+        try:
+            files.append((os.path.getmtime(f), d, f))
+        except OSError:
+            pass
+files.sort(reverse=True)
+hits = []
+for mt, d, f in files[:800]:
+    if not q:
+        break
+    found = None
+    try:
+        with open(f, errors="replace") as fh:
+            for line in fh:
+                if q not in line.lower() or len(line) > 3000000:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("type") not in ("user", "assistant") or e.get("isMeta"):
+                    continue
+                t = text_of(e)
+                i = t.lower().find(q)
+                if i >= 0:
+                    found = (("…" if i > 60 else "") + t[max(0, i - 60):i + len(q) + 90].replace("\n", " "), e.get("type"))
+                    break
+    except OSError:
+        continue
+    if found:
+        hits.append({"project": names.get(d, ""), "dir": d, "id": os.path.basename(f)[:-6], "title": title_of(f),
+                     "snippet": found[0], "who": found[1], "mtime": mt})
+        if len(hits) >= 40:
+            break
+print(json.dumps({"hits": hits}, ensure_ascii=False))
+'''
+
+
 def clean_prompts(v) -> list:
     if not isinstance(v, list) or len(v) > 200:
         raise ApiError(400, "invalid prompts")
@@ -10476,6 +10550,14 @@ class Handler(BaseHTTPRequestHandler):
             return app.client_error(self._body())
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
+        if route == ("GET", "chat-search"):
+            text = (query.get("q") or [""])[0].strip()
+            if len(text) < 2 or len(text) > 200:
+                raise ApiError(400, "type at least 2 letters")
+            only = (query.get("project") or [""])[0]
+            dirs = {p["name"]: p["remote"] for p in app.projects() if p.get("remote") and (not only or p["name"] == only)}
+            return remote_python(app.conf, CHAT_SEARCH_PY, [], timeout=60,
+                                 stdin=json.dumps({"q": text, "dirs": dirs, "only": bool(only)}, ensure_ascii=False).encode())
         if route == ("GET", "prompts"):
             return remote_python(app.conf, PROMPTS_PY, ["get"])
         if route == ("POST", "prompts"):

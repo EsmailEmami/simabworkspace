@@ -164,6 +164,9 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
   else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
+  else if (url.startsWith('/api/chat-search')) { fakePc.searched = url; res = { hits: [
+    { project: 'cheshmeh', dir: '-home-esi-cheshmeh', id: CONV_OLD, title: 'Old work', snippet: '…the Refund button was broken', who: 'assistant', mtime: Date.now() / 1000 - 7200 },
+    { project: '', dir: '-elsewhere', id: 'cccc', title: 'x', snippet: 'refund elsewhere', who: 'user', mtime: 1 }] }; }
   else if (url === '/api/prompts' && method === 'GET') res = fakePc.prompts || { rev: 3, prompts: [
     { id: 'aaaaaaaa', name: 'tests', text: 'Write tests and run them.', project: '' },
     { id: 'bbbbbbbb', name: 'deploy', text: 'Deploy shop.', project: 'shop' }] };
@@ -1826,6 +1829,26 @@ const tests = {
     q('button', md).find((b) => b.textContent === 'Save').click(); await settle();
     assert.strictEqual(fakePc.promptsSaved.rev, 3);
     assert.deepStrictEqual(fakePc.promptsSaved.prompts.map((p) => p.name), ['tests', 'deploy', 'lint']);
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'History: search inside every chat, open the conversation'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.body.querySelector('#btn-history').click(); await settle();
+    const md = q('.modal').pop();
+    const inp = q('input', md)[0];
+    inp.value = 'refund';
+    q('button', md).find((b) => b.textContent === 'Search in chats').click(); await settle();
+    assert.match(fakePc.searched, /chat-search\?q=refund/);
+    const hits = q('.hs-hit', md);
+    assert.strictEqual(hits.length, 2);
+    assert.strictEqual(q('mark', hits[0])[0].textContent, 'Refund');
+    assert.ok(hits[1].classList.contains('off'), 'not one of the projects');
+    const n = global.SW.S.tabs.length;
+    hits[0].click(); await settle();
+    assert.strictEqual(global.SW.S.tabs.length, n + 1);
+    assert.strictEqual(global.SW.S.active.info.spec.resume, CONV_OLD, 'continues that conversation');
+    SW.closeTab(global.SW.S.active, true); await settle();
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

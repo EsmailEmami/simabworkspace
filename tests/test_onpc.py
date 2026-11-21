@@ -838,3 +838,33 @@ class SavedPrompts(unittest.TestCase):
         for bad in ("x", [{"name": "", "text": "b"}], [{"name": "a"}], [{}] * 201):
             with self.assertRaises(sw.ApiError):
                 sw.clean_prompts(bad)
+
+
+class ChatSearch(unittest.TestCase):
+    def test_finds_text_inside_conversations(self):
+        with tempfile.TemporaryDirectory() as home:
+            import re as _re
+            mk = lambda path: _re.sub(r"[^A-Za-z0-9]", "-", path)
+            d1 = Path(home, ".claude", "projects", mk("/srv/shop"))
+            d2 = Path(home, ".claude", "projects", mk(os.path.join(home, ".simab-mnt", "lo")))
+            d3 = Path(home, ".claude", "projects", "-elsewhere")
+            for d in (d1, d2, d3):
+                d.mkdir(parents=True)
+            line = lambda typ, content: json.dumps({"type": typ, "message": {"role": typ, "content": content}})
+            (d1 / "aaaa.jsonl").write_text("\n".join([line("user", "fix the payment page"), line("assistant", [{"type": "text", "text": "The Refund button was broken."}])]) + "\n")
+            (d2 / "bbbb.jsonl").write_text(line("user", "add a refund report") + "\n")
+            (d3 / "cccc.jsonl").write_text(line("user", "refund in another place") + "\n")
+            (d1 / "dddd.jsonl").write_text(json.dumps({"type": "user", "isMeta": True, "message": {"content": "refund meta"}}) + "\n")
+            env = dict(os.environ, HOME=home)
+
+            def search(q, only=False):
+                r = subprocess.run([sys.executable, "-c", sw.CHAT_SEARCH_PY], env=env, capture_output=True, timeout=20,
+                                   input=json.dumps({"q": q, "dirs": {"shop": "/srv/shop", "lo": "~/.simab-mnt/lo"}, "only": only}).encode())
+                return json.loads(r.stdout)["hits"]
+            hits = {h["id"]: h for h in search("REFUND")}
+            self.assertEqual(set(hits), {"aaaa", "bbbb", "cccc"}, "meta lines are not searched")
+            self.assertEqual((hits["aaaa"]["project"], hits["aaaa"]["who"], hits["aaaa"]["title"]), ("shop", "assistant", "fix the payment page"))
+            self.assertIn("Refund button", hits["aaaa"]["snippet"])
+            self.assertEqual(hits["bbbb"]["project"], "lo", "a ~ project (Local only) is found too")
+            self.assertEqual(hits["cccc"]["project"], "", "not one of the projects: shown, cannot be opened")
+            self.assertEqual({h["id"] for h in search("refund", only=True)}, {"aaaa", "bbbb"})

@@ -2273,7 +2273,31 @@
     } }, 'Clear');
     q.addEventListener('input', render);
     proj.addEventListener('change', render);
-    var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, proj, clearBtn), list] });
+    // the text inside every Claude conversation on the server (not only this list)
+    function searchChats() {
+      var text = q.value.trim();
+      if (text.length < 2) { toast('Type at least 2 letters', 'warn'); q.focus(); return; }
+      list.replaceChildren(h('div', { class: 'muted' }, 'Searching inside the chats on the server…'));
+      api('GET', 'chat-search?q=' + encodeURIComponent(text) + (proj.value ? '&project=' + encodeURIComponent(proj.value) : '')).then(function (d) {
+        var hits = d.hits || [];
+        list.replaceChildren.apply(list, [h('div', { class: 'muted hs-head' }, hits.length ? 'Inside chats — ' + hits.length + (hits.length >= 40 ? '+' : '') + ' conversation' + (hits.length === 1 ? '' : 's') + ', newest first'
+          : 'Not found inside any chat.')].concat(hits.map(function (x) {
+          var low = x.snippet.toLowerCase(), i = low.indexOf(text.toLowerCase());
+          var snip = i < 0 ? [x.snippet] : [x.snippet.slice(0, i), h('mark', null, x.snippet.slice(i, i + text.length)), x.snippet.slice(i + text.length)];
+          return h('div', { class: 'hrow hs-hit' + (x.project ? '' : ' off'), title: x.project ? 'Open this conversation' : 'Its project is not in your list',
+            onclick: function () {
+              if (!x.project) return;
+              md.close();
+              openSession({ kind: 'chat', project: x.project, resume: x.id, title: x.title || undefined });
+            } },
+            h('div', { class: 'hs-top' }, h('b', { dir: 'auto' }, x.title || x.id.slice(0, 8)), h('span', { class: 'muted' }, ' · ' + (x.project || x.dir) + ' · ' + ago(new Date(x.mtime * 1000).toISOString()) + ' ago')),
+            h('div', { class: 'hs-snip', dir: 'auto' }, h('span', { class: 'muted' }, x.who === 'user' ? 'you: ' : 'Claude: '), snip));
+        })));
+      }).catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
+    }
+    q.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); searchChats(); } });
+    var inChats = h('button', { class: 'btn', style: 'flex:none', title: 'Search the text of every Claude conversation (Enter)', onclick: searchChats }, 'Search in chats');
+    var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, inChats, proj, clearBtn), list] });
     api('GET', 'activity?limit=2000').then(function (d) { items = d.items || []; render(); loadTitles(); })
       .catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
     // the titles come from the server, one list per project that has conversations here

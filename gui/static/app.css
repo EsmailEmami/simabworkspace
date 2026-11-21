@@ -995,6 +995,7 @@ body.star-drag, body.star-drag * { cursor: grabbing !important; user-select: non
 .devices .dev { display: flex; align-items: center; gap: 8px; padding: 4px 0 4px 10px; border-left: 2px solid var(--line); margin: 0 0 4px 2px; }
 .devices .dev .grow { flex: 1; min-width: 0; }
 .totp-key { font-size: 15px; letter-spacing: 1px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 12px; user-select: all; word-break: break-all; }
+.totp-qr { display: block; width: 200px; height: 200px; margin: 4px auto 12px; border-radius: 6px; image-rendering: pixelated; }
 
 .cmd .res { font-size: 10.5px; flex: none; }
 .cmd .res.ok { color: var(--ok); }
@@ -1290,3 +1291,21 @@ body.compact .snd-name { flex-basis: 140px; }
 .speed-tile b { font: 600 20px var(--mono); }
 .speed-tile small { color: var(--muted); font-size: 11px; }
 .gb.pcb.chk { color: var(--muted); background: var(--bg3); }
+/* Settings in tabs (settingsTabs in app.js) */
+.modal.settings { width: min(860px, 96vw); max-height: 86vh; }
+.modal.settings .modal-body { padding: 0; display: flex; min-height: 0; }
+.set-tabs { display: flex; flex: 1; min-height: 0; }
+.set-rail { flex: 0 0 170px; display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-right: 1px solid var(--line); overflow-y: auto; }
+.set-tab { text-align: left; background: none; border: 0; color: var(--muted); padding: 7px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+.set-tab:hover { background: var(--bg3); color: var(--text); }
+.set-tab.active { background: var(--bg3); color: var(--text); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.set-pane { flex: 1; min-width: 0; overflow-y: auto; padding: 14px 18px; }
+.set-title { font-weight: 600; margin-bottom: 10px; }
+.set-group.hidden { display: none; }
+.share-who { width: auto; flex: none; }
+@media (max-width: 640px) {
+  .set-tabs { flex-direction: column; }
+  .set-rail { flex: none; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 6px; }
+  .set-tab { white-space: nowrap; }
+}
+

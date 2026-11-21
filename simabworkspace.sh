@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.63.2 2026-11-21  Settings in tabs (one per section); dev servers show every port they serve; QR code in the authenticator setup dialogs
 #    1.63.1 2026-11-21  Share on your domain in the app too (Settings), same list as the web (share.json on the server), live state per link; one answer per port is enough
 #    1.63.0 2026-11-21  Share on your domain: https://DOMAIN/<project>/<name> opens a port of your computer (private or public), many projects on one domain
 #    1.62.0 2026-11-21  Computers: phone access with the computer's own MFA code (terminal, run commands, answers); rules no longer bypassed from the server; who is in + Disconnect + log
@@ -376,7 +377,7 @@
 
 set -u -o pipefail
 
-VERSION="1.63.1"
+VERSION="1.63.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

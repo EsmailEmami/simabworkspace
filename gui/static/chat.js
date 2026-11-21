@@ -1405,18 +1405,21 @@
 
   // dev servers on the user's computer (onpc --bg, computers.js): ● name :port ↗ ■ above the message box
   P.setDevServers = function (list, act) {
-    var key = JSON.stringify((list || []).map(function (x) { return [x.name, x.state, x.url, x.code]; }));
+    var key = JSON.stringify((list || []).map(function (x) { return [x.name, x.state, x.urls || x.url, x.code]; }));
     if (key === this.devsKey) return;
     this.devsKey = key;
     var els = (list || []).map(function (x) {
-      var port = (/:(\d+)/.exec(x.url || '') || [])[1];
+      var urls = x.urls && x.urls.length ? x.urls : x.url ? [x.url] : [];    // every port it serves (API + panel …)
       var run = x.state === 'running';
-      return h('span', { class: 'pc-dev-chip ' + (run ? 'on' : 'off'), title: x.cmd + (x.url ? '\n' + x.url : '') + '\nclick: output' },
-        h('i', { class: 'pc-dot ' + (run ? 'on' : 'err') }),
-        h('b', { onclick: function () { act.logs(x); } }, x.name), port ? h('span', { class: 'muted' }, ':' + port) : null,
+      var ports = urls.map(function (u) {
+        var port = (/:\/\/[^/]*:(\d+)/.exec(u) || [])[1] || (/^https/.test(u) ? '443' : '80');
+        return run ? h('a', { class: 'pc-port', href: u, target: '_blank', rel: 'noopener', title: 'Open ' + u }, ':' + port + ' ↗')
+          : h('span', { class: 'muted' }, ':' + port);
+      });
+      return h('span', { class: 'pc-dev-chip ' + (run ? 'on' : 'off'), title: x.cmd + (urls.length ? '\n' + urls.join('\n') : '') + '\nclick: output' },
+        [h('i', { class: 'pc-dot ' + (run ? 'on' : 'err') }), h('b', { onclick: function () { act.logs(x); } }, x.name)].concat(ports,
         run ? null : h('span', { class: 'err' }, ' exited ' + (x.code == null ? '' : x.code)),
-        run && x.url ? h('a', { href: x.url, target: '_blank', rel: 'noopener', title: 'Open ' + x.url }, '↗') : null,
-        h('button', { class: 'icon-btn', title: run ? 'Stop it' : 'Remove', onclick: function () { act.stop(x); } }, run ? '■' : '✕'));
+        h('button', { class: 'icon-btn', title: run ? 'Stop it' : 'Remove', onclick: function () { act.stop(x); } }, run ? '■' : '✕')));
     });
     this.devsEl.classList.toggle('hidden', !els.length);
     this.devsEl.replaceChildren.apply(this.devsEl, els.length ? [h('span', { class: 'muted' }, 'on your computer')].concat(els) : []);

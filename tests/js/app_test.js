@@ -748,6 +748,15 @@ const tests = {
     assert.ok(calls.some((c) => c.url === '/api/prereqs/jq' && c.method === 'POST'));
     assert.ok(q('input', modal).some((i) => i.value === 'esi'), 'connection loaded');
     assert.ok(q('button', modal).some((b) => b.textContent === 'Uninstall…'));
+    // one tab per section; only the chosen one shows, and it is remembered
+    const tabs = q('.set-tab', modal).map((b) => b.textContent);
+    assert.deepStrictEqual(tabs.slice(0, 4), ['Server', 'Sync', 'This machine', 'Share on your domain']);
+    const groups = q('.set-group', modal);
+    assert.strictEqual(groups.filter((g) => !g.classList.contains('hidden')).length, 1);
+    q('.set-tab', modal).find((b) => b.textContent === 'Share on your domain').click();
+    assert.ok(!groups[3].classList.contains('hidden') && groups[0].classList.contains('hidden'));
+    assert.strictEqual(localStorage.getItem('sw-set-tab'), 'Share on your domain');
+    localStorage.setItem('sw-set-tab', '');
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

@@ -33,6 +33,14 @@ class Rules(unittest.TestCase):
         c.update(kw)
         return c
 
+    def test_dev_server_urls_one_per_port(self):
+        out = ("API on https://localhost:6000/api/v1\nlistening http://0.0.0.0:6000\n"
+               "panel: http://localhost:6001.\nsee http://127.0.0.1:6000/x and http://[::]:6002/")
+        urls = sw.pc_urls(out)
+        self.assertEqual(urls, ["https://localhost:6000/api/v1", "http://localhost:6001", "http://localhost:6002"])
+        self.assertEqual(sw.pc_urls("again http://localhost:6001/ and http://localhost:7000", urls)[3:], ["http://localhost:7000"])
+        self.assertEqual(len(sw.pc_urls(" ".join(f"http://localhost:{p}" for p in range(5000, 5020)))), 8)
+
     def test_segments_keep_redirects(self):
         self.assertEqual(sw.pc_segments("npm ci && npm run build 2>&1 | tail -5; echo ok"),
                          ["npm ci", "npm run build 2>&1", "tail -5", "echo ok"])

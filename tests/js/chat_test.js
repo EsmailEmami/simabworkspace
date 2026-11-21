@@ -957,6 +957,18 @@ const tests = {
     assert.ok(!/```/.test(md.textContent), 'no raw fences');
   },
 
+  'dev server chip shows every port it serves'() {
+    const self = { devsEl: document.createElement('div') };
+    const x = { name: 'avahesab', state: 'running', cmd: 'up', url: 'https://localhost:6000/api/v1',
+      urls: ['https://localhost:6000/api/v1', 'http://localhost:6001'] };
+    global.SWChat.ChatTab.prototype.setDevServers.call(self, [x], { logs() {}, stop() {} });
+    const a = [...self.devsEl.querySelectorAll('.pc-port')];
+    assert.deepStrictEqual(a.map(e => e.textContent), [':6000 ↗', ':6001 ↗']);
+    assert.strictEqual(a[1].getAttribute('href'), 'http://localhost:6001');
+    global.SWChat.ChatTab.prototype.setDevServers.call(self, [{ name: 'old', state: 'running', cmd: 'x', url: 'http://localhost:4200' }], { logs() {}, stop() {} });
+    assert.strictEqual(self.devsEl.querySelector('.pc-port').textContent, ':4200 ↗', 'an old app sends only url');
+  },
+
   'markdown: code, lists, tables, links'() {
     const md = global.SWChat.markdown('# عنوان\n\nمتن `کد` و **پررنگ** https://x.dev\n\n- یک\n- دو\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```go\nfmt.Println(1)\n```');
     assert.strictEqual(md.querySelectorAll('h3').length, 1);

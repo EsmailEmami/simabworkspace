@@ -165,9 +165,9 @@
       api('POST', 'pc/mfa', { op: 'setup' }).then(function (d) {
         var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
         var m = SW.openModal({ title: 'Phone access', size: 'sm', body: [
-          h('p', null, '1. Add this key to the authenticator app on your phone (its own entry, not the sign-in one):'),
-          h('p', null, h('a', { class: 'btn', href: d.uri }, 'Open in authenticator app')),
-          h('p', { class: 'muted' }, 'or type the key:'),
+          h('p', null, '1. Scan this code with the authenticator app on your phone (its own entry, not the sign-in one):'),
+          h('img', { class: 'totp-qr', src: window.SWQR ? SWQR.dataUrl(d.uri) : '', alt: 'QR code' }),
+          h('p', { class: 'muted' }, 'or ', h('a', { href: d.uri }, 'open it in the app'), ', or type the key:'),
           h('div', { class: 'mono totp-key' }, d.secret.replace(/(.{4})/g, '$1 ').trim()),
           h('p', null, '2. Enter the code it shows:'), code],
           foot: [h('button', { class: 'btn', onclick: function () { m.close(); } }, 'Cancel'),

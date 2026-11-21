@@ -301,6 +301,31 @@
       h('div', { class: 'svc' }, h('span', null, 'Two-step sign-in', h('br'), h('small', { class: 'muted' }, 'A code from an authenticator app too — '), totpState), totpBtn),
       h('div', { class: 'svc' }, h('span', null, 'Signed-in devices'), othersBtn), devList);
   }
+  // ---- Settings in tabs: every "sec" heading starts a tab (a rail on the left, a row on a phone)
+  function settingsTabs(nodes) {
+    var groups = [];
+    (nodes || []).forEach(function (n) {
+      if (!n) return;
+      if (n.classList && n.classList.contains('sec')) { groups.push({ title: n.textContent, items: [] }); return; }
+      if (!groups.length) groups.push({ title: 'General', items: [] });
+      groups[groups.length - 1].items.push(n);
+    });
+    var rail = h('div', { class: 'set-rail' }), panes = h('div', { class: 'set-pane' });
+    var saved = localStorage.getItem('sw-set-tab') || '';
+    function show(i) {
+      Array.prototype.forEach.call(rail.children, function (b, j) { b.classList.toggle('active', j === i); });
+      Array.prototype.forEach.call(panes.children, function (p, j) { p.classList.toggle('hidden', j !== i); });
+      localStorage.setItem('sw-set-tab', groups[i].title);
+    }
+    groups.forEach(function (g, i) {
+      rail.append(h('button', { class: 'set-tab', onclick: function () { show(i); } }, g.title));
+      panes.append(h('div', { class: 'set-group hidden' }, h('div', { class: 'set-title' }, g.title), g.items));
+    });
+    var first = Math.max(0, groups.map(function (g) { return g.title; }).indexOf(saved));
+    if (groups.length) show(first);
+    return h('div', { class: 'set-tabs' }, rail, panes);
+  }
+
   // ---- Share on your domain: ports of your computer at https://DOMAIN/<project>/<name> (server.py "share")
   function shareRows() {
     var doms = h('div', { class: 'devices' }), ports = h('div', { class: 'devices' });
@@ -309,7 +334,7 @@
     var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, placeholder: '3001' });
     var ACCESS = [['private', 'Only me'], ['ask', 'Ask me'], ['public', 'Anyone']];
     var SAYS = { private: 'only you, signed in', ask: 'others ask you first', public: 'anyone with the link' };
-    function accessSel(v) { var el = h('select', { class: 'inp', title: 'Ask me: someone without your sign-in waits while your phone / computer asks you' }, ACCESS.map(function (a) { return h('option', { value: a[0] }, a[1]); })); el.value = v || 'private'; return el; }
+    function accessSel(v) { var el = h('select', { class: 'inp share-who', title: 'Ask me: someone without your sign-in waits while your phone / computer asks you' }, ACCESS.map(function (a) { return h('option', { value: a[0] }, a[1]); })); el.value = v || 'private'; return el; }
     var pub = accessSel('private'), tls = h('input', { type: 'checkbox' }), guests = h('div', { class: 'devices' });
     var dots = {}, STATE = { on: ['#4caf50', 'Open now'], 'port-off': ['#e0a030', 'Your computer is connected, but nothing runs on this port'],
       'pc-off': ['#888', 'Your computer is not connected'] };
@@ -3756,8 +3781,8 @@
       api('GET', 'status?force=1').then(showStatus);
     }).catch(fail);
     var md = openModal({
-      title: 'Settings',
-      body: webBody || [
+      title: 'Settings', size: 'settings',
+      body: settingsTabs(webBody || [
         h('div', { class: 'sec' }, 'Server'),
         h('div', { class: 'row' }, field('User', cUser), field('Address', cHost), h('div', { style: 'flex:0 0 90px' }, field('SSH port', cPort))),
         h('div', { class: 'row', style: 'align-items:flex-end' }, field('SSH key', cKey),
@@ -3801,7 +3826,7 @@
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
           h('button', { class: 'btn sm danger', onclick: uninstallDialog }, 'Uninstall…'))
-      ],
+      ]),
       foot: [h('span', { class: 'left muted mono' }, 'v' + S.version),
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: function () {

@@ -356,6 +356,12 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.status, 502)
         self.assertIn(b"update Simab Workspace on your computer", d)
 
+    def test_status_through_the_computer(self):
+        st = self.hub.probe(self.wsid, None, [self.hub.find(self.wsid, "esi", n) for n in ("front", "off", "ws")])
+        self.assertEqual(st, {"esi/front": "on", "esi/off": "port-off", "esi/ws": "on"})
+        self.hub.device = lambda app, project: (_ for _ in ()).throw(sw.ApiError(503, "offline"))
+        self.assertEqual(self.hub.probe(self.wsid, None, [self.hub.find(self.wsid, "esi", "front")]), {"esi/front": "pc-off"})
+
     def test_wrong_secret_is_refused_by_the_computer(self):
         self.link = dict(self.link, secret="x" * 40)
         r, d = self.req("GET", "/__simab/p/esi/front/", self.SW)
@@ -561,6 +567,99 @@ class Settings(unittest.TestCase):
         self.assertTrue(made["argv"][made["argv"].index("-L") + 1].endswith(":/home/esi/.cache/simabworkspace/pc/dev1.sock"))
         self.assertEqual((ln["secret"], ln["port"]), ("s" * 40, 15550))
         self.assertEqual(oct(os.stat(Path(self.tmp.name) / "web" / "share").st_mode & 0o777), "0o700")
+
+
+def local_remote_python(home):
+    """remote_python that runs the script here, with HOME = the server user's home."""
+    def run(conf, code, args, stdin=None, **kw):
+        r = subprocess.run([sys.executable, "-c", code] + list(args), input=stdin, capture_output=True, timeout=20,
+                           env=dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config")))
+        return json.loads(r.stdout)
+    return run
+
+
+class SharedSettings(unittest.TestCase):
+    """The list lives in share.json on the server: the app and the web version change the same one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "server-home")
+        os.makedirs(self.home)
+        self.envp = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(self.tmp.name, "laptop")})
+        self.envp.start()
+        self.rp = mock.patch.object(sw, "remote_python", side_effect=local_remote_python(self.home))
+        self.rp.start()
+        self.keygen = mock.patch.object(sw, "ensure_ssh_key", lambda p: None)
+        self.keygen.start()
+        self.app = sw.App(sw.Store(Path(self.tmp.name) / "gui.json"), sw.ServerConf("esi", "h"))
+        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:22"], verify=lambda c, pw: None, start_loops=False)
+        tok = self.gate.login("1.2.3.4", {"host": "127.0.0.1", "port": "22", "user": "esi", "password": "x"})
+        self.ws = self.gate.ws_of(tok)
+        self.web = self.gate.app_for(tok)
+
+    def tearDown(self):
+        self.gate.shutdown()
+        self.keygen.stop()
+        self.rp.stop()
+        self.envp.stop()
+        self.tmp.cleanup()
+
+    def test_app_edits_the_web_follows(self):
+        st = self.app.share_api("POST", "/domain", {"domain": DOM, "on": True})
+        self.assertEqual((st["domains"], st["web"]), ([DOM], False))
+        st = self.app.share_api("POST", "/port", {"project": "avahesab", "name": "panel", "port": 6001, "access": "ask", "on": True})
+        self.assertEqual(st["shares"][0]["urls"], [f"https://{DOM}/avahesab/panel"])
+        f = Path(self.home, ".config/simabworkspace/share.json")
+        self.assertEqual(oct(f.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(json.loads(f.read_text())["shares"][0]["access"], "ask")
+        self.assertIsNone(self.gate.share.domain(DOM), "not yet: the web version reads it every 30 s")
+        self.gate.share.pull(self.ws, self.web)
+        self.assertEqual(self.gate.share.domain(DOM)["ws"], self.ws)
+        self.assertEqual(self.gate.share.find(self.ws, "avahesab", "panel")["access"], "ask")
+        # the web version edits: the file and its tables at once
+        st = self.web.share_api("POST", "/port", {"project": "avahesab", "name": "api", "port": 6000, "tls": True, "on": True}, MAIN)
+        self.assertEqual([x["name"] for x in st["shares"]], ["api", "panel"])
+        self.assertTrue(self.gate.share.find(self.ws, "avahesab", "api")["tls"])
+        self.assertEqual(self.gate.share.domain(DOM)["main"], MAIN)
+        self.assertEqual(len(self.app.share_api("GET", "", {})["shares"]), 2, "the app sees it")
+        self.app.share_api("POST", "/domain", {"domain": DOM, "on": False})
+        self.gate.share.pull(self.ws, self.web)
+        self.assertIsNone(self.gate.share.domain(DOM))
+
+    def test_first_read_keeps_what_the_web_had(self):
+        self.gate.share.api(self.ws, "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
+        self.gate.share.api(self.ws, "POST", "/port", {"project": "p", "name": "f", "port": 3001, "on": True}, MAIN)
+        self.gate.share.pull(self.ws, self.web)
+        st = self.app.share_api("GET", "", {})
+        self.assertEqual((st["domains"], [x["name"] for x in st["shares"]]), ([DOM], ["f"]))
+
+    def test_domain_of_another_workspace(self):
+        self.gate.share.db.run("INSERT INTO web_share_domains (domain, ws, main) VALUES (?, 'other', 'x')", (DOM,))
+        with self.assertRaises(sw.ApiError) as e:
+            self.web.share_api("POST", "/domain", {"domain": DOM, "on": True}, MAIN)
+        self.assertEqual(e.exception.status, 409)
+        Path(self.home, ".config/simabworkspace").mkdir(parents=True)
+        Path(self.home, ".config/simabworkspace/share.json").write_text(json.dumps({"domains": [DOM, "Bad Domain"], "shares": [
+            {"slug": "a", "name": "b", "port": "x"}, {"slug": "a", "name": "c", "port": 5, "access": "weird"}]}))
+        self.gate.share.pull(self.ws, self.web)
+        self.assertEqual(self.gate.share.domain(DOM)["ws"], "other", "never taken from another workspace")
+        self.assertEqual(self.gate.share.find(self.ws, "a", "c")["access"], "private")
+        self.assertIsNone(self.gate.share.find(self.ws, "a", "b"))
+
+    def test_status_on_this_computer(self):
+        x = socket.socket()
+        x.bind(("127.0.0.1", 0))
+        x.listen(1)
+        self.addCleanup(x.close)
+        y = socket.socket()
+        y.bind(("127.0.0.1", 0))
+        free = y.getsockname()[1]
+        y.close()
+        for name, port in (("up", x.getsockname()[1]), ("down", free)):
+            self.app.share_api("POST", "/port", {"project": "p", "name": name, "port": port, "on": True})
+        self.assertEqual(self.app.share_api("GET", "/status", {})["status"], {"p/up": "pc-off", "p/down": "pc-off"})
+        self.app.store.db.put("pc", dict(self.app.pc.cfg(), on=True))
+        self.assertEqual(self.app.share_api("GET", "/status", {})["status"], {"p/up": "on", "p/down": "port-off"})
 
 
 class Admin(unittest.TestCase):

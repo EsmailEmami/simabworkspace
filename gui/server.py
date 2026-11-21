@@ -6791,6 +6791,16 @@ class PcHub:
                 waits.pop((project, port), None)
         return w["ok"]
 
+    def serve_probe(self, h):
+        """POST /pc/probe {ports} from the web version: which of these ports run here now (no data passes)."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        ports = [p for p in (h._body().get("ports") or [])[:SHARE_MAX] if isinstance(p, int) and 1 <= p <= 65535]
+        return h._json(200, {"open": [p for p in ports if port_open(p)]})
+
     def serve_guest(self, h):
         """POST /pc/guest from the web version: {op: ask, id, text, until} waits for the answer of this
         computer's user (or the web's: {op: drop, id}) → {answer: hour | day | always | deny | gone}."""
@@ -8297,6 +8307,53 @@ class App:
             self._shared[p["name"]] = (time.time(), self._shared.get(p["name"], (0.0, []))[1])
         finally:
             self._shared_busy.discard(p["name"])
+
+    # Share on your domain: the settings live in ~/.config/simabworkspace/share.json on the server, so the
+    # app and the web version show and change the same; the web version answers the requests (ShareHub).
+    def share_data(self) -> dict:
+        if not self.conf.configured:
+            raise ApiError(400, "the server is not configured")
+        r = remote_python(self.conf, SHARE_PY, ["get"], multiplex=bool(self.store.settings.get("sshMultiplex")))
+        if isinstance(r, dict) and r.get("missing"):
+            return {"missing": True, "domains": [], "shares": []}
+        return share_clean(r)
+
+    def share_save(self, data: dict) -> dict:
+        r = remote_python(self.conf, SHARE_PY, ["put"], stdin=json.dumps(share_clean(data)).encode(),
+                          multiplex=bool(self.store.settings.get("sshMultiplex")))
+        return share_clean(r)
+
+    def share_api(self, method: str, sub: str, body: dict, host: str = "") -> dict:
+        hook = getattr(self, "share_hook", None)           # the web version: its tables follow at once
+        if method == "GET" and sub == "/status":
+            return {"status": self.share_status(self.share_data()), "web": self.web}
+        if method == "GET" and sub == "":
+            data = self.share_data()
+        elif method == "POST" and sub in ("/domain", "/port"):
+            data = share_edit(self.share_data(), sub, body, host if self.web else "")
+            if hook:
+                hook(data, host, True)
+            data = self.share_save(data)
+        else:
+            raise ApiError(404, "not found")
+        if hook:
+            hook(data, host, False)
+        data.pop("missing", None)
+        for x in data["shares"]:
+            x["urls"] = [f"https://{d}/{x['slug']}/{x['name']}" for d in data["domains"]]
+        data["web"] = self.web
+        return data
+
+    def share_status(self, data: dict) -> dict:
+        shares = data.get("shares") or []
+        probe = getattr(self, "share_probe", None)
+        if probe:                                           # the web version: through the user's computers
+            return probe(shares)
+        on = self.pc.cfg()["on"]
+        out = {}
+        for x in shares:
+            out[f"{x['slug']}/{x['name']}"] = "pc-off" if not on else "on" if port_open(int(x["port"])) else "port-off"
+        return out
 
     def tasks(self, op: dict = None) -> dict:
         """The task list on the server (see TASKS_PY); op = one change, None = just read it."""
@@ -10707,6 +10764,109 @@ def share_pipe(rfile, conn, other):
             pass
 
 
+SHARE_PY = r'''
+import os, sys, json
+d = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "simabworkspace")
+f = os.path.join(d, "share.json")
+if sys.argv[1] == "get":
+    try:
+        with open(f) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {"missing": True}
+    print(json.dumps(data))
+else:
+    data = json.loads(sys.stdin.read())
+    os.makedirs(d, exist_ok=True)
+    tmp = f + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=1)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, f)
+    print(json.dumps(data))
+'''
+
+
+def share_clean(data) -> dict:
+    """share.json as read: only well-formed domains and ports."""
+    data = data if isinstance(data, dict) else {}
+    doms = [d for d in (data.get("domains") or []) if isinstance(d, str) and SHARE_DOMAIN_RE.fullmatch(d)][:10]
+    shares, seen = [], set()
+    for x in data.get("shares") or []:
+        if not isinstance(x, dict):
+            continue
+        sl, nm = share_slug(x.get("slug")), share_slug(x.get("name"))
+        try:
+            port = int(x.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if not SHARE_SLUG_RE.fullmatch(sl) or not SHARE_SLUG_RE.fullmatch(nm) or not 1 <= port <= 65535 or (sl, nm) in seen:
+            continue
+        seen.add((sl, nm))
+        shares.append({"slug": sl, "name": nm, "project": str(x.get("project") or sl)[:200], "port": port,
+                       "access": x.get("access") if x.get("access") in SHARE_ACCESS else "private", "tls": bool(x.get("tls"))})
+    return {"domains": doms, "shares": shares[:SHARE_MAX]}
+
+
+def share_edit(data: dict, sub: str, body: dict, host: str = "", hosts=()) -> dict:
+    """One change from Settings → Share on your domain (POST share/domain or share/port)."""
+    data = share_clean(data)
+    if sub == "/domain":
+        d = share_domain_clean(body.get("domain"))
+        doms = [x for x in data["domains"] if x != d]
+        if body.get("on"):
+            if not SHARE_DOMAIN_RE.fullmatch(d):
+                raise ApiError(400, "enter a domain like projects.example.com")
+            if d == (host or "").lower().split(":")[0] or any(x.split(":")[0] == d for x in hosts or ()):
+                raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
+            if len(doms) >= 10:
+                raise ApiError(400, "at most 10 domains")
+            doms.append(d)
+        data["domains"] = sorted(doms)
+        return data
+    if sub != "/port":
+        raise ApiError(404, "not found")
+    slug = share_slug(body.get("slug") or body.get("project"))
+    name = share_slug(body.get("name"))
+    if not SHARE_SLUG_RE.fullmatch(slug) or not SHARE_SLUG_RE.fullmatch(name) or slug == "__simab":
+        raise ApiError(400, "use letters, digits and - in the address")
+    old = body.get("old") if isinstance(body.get("old"), dict) else {}
+    gone = {(slug, name), (share_slug(old.get("slug")), share_slug(old.get("name")))}
+    rest = [x for x in data["shares"] if (x["slug"], x["name"]) not in gone]
+    if body.get("on"):
+        try:
+            port = int(body.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            raise ApiError(400, "enter the port it runs on, like 3000")
+        project = clean_str(body.get("project"), 200, "project", required=True)
+        if len(rest) >= SHARE_MAX:
+            raise ApiError(400, f"at most {SHARE_MAX} shared ports")
+        access = body.get("access") if body.get("access") in SHARE_ACCESS else "public" if body.get("public") else "private"
+        rest.append({"slug": slug, "name": name, "project": project, "port": port, "access": access, "tls": bool(body.get("tls"))})
+    data["shares"] = sorted(rest, key=lambda x: (x["slug"], x["name"]))
+    return data
+
+
+def port_open(port: int, timeout: float = 0.5) -> bool:
+    """Something listens on this port of this computer (127.0.0.1, else ::1)."""
+    for fam, addr in ((socket.AF_INET, ("127.0.0.1", port)), (socket.AF_INET6, ("::1", port, 0, 0))):
+        try:
+            s = socket.socket(fam, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        s.settimeout(timeout)
+        try:
+            s.connect(addr)
+            return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
+
+
 def share_slug(s) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(s or "").lower())).strip("-")[:40].strip("-")
 
@@ -10832,6 +10992,8 @@ class ShareHub:
         self.lock = threading.Lock()
         self.links, self.key_locks, self.codes = {}, {}, {}
         self.reaper = None
+        if gate.start_loops:
+            threading.Thread(target=self.pull_loop, daemon=True).start()
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_domains (domain TEXT PRIMARY KEY, ws TEXT NOT NULL, main TEXT NOT NULL)")
         self.db.run("CREATE TABLE IF NOT EXISTS web_shares (ws TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, "
                     "project TEXT NOT NULL, port INTEGER NOT NULL, public INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, slug, name))")
@@ -10843,6 +11005,7 @@ class ShareHub:
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_guests (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, slug TEXT NOT NULL, "
                     "name TEXT NOT NULL, label TEXT NOT NULL, ip TEXT NOT NULL, created REAL NOT NULL, exp REAL NOT NULL, last REAL NOT NULL)")
         self.asks = {}              # id -> a visitor waiting for "Ask me"
+        self.mains = {}             # ws -> the workspace's own address (where private links sign in)
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_tokens (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, domain TEXT NOT NULL, exp REAL NOT NULL)")
 
     # settings (Settings → Share on your domain) ---------------------------------------------------
@@ -10867,6 +11030,109 @@ class ShareHub:
                 out.append({"port": port, "t": f"{sl}/{name}"})
         return out
 
+    def data_of(self, ws: str) -> dict:
+        """This workspace's domains + shared ports, as kept in the user's share.json on the server."""
+        st = self.state(ws)
+        return {"domains": st["domains"], "shares": [{k: x[k] for k in ("slug", "name", "project", "port", "access", "tls")}
+                                                     for x in st["shares"]]}
+
+    def main_of(self, ws: str) -> str:
+        r = self.db.rows("SELECT main FROM web_share_domains WHERE ws = ? AND main != '' LIMIT 1", (ws,))
+        return self.mains.get(ws) or (r[0][0] if r else "")
+
+    def sync(self, ws: str, data: dict, host: str = "", check: bool = False):
+        """share.json of the user (edited in the app or here) → the tables requests are answered from.
+        check: only refuse what cannot be (a domain of another workspace, the workspace's own address)."""
+        if host:
+            self.mains[ws] = host.lower()
+        main = self.main_of(ws)
+        doms = []
+        for d in data.get("domains") or []:
+            other = self.domain(d)
+            if other and other["ws"] != ws:
+                if check:
+                    raise ApiError(409, f"{d} is used by another workspace")
+                continue
+            if d == main.split(":")[0] or any(x.split(":")[0] == d for x in self.gate.hosts):
+                if check:
+                    raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
+                continue
+            doms.append(d)
+        if check:
+            return
+        old = {d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ?", (ws,))}
+        for d in old - set(doms):
+            self.db.run("DELETE FROM web_share_domains WHERE domain = ? AND ws = ?", (d, ws))
+            self.db.run("DELETE FROM web_share_tokens WHERE domain = ? AND ws = ?", (d, ws))
+        for d in doms:
+            if d not in old:
+                self.db.run("INSERT OR REPLACE INTO web_share_domains (domain, ws, main) VALUES (?, ?, ?)", (d, ws, main))
+            elif main:
+                self.db.run("UPDATE web_share_domains SET main = ? WHERE domain = ? AND ws = ?", (main, d, ws))
+        self.db.run("DELETE FROM web_shares WHERE ws = ?", (ws,))
+        for x in data.get("shares") or []:
+            a = x.get("access") if x.get("access") in SHARE_ACCESS else "private"
+            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls, ask) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (ws, x["slug"], x["name"], x["project"], int(x["port"]), 1 if a == "public" else 0, 1 if x.get("tls") else 0,
+                         1 if a == "ask" else 0))
+
+    def pull(self, ws: str, app):
+        """Read share.json of this workspace (the app may have changed it); the first time, write ours there."""
+        try:
+            data = app.share_data()
+        except (ApiError, OSError, ValueError):
+            return
+        if data.get("missing"):
+            mine = self.data_of(ws)
+            if mine["domains"] or mine["shares"]:
+                try:
+                    app.share_save(mine)
+                except (ApiError, OSError, ValueError):
+                    pass
+            return
+        self.sync(ws, data)
+
+    def pull_loop(self):
+        while True:
+            time.sleep(30)
+            with self.gate.lock:
+                apps = list(self.gate.apps.items())
+            for ws, app in apps:
+                self.pull(ws, app)
+
+    def probe(self, ws: str, app, shares: list) -> dict:
+        """{"slug/name": on | port-off | pc-off} — is the port of each running on its computer now?"""
+        out = {}
+        by_dev = {}
+        for x in shares:
+            try:
+                by_dev.setdefault(self.device(app, x["project"]), []).append(x)
+            except ApiError:
+                out[f"{x['slug']}/{x['name']}"] = "pc-off"
+        for dev, xs in by_dev.items():
+            try:
+                ln = self.link(ws, app, dev)
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(15)
+                s.connect(ln["sock"])
+                body = json.dumps({"ports": sorted({int(x["port"]) for x in xs})}).encode()
+                s.sendall(("POST /pc/probe HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                           "Content-Length: %d\r\n\r\n" % (ln["port"], ln["secret"], len(body))).encode() + body)
+                data = b""
+                while True:
+                    d = s.recv(65536)
+                    if not d:
+                        break
+                    data += d
+                s.close()
+                head, _, rest = data.partition(b"\r\n\r\n")
+                opened = set((json.loads(rest.decode() or "{}") or {}).get("open") or []) if b" 200 " in head.split(b"\r\n")[0] + b" " else None
+            except (ApiError, OSError, ValueError):
+                opened = None
+            for x in xs:
+                out[f"{x['slug']}/{x['name']}"] = "pc-off" if opened is None else "on" if int(x["port"]) in opened else "port-off"
+        return out
+
     def state(self, ws: str) -> dict:
         doms = [d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ? ORDER BY domain", (ws,))]
         shares = []
@@ -10885,49 +11151,10 @@ class ShareHub:
     def api(self, ws: str, method: str, sub: str, body: dict, host: str) -> dict:
         if method == "GET" and sub == "":
             return self.state(ws)
-        if method == "POST" and sub == "/domain":
-            d = share_domain_clean(body.get("domain"))
-            if not body.get("on"):
-                self.db.run("DELETE FROM web_share_domains WHERE domain = ? AND ws = ?", (d, ws))
-                self.db.run("DELETE FROM web_share_tokens WHERE domain = ? AND ws = ?", (d, ws))
-                return self.state(ws)
-            main = (host or "").lower()
-            if not SHARE_DOMAIN_RE.fullmatch(d):
-                raise ApiError(400, "enter a domain like projects.example.com")
-            if d == main.split(":")[0] or any(x.split(":")[0] == d for x in self.gate.hosts):
-                raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
-            other = self.domain(d)
-            if other and other["ws"] != ws:
-                raise ApiError(409, "this domain is used by another workspace")
-            if len(self.state(ws)["domains"]) >= 10 and not other:
-                raise ApiError(400, "at most 10 domains")
-            self.db.run("INSERT OR REPLACE INTO web_share_domains (domain, ws, main) VALUES (?, ?, ?)", (d, ws, main))
-            return self.state(ws)
-        if method == "POST" and sub == "/port":
-            slug = share_slug(body.get("slug") or body.get("project"))
-            name = share_slug(body.get("name"))
-            if not SHARE_SLUG_RE.fullmatch(slug) or not SHARE_SLUG_RE.fullmatch(name) or slug == "__simab":
-                raise ApiError(400, "use letters, digits and - in the address")
-            if not body.get("on"):
-                self.db.run("DELETE FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
-                return self.state(ws)
-            try:
-                port = int(body.get("port") or 0)
-            except (TypeError, ValueError):
-                port = 0
-            if not 1 <= port <= 65535:
-                raise ApiError(400, "enter the port it runs on, like 3000")
-            project = clean_str(body.get("project"), 200, "project", required=True)
-            old = body.get("old")
-            if isinstance(old, dict):
-                self.db.run("DELETE FROM web_shares WHERE ws = ? AND slug = ? AND name = ?",
-                            (ws, share_slug(old.get("slug")), share_slug(old.get("name"))))
-            n = self.db.rows("SELECT COUNT(*) FROM web_shares WHERE ws = ?", (ws,))[0][0]
-            if n >= SHARE_MAX and not self.find(ws, slug, name):
-                raise ApiError(400, f"at most {SHARE_MAX} shared ports")
-            access = body.get("access") if body.get("access") in SHARE_ACCESS else "public" if body.get("public") else "private"
-            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls, ask) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (ws, slug, name, project, port, 1 if access == "public" else 0, 1 if body.get("tls") else 0, 1 if access == "ask" else 0))
+        if method == "POST" and sub in ("/domain", "/port"):
+            data = share_edit(self.data_of(ws), sub, body, host, self.gate.hosts)
+            self.sync(ws, data, host, check=True)
+            self.sync(ws, data, host)
             return self.state(ws)
         if method == "GET" and sub == "/asks":
             return {"asks": self.open_asks(ws), "now": time.time()}
@@ -11314,6 +11541,8 @@ class ShareHub:
         return sh["public"] or self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain) or (sh.get("ask") and self.guest_ok(h, ws, sh))
 
     def _signin_url(self, sd: dict, to: str) -> str:
+        if not sd.get("main"):
+            sd = dict(sd, main=self.main_of(sd["ws"]))
         scheme = "https" if self.gate.secure else "http"
         return (f"{scheme}://{sd['main']}/__simab/share-auth?d={urllib.parse.quote(sd['domain'])}"
                 f"&to={urllib.parse.quote(to)}")
@@ -11685,7 +11914,11 @@ class WebGate:
             return None
         app = App(Store(d / "simab.db"), ServerConf(meta["user"], meta["host"], str(meta["port"]), str(d / "id_ed25519")), web=True)
         app.pusher = self.pusher
+        app.share_hook = lambda data, host, check, ws=wsid: self.share.sync(ws, data, host, check)
+        app.share_probe = lambda shares, ws=wsid, a=app: self.share.probe(ws, a, shares)
         self.apps[wsid] = app
+        if self.start_loops:
+            threading.Thread(target=self.share.pull, args=(wsid, app), daemon=True).start()
         app.restore_live()
         if self.start_loops:
             threading.Thread(target=app.git_watch_loop, daemon=True).start()
@@ -11823,6 +12056,8 @@ class Handler(BaseHTTPRequestHandler):
             gate.totp_enable(ws, b.get("code"), bool(b.get("on")))
             log_line(f"web: two-step sign-in {'on' if b.get('on') else 'off'} for {self.app.conf.user}@{self.app.conf.host}")
             return {"totp": gate.totp_on(ws)}
+        if sub in ("/share/domain", "/share/port"):          # kept in share.json on the server (app + web)
+            return self.app.share_api("POST", sub[len("/share"):], b, self.headers.get("Host") or "")
         if sub == "/share" or sub.startswith("/share/"):
             return gate.share.api(ws, method, sub[len("/share"):], b, self.headers.get("Host") or "")
         if method == "POST" and sub == "/signout":
@@ -12020,6 +12255,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_sftp(self)
             if method == "POST" and path == "/pc/proxy":       # Share on your domain: one connection to a port here
                 return self.app.pc.serve_proxy(self)
+            if method == "POST" and path == "/pc/probe":       # Share on your domain: which shared ports run here
+                return self.app.pc.serve_probe(self)
             if method == "POST" and path == "/pc/guest":       # Share on your domain: someone asks to open a link
                 return self.app.pc.serve_guest(self)
             if method == "POST" and path == "/pc/term":        # a terminal of this computer in the web version
@@ -12095,6 +12332,9 @@ class Handler(BaseHTTPRequestHandler):
             dirs = {p["name"]: p["remote"] for p in app.projects() if p.get("remote") and (not only or p["name"] == only)}
             return remote_python(app.conf, CHAT_SEARCH_PY, [], timeout=60,
                                  stdin=json.dumps({"q": text, "dirs": dirs, "only": bool(only)}, ensure_ascii=False).encode())
+        if route[1] == "share":
+            sub = "/" + "/".join(parts[1:]) if len(parts) > 1 else ""
+            return app.share_api(method, sub, self._body() if method == "POST" else {}, self.headers.get("Host") or "")
         if route == ("GET", "prompts"):
             return remote_python(app.conf, PROMPTS_PY, ["get"])
         if route == ("POST", "prompts"):

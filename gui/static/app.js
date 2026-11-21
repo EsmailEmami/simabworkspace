@@ -303,7 +303,6 @@
   }
   // ---- Share on your domain: ports of your computer at https://DOMAIN/<project>/<name> (server.py "share")
   function shareRows() {
-    if (!S.web) return null;
     var doms = h('div', { class: 'devices' }), ports = h('div', { class: 'devices' });
     var dom = h('input', { class: 'inp mono', placeholder: 'projects.example.com' });
     var proj = h('select', { class: 'inp' }), name = h('input', { class: 'inp mono', placeholder: 'front' });
@@ -312,44 +311,65 @@
     var SAYS = { private: 'only you, signed in', ask: 'others ask you first', public: 'anyone with the link' };
     function accessSel(v) { var el = h('select', { class: 'inp', title: 'Ask me: someone without your sign-in waits while your phone / computer asks you' }, ACCESS.map(function (a) { return h('option', { value: a[0] }, a[1]); })); el.value = v || 'private'; return el; }
     var pub = accessSel('private'), tls = h('input', { type: 'checkbox' }), guests = h('div', { class: 'devices' });
+    var dots = {}, STATE = { on: ['#4caf50', 'Open now'], 'port-off': ['#e0a030', 'Your computer is connected, but nothing runs on this port'],
+      'pc-off': ['#888', 'Your computer is not connected'] };
+    function status() {
+      api('GET', 'share/status').then(function (d) {
+        Object.keys(dots).forEach(function (k) {
+          var st = STATE[(d.status || {})[k]] || ['#888', 'Unknown'];
+          dots[k].style.color = st[0];
+          dots[k].title = st[1];
+          dots[k].nextSibling.textContent = ' ' + st[1];
+        });
+      }).catch(function () {});
+    }
     function field(label, el) { return h('div', { class: 'field' }, h('label', null, label), el); }
     function render(d) {
       doms.replaceChildren.apply(doms, d.domains.map(function (x) {
         return h('div', { class: 'dev' }, h('span', { class: 'grow mono' }, x),
-          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/domain', { domain: x, on: false }).then(render).catch(fail); } }, 'Remove'));
+          h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/domain', { domain: x, on: false }).then(render).catch(fail); } }, 'Remove'));
       }));
       ports.replaceChildren.apply(ports, d.shares.map(function (x) {
         var url = x.urls[0] || '';
         var box = accessSel(x.access);
-        box.onchange = function () { api('POST', 'account/share/port', Object.assign({}, x, { access: box.value, on: true })).then(render).catch(fail); };
+        box.onchange = function () { api('POST', 'share/port', Object.assign({}, x, { access: box.value, on: true })).then(render).catch(fail); };
+        var dot = h('span', { title: 'Checking…', style: 'color:#888' }, '●');
+        dots[x.slug + '/' + x.name] = dot;
         return h('div', { class: 'dev' }, h('span', { class: 'grow' },
           url ? h('a', { class: 'mono', href: url, target: '_blank', rel: 'noopener' }, url) : h('span', { class: 'mono' }, '/' + x.slug + '/' + x.name),
-          h('br'), h('small', { class: 'muted' }, x.project + ' · ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port + ' · ' + SAYS[x.access || 'private'])),
+          h('br'), h('small', { class: 'muted' }, x.project + ' · ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port + ' · ' + SAYS[x.access || 'private']), h('br'), h('small', { class: 'muted' }, dot, h('span', null, ' checking…'))),
           box,
           url ? h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy') : null,
-          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/port', { slug: x.slug, name: x.name, on: false }).then(render).catch(fail); } }, 'Remove'));
+          h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/port', { slug: x.slug, name: x.name, on: false }).then(render).catch(fail); } }, 'Remove'));
       }));
+      if (d.shares.length) status();
+    }
+    function renderGuests(d) {
       guests.replaceChildren.apply(guests, (d.guests || []).map(function (g) {
         return h('div', { class: 'dev' }, h('span', { class: 'grow' }, g.t + ' · ' + g.label, h('br'),
           h('small', { class: 'muted mono' }, g.ip + ' · ' + (g.exp ? 'until ' + new Date(g.exp * 1000).toLocaleString() : 'until you revoke it'))),
-          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/revoke', { id: g.id }).then(render).catch(fail); } }, 'Revoke'));
+          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/revoke', { id: g.id }).then(renderGuests).catch(fail); } }, 'Revoke'));
       }));
       if (d.guests && d.guests.length) guests.prepend(h('div', { class: 'muted' }, h('small', null, 'Let in by you:')));
     }
     proj.replaceChildren.apply(proj, (S.projects || []).map(function (p) { return h('option', { value: p.name }, p.name); }));
-    function load() { api('GET', 'account/share').then(render).catch(function () {}); }
+    function load() {
+      api('GET', 'share').then(render).catch(function (e) { doms.replaceChildren(h('small', { class: 'muted' }, e.message || 'not available')); });
+      if (S.web) api('GET', 'account/share').then(renderGuests).catch(function () {});
+    }
     load();
     return h('div', null,
-      h('p', { class: 'muted' }, h('small', null, 'Open ports of your computer from anywhere: point a domain of yours to this server (like this site), add it here, then add a port. Works while your computer is on and the port runs.')),
+      h('p', { class: 'muted' }, h('small', null, 'Open ports of your computer from anywhere: point a domain of yours to the server of the web version (like its own address), add it here, then add a port. Works while your computer is on and the port runs. Same list in the app and on the web.')),
       doms,
       h('div', { class: 'row' }, field('Domain', dom),
-        h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/domain', { domain: dom.value, on: true }).then(function (d) { dom.value = ''; render(d); }).catch(fail); } }, 'Add domain')),
+        h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/domain', { domain: dom.value, on: true }).then(function (d) { dom.value = ''; render(d); }).catch(fail); } }, 'Add domain')),
       ports,
+      h('div', null, h('button', { class: 'btn sm', onclick: status }, 'Check again')),
       h('div', { class: 'row' }, field('Project', proj), field('Name', name), field('Port', port),
         h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' HTTPS'),
         field('Who', pub),
         h('button', { class: 'btn sm', onclick: function () {
-          api('POST', 'account/share/port', { project: proj.value, name: name.value, port: port.value, access: pub.value, tls: tls.checked, on: true })
+          api('POST', 'share/port', { project: proj.value, name: name.value, port: port.value, access: pub.value, tls: tls.checked, on: true })
             .then(function (d) { name.value = ''; port.value = ''; pub.value = 'private'; tls.checked = false; render(d); }).catch(fail);
         } }, 'Share port')),
       guests);
@@ -358,9 +378,9 @@
     api('POST', 'account/totp/setup').then(function (d) {
       var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
       var md = openModal({ title: 'Two-step sign-in', size: 'sm', body: [
-        h('p', null, '1. Add this key to an authenticator app (Google Authenticator, Microsoft Authenticator, 2FAS…):'),
-        h('p', null, h('a', { class: 'btn', href: d.uri }, 'Open in authenticator app')),
-        h('p', { class: 'muted' }, 'or type the key:'),
+        h('p', null, '1. Scan this code with an authenticator app (Google Authenticator, Microsoft Authenticator, 2FAS…):'),
+        h('img', { class: 'totp-qr', src: window.SWQR ? SWQR.dataUrl(d.uri) : '', alt: 'QR code' }),
+        h('p', { class: 'muted' }, 'or ', h('a', { href: d.uri }, 'open it in the app'), ', or type the key:'),
         h('div', { class: 'mono totp-key' }, d.secret.replace(/(.{4})/g, '$1 ').trim()),
         h('p', null, '2. Enter the code it shows:'), code],
         foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
@@ -3762,6 +3782,8 @@
             api('POST', 'shortcut').then(function (d) { toast('Added to: ' + d.where.join(', '), 'ok'); }).catch(fail);
           } }, 'Add shortcut')),
 
+        h('div', { class: 'sec' }, 'Share on your domain'),
+        shareRows(),
         h('div', { class: 'sec' }, 'Claude'),
         h('div', { class: 'row' },
           field('Command', inp('claudeCmd', { class: 'inp mono' })),

@@ -568,7 +568,8 @@
     if (!ids.length) { this.agentsEl.replaceChildren(); return; }
     this.agentsEl.replaceChildren.apply(this.agentsEl, [h('div', { class: 'ag-head' }, ids.length + (ids.length === 1 ? ' agent' : ' agents') + ' working')].concat(ids.map(function (id) {
       var a = self.agents[id];
-      return h('div', { class: 'ag', title: 'Show it in the conversation', onclick: function () {
+      return h('div', { class: 'ag' + (a.bg ? ' bg' : ''), title: a.bg ? 'Working in the background' : 'Show it in the conversation', onclick: function () {
+        if (!a.card) return;
         a.card.classList.add('open');
         if (a.card.scrollIntoView) a.card.scrollIntoView({ block: 'center' });
       } },
@@ -577,8 +578,34 @@
     })));
   };
 
-  P.clearAgents = function () {
-    if (this.agents && Object.keys(this.agents).length) { this.agents = {}; this.renderAgents(); }
+  // all=false (turn ended): background agents keep working after the turn, so they stay listed
+  P.clearAgents = function (all) {
+    var self = this, ids = Object.keys(this.agents || {}), gone = 0;
+    ids.forEach(function (id) { if (all || !self.agents[id].bg) { delete self.agents[id]; gone++; } });
+    if (gone) { this.renderAgents(); this.renderStatus(); }
+  };
+
+  // Background agents (Agent run_in_background): their tool result comes back at once, so they are
+  // followed through Claude's system task_started / task_progress / task_notification events instead.
+  P.onTask = function (e) {
+    var id = e.tool_use_id || e.task_id;
+    if (!id || e.task_type === 'local_bash') return;
+    var a = this.agents[id];
+    if (e.subtype === 'task_notification') {
+      if (a) { delete this.agents[id]; this.renderAgents(); this.renderStatus(); }
+      return;
+    }
+    var u = e.usage || {};
+    if (!a) {
+      a = this.agents[id] = { title: e.description || e.subagent_type || 'agent', type: e.subagent_type || e.task_type || 'agent',
+        start: Date.now(), last: 'starting…', steps: 0, card: this.cards[id] || null };
+    }
+    a.bg = a.bg || e.is_backgrounded !== false;
+    if (u.duration_ms) a.start = Date.now() - u.duration_ms;
+    if (u.tool_uses) a.steps = u.tool_uses;
+    if (e.summary || e.last_tool_name) a.last = String(e.summary || e.last_tool_name).split('\n')[0].slice(0, 90);
+    this.renderAgents();
+    this.renderStatus();
   };
 
   P.reset = function () {
@@ -875,6 +902,8 @@
           if (e.permissionMode) this.setMode(e.permissionMode);
           if (Array.isArray(e.slash_commands) && !this.commands.length) this.commands = e.slash_commands.map(function (n) { return { name: n }; });
           if (e.model) this.modelName = e.model;
+        } else if (/^task_(started|progress|notification)$/.test(e.subtype || '')) {
+          this.onTask(e);
         } else if (e.subtype === 'compact_boundary') {
           this.system('— conversation compacted —', 'mark');
         }
@@ -907,6 +936,7 @@
         break;
       case '_exit':
         this.alive = false;
+        this.clearAgents(true);
         this.setBusy(false);
         if (e.code !== 0 && e.code !== null) {
           var box = this.system('Claude stopped (exit ' + e.code + '). Your next message starts it again and continues the conversation.', 'err');
@@ -1108,7 +1138,10 @@
     var texts = [], images = 0, srcs = [];
     (c || []).forEach(function (b) {
       if (b.type === 'tool_result') {
-        if (self.agents[b.tool_use_id]) { delete self.agents[b.tool_use_id]; self.renderAgents(); }
+        var ag = self.agents[b.tool_use_id];
+        if (ag && ((e.tool_use_result || {}).isAsync || /^Async agent launched/.test(resultText(b.content) || ''))) {
+          ag.bg = true; if (ag.last === 'starting…') ag.last = 'working in the background'; self.renderAgents();
+        } else if (ag) { delete self.agents[b.tool_use_id]; self.renderAgents(); }
         var card = self.cards[b.tool_use_id];
         if (!card) return;
         card.classList.remove('pending');

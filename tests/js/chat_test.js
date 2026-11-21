@@ -880,6 +880,35 @@ const tests = {
     assert.ok(tab.agentsEl.classList.contains('hidden'), 'cleared when the turn ends');
   },
 
+  'background agents stay listed after the turn until Claude says they are done'() {
+    const { tab, feed, ws } = newTab();
+    ws.onopen();
+    feed({ t: 'e', e: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [
+      { type: 'tool_use', id: 'bg1', name: 'Agent', input: { description: 'Build invoice UI', subagent_type: 'general-purpose', run_in_background: true } }] } } });
+    feed({ t: 'e', e: { type: 'system', subtype: 'task_started', task_id: 'a09', tool_use_id: 'bg1', description: 'Build invoice UI', task_type: 'local_agent', is_backgrounded: true } });
+    feed({ t: 'e', e: { type: 'user', parent_tool_use_id: null, tool_use_result: { isAsync: true, status: 'async_launched' },
+      message: { content: [{ type: 'tool_result', tool_use_id: 'bg1', content: [{ type: 'text', text: 'Async agent launched successfully.' }] }] } } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', result: 'ok' } });
+    assert.strictEqual(byClass(tab.agentsEl, 'ag').length, 1, 'still working after the turn');
+    assert.match(tab.agentsEl.textContent, /1 agent working/);
+    feed({ t: 'e', e: { type: 'system', subtype: 'task_progress', task_id: 'a09', tool_use_id: 'bg1', last_tool_name: 'Edit',
+      usage: { tool_uses: 7, duration_ms: 65000, total_tokens: 1 } } });
+    assert.match(byClass(tab.agentsEl, 'ag')[0].textContent, /Edit/);
+    assert.match(byClass(tab.agentsEl, 'ag')[0].textContent, /7 steps/);
+    assert.match(tab.stExtra.textContent, /1 agent/);
+    // background bash is not an agent
+    feed({ t: 'e', e: { type: 'system', subtype: 'task_started', task_id: 'b1', tool_use_id: 'sh1', task_type: 'local_bash', description: 'npm build' } });
+    assert.strictEqual(byClass(tab.agentsEl, 'ag').length, 1);
+    feed({ t: 'e', e: { type: 'system', subtype: 'task_notification', task_id: 'a09', tool_use_id: 'bg1', status: 'completed', summary: 'done' } });
+    assert.ok(tab.agentsEl.classList.contains('hidden'), 'gone once it finished');
+    // an agent started without its card (e.g. reconnected later) is listed too; Claude exiting ends it
+    feed({ t: 'e', e: { type: 'system', subtype: 'task_progress', task_id: 'a10', tool_use_id: 'bg2', description: 'Write tests', usage: { tool_uses: 2 } } });
+    assert.match(tab.agentsEl.textContent, /Write tests/);
+    byClass(tab.agentsEl, 'ag')[0].onclick && byClass(tab.agentsEl, 'ag')[0].onclick();
+    feed({ t: 'e', e: { type: '_exit', code: 0 } });
+    assert.ok(tab.agentsEl.classList.contains('hidden'));
+  },
+
   'narrow chat pane (tablet / laptop split) also gets the one chip'() {
     const { tab } = newTab();
     const el = tab.composerEl;

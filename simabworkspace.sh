@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.48.2 2026-11-21  Chat: background agents stay listed (with progress) after the turn until they finish
 #    1.48.1 2026-11-21  WSL: the window opens on the WSL address when Windows cannot reach 127.0.0.1 (VPN/firewall)
 #    1.47.0 2026-11-20  ▶ read: Persian made on the server when the device has no Persian voice
 #    1.48.0 2026-11-20  History: remove an entry or a whole conversation, Clear (all / one project / matches)
@@ -344,7 +345,7 @@
 
 set -u -o pipefail
 
-VERSION="1.48.1"
+VERSION="1.48.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

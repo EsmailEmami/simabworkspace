@@ -2108,7 +2108,7 @@
       { label: 'Continue last chat', disabled: !r, action: function () { resumeLatest(p.name); } },
       { label: 'Sessions — running and past…', disabled: !r, k: runningOf(p.name).length ? runningOf(p.name).length + ' running' : '', action: function () { claudeSessionsDialog(p); } },
       { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
-      { label: 'Builds run on…', disabled: !r, action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
+      { label: 'Builds run on…', disabled: !r, k: window.SWComputers ? window.SWComputers.menuLabel(p.name) : '', action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
       { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
@@ -3180,7 +3180,7 @@
       if (S.open.has(p.name)) S.open.delete(p.name); else S.open.add(p.name);
       localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
       el.classList.toggle('open');
-    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name', dir: 'auto' }, pTitle(p), branchLabel(p)), runningBadge(p), open ? null : gitBadges(p.name, true),
+    } }, h('i', { class: 'dot ' + dot }), h('span', { class: 'proj-name', dir: 'auto' }, pTitle(p), branchLabel(p)), runningBadge(p), window.SWComputers ? window.SWComputers.badge(p) : null, open ? null : gitBadges(p.name, true),
       sync && sync.conflicts ? h('span', { class: 'gb conflict', title: plural(sync.conflicts, 'sync conflict') + ' — click to resolve', onclick: function (e) { e.stopPropagation(); syncDetails(p); } }, '⇅' + sync.conflicts) : null,
       S.docker[p.name] && S.docker[p.name].bad ? h('span', { class: 'gb conflict', title: plural(S.docker[p.name].bad, 'container') + ' with problems — click', onclick: function (e) { e.stopPropagation(); dockerDialog(p); } }, '▣' + S.docker[p.name].bad) : null,
       more));

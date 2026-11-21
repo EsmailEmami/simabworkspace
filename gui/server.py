@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.49.0"
+VERSION = "1.49.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5564,6 +5564,13 @@ if cfg.get("onpc"):
 dev = cfg.get("device")
 if isinstance(dev, dict) and dev.get("id"):
     put(os.path.join(D, os.path.basename(dev["id"]) + ".json"), json.dumps(dev), 0o600)
+    # the socket of the last link stays behind (the computer slept, the app restarted) and sshd
+    # does not replace it (StreamLocalBindUnlink is off by default on the server side):
+    # "remote port forwarding failed for listen path"
+    try:
+        os.remove(os.path.join(D, os.path.basename(dev["id"]) + ".sock"))
+    except OSError:
+        pass
 real = {k: os.path.realpath(os.path.expanduser(v)) for k, v in (cfg.get("paths") or {}).items() if isinstance(v, str) and v}
 print(json.dumps({"home": os.path.expanduser("~"), "dir": D, "real": real}))
 '''
@@ -8165,7 +8172,7 @@ class App:
     def pc_api(self, method: str, rest: list, body: dict) -> dict:
         key = (method, rest[0] if rest else "")
         if key == ("GET", "devices"):
-            return self.pc_devices()
+            return self.pc_devices(cached=True)
         if key == ("POST", "remove"):
             did = body.get("id")
             if not isinstance(did, str) or not PC_ID_RE.fullmatch(did):
@@ -8199,15 +8206,21 @@ class App:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")
 
-    def pc_devices(self) -> dict:
-        """The computers of this server user (from the server) + which projects build on them."""
+    def pc_devices(self, cached=False) -> dict:
+        """The computers of this server user (from the server) + which projects build on them.
+        cached: every window asks every 30 s (sidebar marks) — one ssh call per 10 s is enough."""
+        c = getattr(self, "_pc_cache", None)
+        if cached and c and time.time() - c[0] < 10:
+            return c[1]
         if not self.conf.configured:
             raise ApiError(400, "the server is not configured")
         paths = {p["name"]: p["remote"] for p in self.projects() if p.get("remote")}
         r = remote_python(self.conf, PC_ADMIN_PY, ["list"], stdin=json.dumps({"paths": paths}).encode())
         r = r if isinstance(r, dict) else {}
-        return {"devices": r.get("devices") or [], "builds": r.get("builds") or {},
-                "self": "" if self.web else self.pc.cfg()["id"]}
+        out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {},
+               "self": "" if self.web else self.pc.cfg()["id"]}
+        self._pc_cache = (time.time(), out)
+        return out
 
     # port tunnels ----------------------------------------------------------------
     def _tunnel_conf(self, project: str):

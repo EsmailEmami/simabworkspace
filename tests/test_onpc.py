@@ -88,11 +88,15 @@ class ServerScripts(unittest.TestCase):
 
     def test_setup_list_builds_remove(self):
         dev = {"id": "abcdef012345", "name": "laptop", "os": "windows", "port": 1, "secret": "s" * 40, "since": 5}
+        stale = os.path.join(self.home, ".cache/simabworkspace/pc", dev["id"] + ".sock")
+        os.makedirs(os.path.dirname(stale))
+        socket.socket(socket.AF_UNIX).bind(stale)            # left by the last link: sshd would refuse to bind it again
         out = json.loads(self.py(sw.PC_SETUP_PY, [], json.dumps({"onpc": sw.ONPC_PY, "device": dev, "paths": {"p": "~/proj"}}).encode()))
         d = os.path.join(self.home, ".cache/simabworkspace/pc")
         self.assertEqual(out["dir"], d)
         self.assertEqual(out["real"], {"p": os.path.realpath(os.path.join(self.home, "proj"))})
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700, "only this server user")
+        self.assertFalse(os.path.exists(stale), "the old socket is removed before ssh -R binds it again")
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, dev["id"] + ".json")).st_mode), 0o600, "the secret is in it")
         onpc = os.path.join(self.home, ".local/bin/onpc")
         self.assertEqual(stat.S_IMODE(os.stat(onpc).st_mode), 0o755)

@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.49.1"
+VERSION = "1.49.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1804,10 +1804,13 @@ def chat_args(mode: str, model: str = "", resume: str = "", effort: str = "") ->
     return a
 
 
-def chat_remote_script(rpath: str, claude_cmd: str, args: list) -> str:
+def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "") -> str:
+    """chat: the relay key of the chat tab — onpc sends it, so a question about a command goes to
+    exactly that chat (not to whatever tab is open)."""
     cmd = claude_cmd or "claude"
     # a project built on the user's own computers: Claude is told to use onpc (see PC_HINT)
     inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "")
+             + (f"SIMAB_CHAT={chat}; export SIMAB_CHAT; " if RELAY_KEY_RE.fullmatch(chat or "") else "")
              + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); exec ' + cmd + " "
              + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"}')
     # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
@@ -3268,7 +3271,7 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
 
     def make_argv(mode_, model_, resume_, effort_="", relay=None):
         """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY)."""
-        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_))
+        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "")
         if relay:
             script = chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")
         return ssh_base(c, multiplex=multiplex and not relay) + ["-T", c.target, script]
@@ -5461,7 +5464,7 @@ def send(d, cwd, cmd):
     if s is None:
         return NOT_HERE
     s.settimeout(None)
-    body = json.dumps({"cwd": cwd, "cmd": cmd}).encode()
+    body = json.dumps({"cwd": cwd, "cmd": cmd, "chat": os.environ.get("SIMAB_CHAT", "")[:64]}).encode()
     head = ("POST /pc/run HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
             "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))
     try:
@@ -5886,7 +5889,8 @@ class PcHub:
         if not os.path.isdir(local):
             return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
         verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
-        run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local,
+        chat = b.get("chat") if isinstance(b.get("chat"), str) and RELAY_KEY_RE.fullmatch(b.get("chat") or "") else ""
+        run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local, "chat": chat,
                "start": time.time(), "end": 0, "code": None, "state": "asking" if verdict == "ask" else "running", "out": ""}
         if verdict == "deny":
             run.update(state="denied", end=time.time(), out=why)
@@ -5971,7 +5975,7 @@ class PcHub:
         return code
 
     def ask(self, project: str, cmd: str, run: dict) -> bool:
-        a = {"id": secrets.token_hex(6), "project": project, "cmd": cmd, "at": time.time(),
+        a = {"id": secrets.token_hex(6), "project": project, "cmd": cmd, "at": time.time(), "chat": run.get("chat") or "",
              "until": time.time() + PC_ASK_WAIT, "answer": "", "_ev": threading.Event(), "run": run["id"]}
         with self.lock:
             self.asks[a["id"]] = a
@@ -6005,6 +6009,9 @@ class PcHub:
     def pending(self) -> dict:
         with self.lock:
             asks = [{k: v for k, v in a.items() if not k.startswith("_")} for a in self.asks.values() if not a["answer"]]
+        tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.app.sessions.items()) if (x.spec or {}).get("relay")}
+        for a in asks:
+            a["session"] = tabs.get(a["chat"], "") if a["chat"] else ""     # the chat tab that ran onpc (asked only there)
         runs = [{k: v for k, v in r.items() if k != "out"} for r in list(self.runs)]
         c = self.cfg()
         return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"]}

@@ -1539,9 +1539,14 @@ const tests = {
     // Claude asks to run a command here: in the working chat of that project, above its message box
     await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
     const chat = S.active; chat.busy = true;
-    fakePc.asks = { asks: [{ id: 'q1', project: 'cheshmeh', cmd: 'npx tsc --noEmit', until: Date.now() / 1000 + 100, run: 'r0' }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const other = S.active; other.busy = true;        // another working chat of the same project, the one in view
+    fakePc.asks = { asks: [{ id: 'q1', project: 'cheshmeh', cmd: 'npx tsc --noEmit', until: Date.now() / 1000 + 100, run: 'r0', chat: '0123456789abcdef', session: chat.info.id }], runs: [], now: Date.now() / 1000, output: 'panel' };
     await global.SWComputers.poll(); await settle();
-    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'no dialog when the chat is here');
+    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'no dialog over other tabs');
+    assert.strictEqual(q('.pc-perm', other.msgs).length, 0, 'not in another chat, even of the same project');
+    assert.ok(chat.el.classList.contains('bell'), 'its tab rings');
+    SW.closeTab(other, true); await settle();
     const card = q('.pc-perm', chat.msgs)[0];
     assert.ok(card, 'the question is a card in the chat');
     assert.strictEqual(chat.msgs.lastChild, card, 'at the end: right above the message box');
@@ -1571,9 +1576,20 @@ const tests = {
     await global.SWComputers.poll(); await settle();
     chat.mode = 'default';
     SW.closeTab(chat, true); await settle();
-    // no chat of that project here: a dialog
-    fakePc.asks = { asks: [{ id: 'q3', project: 'zzz', cmd: 'npm run build', until: Date.now() / 1000 + 100 }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    // that chat is in another window of this app: nothing here
+    fakePc.asks = { asks: [{ id: 'q5', project: 'cheshmeh', cmd: 'x', until: Date.now() / 1000 + 100, chat: 'aaaaaaaaaaaaaaaa', session: 'elsewhere' }], runs: [], now: Date.now() / 1000, output: 'chat' };
+    const nToasts = q('.toast').length;
     await global.SWComputers.poll(); await settle();
+    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)));
+    assert.strictEqual(q('.toast').length, nToasts, 'not even a toast');
+    // that chat is not open in this app (started on the web): one quiet toast; clicking it asks
+    fakePc.asks = { asks: [{ id: 'q3', project: 'zzz', cmd: 'npm run build', until: Date.now() / 1000 + 100, chat: 'bbbbbbbbbbbbbbbb', session: '' }], runs: [], now: Date.now() / 1000, output: 'panel' };
+    await global.SWComputers.poll(); await settle();
+    await global.SWComputers.poll(); await settle();
+    assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'no dialog by itself');
+    const t = q('.toast').filter((x) => /npm run build/.test(x.textContent));
+    assert.strictEqual(t.length, 1, 'said once');
+    t[0].click(); await settle();
     const ask = q('.modal').pop();
     assert.match(ask.textContent, /Run on this computer\?/);
     q('button', ask).find((b) => b.textContent === 'Allow once').click(); await settle();

@@ -134,6 +134,12 @@ class ServerScripts(unittest.TestCase):
         os.chmod(os.path.join(fake, "onpc"), 0o755)
         out = subprocess.run(["sh", "-c", script], env=env, capture_output=True, timeout=20).stdout.decode()
         self.assertEqual(out, "[--x][--append-system-prompt][use onpc]")
+        # the chat's relay key reaches the commands Claude runs (onpc sends it: the question goes to that chat)
+        script = sw.chat_remote_script(os.path.join(self.home, "proj"), "printenv SIMAB_CHAT; true", [], "0123456789abcdef")
+        out = subprocess.run(["sh", "-c", script], env=env, capture_output=True, timeout=20).stdout.decode()
+        self.assertEqual(out, "0123456789abcdef\n")
+        script = sw.chat_remote_script(os.path.join(self.home, "proj"), "printenv SIMAB_CHAT; true", [], "x; rm -rf ~")
+        self.assertNotIn("rm -rf", script, "only a real relay key")
 
 
 class Forwarder(threading.Thread):
@@ -220,9 +226,9 @@ class EndToEnd(unittest.TestCase):
         self.envp.stop()
         self.tmp.cleanup()
 
-    def onpc_proc(self, *args, cwd=None):
+    def onpc_proc(self, *args, cwd=None, chat=""):
         return subprocess.Popen([sys.executable, self.onpc_file] + list(args), cwd=cwd or os.path.join(self.srv_dir, "web"),
-                                env=dict(os.environ, HOME=self.home), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                env=dict(os.environ, HOME=self.home, SIMAB_CHAT=chat), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def onpc(self, *args, cwd=None):
         p = self.onpc_proc(*args, cwd=cwd)
@@ -245,10 +251,14 @@ class EndToEnd(unittest.TestCase):
 
     def test_ask_then_always(self):
         self.setcfg(mode="new")
-        p = self.onpc_proc("echo built")
+        import types
+        self.app.sessions["tab7"] = types.SimpleNamespace(spec={"kind": "chat", "relay": "00112233445566ff"})
+        p = self.onpc_proc("echo built", chat="00112233445566ff")
         self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]))
         a = self.hub.pending()["asks"][0]
         self.assertEqual((a["project"], a["cmd"]), ("proj", "echo built"))
+        self.assertEqual((a["chat"], a["session"]), ("00112233445566ff", "tab7"), "asked only in the chat that ran it")
+        del self.app.sessions["tab7"]
         self.hub.answer(a["id"], "always")
         out, err = p.communicate(timeout=20)
         self.assertEqual((p.returncode, out), (0, b"built\n"))

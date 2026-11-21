@@ -259,21 +259,27 @@
     } catch (e) { /* ignore */ }
   }
 
-  // The question goes into the chat of that project that is working (the one that ran onpc), right
-  // above its message box like Claude's own permission cards; no such chat here → a dialog (only in
-  // the main window: another window may have the chat).
+  // The question goes ONLY into the chat that ran onpc (a.session: its tab, found by the server from
+  // the chat's relay key), right above its message box like Claude's own permission cards, and that
+  // tab rings. Never into another tab or as a dialog over whatever is open. That chat is not open in
+  // this app (started on the web / another device): one quiet toast in the main window that opens it.
   var DONE = { once: 'Allowed once — running on this computer', always: 'Always allowed here — running on this computer',
     hour: 'Allowed everything in this project for 1 hour — running', deny: 'Denied — not run' };
-  function chatsFor(project) {
-    var tabs = (S.tabs || []).filter(function (t) { return t.pcAskCard && !t.closed && t.info && t.info.spec && t.info.spec.kind === 'chat' && t.info.spec.project === project; });
-    var busy = tabs.filter(function (t) { return t.busy; });
-    return busy.length ? busy : tabs;
+  function chatsFor(a) {
+    var tabs = (S.tabs || []).filter(function (t) { return t.pcAskCard && !t.closed && t.info && t.info.spec && t.info.spec.kind === 'chat'; });
+    if (a.session) return tabs.filter(function (t) { return t.info.id === a.session; });
+    if (a.chat) return [];
+    // a chat started before this version does not say which it is: only a working chat of that project
+    return tabs.filter(function (t) { return t.busy && t.info.spec.project === a.project; }).slice(0, 1);
   }
+  var toasted = {};
   function ask(a, mode) {
-    var tabs = chatsFor(a.project);
+    var tabs = chatsFor(a);
     if (!tabs.length) {
-      if (SW.wid && SW.wid()) return;
-      askModal(a);
+      if (a.session || (SW.wid && SW.wid()) || toasted[a.id]) return;      // the chat is in another window / already said
+      toasted[a.id] = 1;
+      toast('Claude (' + a.project + ', a chat not open here) wants to run: ' + a.cmd + ' — click to answer', 'warn',
+        { onclick: function () { if (shown[a.id] || !toasted[a.id]) return; askModal(a); } });
       return;
     }
     var views = [];

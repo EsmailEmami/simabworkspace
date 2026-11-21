@@ -1383,6 +1383,7 @@
     this.perms[key] = card;
     this.add(card);
     this.alertUser('Claude wants to run a command on this computer', 'permission');
+    if (this.inView() && SW.sound) SW.sound('permission', this);     // in view too: the user asked to hear it
     return { left: left, close: function (text) { self.closePerm(key, text); } };
   };
 

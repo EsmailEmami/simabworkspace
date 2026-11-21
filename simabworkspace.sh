@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.55.0 2026-11-21  Setup check: everything needed, with a fix button each (opens by itself until all is fine)
 #    1.54.3 2026-11-21  Port tunnels work even when ~/.ssh/config has a failing RemoteForward (Mac)
 #    1.54.2 2026-11-21  Computers: choose which computer runs a project's commands
 #    1.54.1 2026-11-21  Dev servers: open it when it is up (a message, or by itself with a setting)
@@ -363,7 +364,7 @@
 
 set -u -o pipefail
 
-VERSION="1.54.3"
+VERSION="1.55.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

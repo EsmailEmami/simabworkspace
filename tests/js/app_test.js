@@ -164,6 +164,11 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
   else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
+  else if (url === '/api/setup-check' && method === 'GET') res = { items: [
+    { id: 'server', ok: true, title: 'Server connection', detail: 'esi@h port 225', fix: 'connection' },
+    { id: 'login', ok: false, title: 'Claude signed in on the server', detail: 'not signed in yet', fix: 'login' },
+    { id: 'sshfs', ok: false, optional: true, title: 'sshfs on the server (Local only projects)', detail: 'not yet', fix: 'sshfs' }] };
+  else if (url === '/api/setup-check/sshfs') { fakePc.sshfsFetched = true; res = { ok: true }; }
   else if (url === '/api/pc/pair') res = { code: 'C0de_' + 'x'.repeat(28), until: Date.now() / 1000 + 600 };
   else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
@@ -206,6 +211,7 @@ global.fetch = (url, opts) => {
 };
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const S_tabsCount = () => global.SW.S.tabs.length;
 // the sidebar's ⟲ button calls the API (like the periodic refreshes do)
 const refreshFromOutside = async () => { document.body.querySelector('#btn-history').click(); await settle(); document.body.querySelector('#modal-root').replaceChildren(); };
 async function settle() { for (let i = 0; i < 8; i++) await tick(); }
@@ -217,6 +223,7 @@ require(path.join(ROOT, 'gui/static/app.js'));
 global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
 global.SW && require(path.join(ROOT, 'gui/static/files.js'));
 global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
+localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
 global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
 
 const tests = {
@@ -1785,6 +1792,23 @@ const tests = {
     assert.deepStrictEqual(fakePc.remoteAnswers.pop(), { dev: 'a1b2c3d4e5f6', id: 'abcdefabcdef', answer: 'once' });
     SW.closeTab(chat, true); await settle();
     S.web = false;
+  },
+
+  async 'Setup check: what is missing, with a fix button each'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    await global.SWComputers.setupCheck(); await settle();
+    const md = q('.modal').pop();
+    const rows = q('.setup-row', md);
+    assert.deepStrictEqual(rows.map((r) => r.querySelector('.setup-ic').textContent), ['✓', '✗', '○']);
+    assert.strictEqual(q('button', rows[0]).length, 0, 'nothing to fix');
+    q('button', rows[2])[0].click(); await settle();
+    assert.ok(fakePc.sshfsFetched);
+    const n = S_tabsCount();
+    q('button', q('.setup-row', q('.modal').pop())[1])[0].click(); await settle();
+    assert.strictEqual(S_tabsCount(), n + 1, 'Sign in opens Claude in a server terminal');
+    assert.strictEqual(global.SW.S.active.info.spec.kind, 'claude');
+    SW.closeTab(global.SW.S.active, true); await settle();
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

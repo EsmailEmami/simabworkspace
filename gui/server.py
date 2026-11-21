@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.54.3"
+VERSION = "1.55.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6083,6 +6083,30 @@ def types_ns(**kw):
     return types.SimpleNamespace(**kw)
 
 
+# Setup check (⚙ → Setup check…): what the server has — Claude installed and signed in, sshfs for
+# Local only projects (the system one, our own copy, or apt-get to fetch it).
+SERVER_CHECK_PY = r'''
+import os, sys, json, shutil, glob
+H = os.path.expanduser("~")
+c = shutil.which("claude") or ""
+if not c:
+    dirs = [H + "/.local/bin", H + "/.claude/local", H + "/.npm-global/bin", H + "/.bun/bin", H + "/.volta/bin",
+            "/usr/local/bin", "/opt/homebrew/bin"]
+    dirs += sorted(glob.glob(H + "/.nvm/versions/node/*/bin"))[-1:]
+    dirs += sorted(glob.glob(H + "/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary"))[-1:]
+    c = next((d + "/claude" for d in dirs if os.access(d + "/claude", os.X_OK)), "")
+login = os.path.exists(H + "/.claude/.credentials.json") or bool(os.environ.get("ANTHROPIC_API_KEY"))
+if not login:
+    try:
+        login = "oauthAccount" in json.load(open(H + "/.claude.json"))
+    except (OSError, ValueError):
+        pass
+fs = "system" if shutil.which("sshfs") else "own" if os.path.isfile(H + "/.local/lib/simabworkspace/sshfs/usr/bin/sshfs") \
+    else "apt" if shutil.which("apt-get") and shutil.which("dpkg-deb") else ""
+print(json.dumps({"claude": c, "login": login, "sshfs": fs, "fuse": os.path.exists("/dev/fuse")}))
+'''
+
+
 def pc_os() -> str:
     if IS_WIN:
         return "windows"
@@ -9271,6 +9295,45 @@ class App:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")
 
+    def setup_check(self) -> dict:
+        """⚙ → Setup check: every item with ok + what to do."""
+        items = []
+        st = self.status(force=True)
+        ok_ssh = st.get("ssh") == "ok"
+        items.append({"id": "server", "ok": ok_ssh, "title": "Server connection",
+                      "detail": f"{self.conf.target} port {self.conf.port}" if ok_ssh else (st.get("sshError") or "not connected"), "fix": "connection"})
+        srv = {}
+        if ok_ssh:
+            try:
+                srv = remote_python(self.conf, SERVER_CHECK_PY, []) or {}
+            except ApiError as e:
+                srv = {"error": e.message}
+        items.append({"id": "claude", "ok": bool(srv.get("claude")), "title": "Claude Code on the server",
+                      "detail": srv.get("claude") or srv.get("error") or "not installed (curl -fsSL https://claude.ai/install.sh | bash)",
+                      "fix": "install-claude"})
+        items.append({"id": "login", "ok": bool(srv.get("login")), "title": "Claude signed in on the server",
+                      "detail": "signed in" if srv.get("login") else "not signed in yet — sign in once in a server terminal", "fix": "login"})
+        if not self.web:
+            pr = self.prereqs()
+            miss = [x["name"] for x in pr.get("items", []) if not x["ok"]]
+            items.append({"id": "tools", "ok": not miss, "title": "Tools on this computer",
+                          "detail": "all there" if not miss else "missing: " + ", ".join(miss), "fix": "tools"})
+            c = self.pc.cfg()
+            items.append({"id": "computer", "ok": c["on"] and self.pc.state == "connected", "optional": True, "title": "This computer in Computers",
+                          "detail": "connected" if c["on"] and self.pc.state == "connected" else (self.pc.error or "not connected") if c["on"] else
+                          "off — connect it so Claude can run commands and Local only projects here", "fix": "computer"})
+        fs = srv.get("sshfs") or ""
+        items.append({"id": "sshfs", "ok": fs in ("system", "own") and bool(srv.get("fuse")), "optional": True,
+                      "title": "sshfs on the server (Local only projects)",
+                      "detail": {"system": "installed", "own": "ready (our own copy)", "apt": "not yet — fetched on first use, or now"}.get(fs,
+                                 "missing — ask the server's admin: sudo apt install sshfs") + ("" if srv.get("fuse", True) else " · /dev/fuse missing"),
+                      "fix": "sshfs" if fs == "apt" else ""})
+        return {"items": items}
+
+    def setup_fix_sshfs(self) -> dict:
+        r = remote_python(self.conf, PC_MOUNT_PY, ["mount"], timeout=300, stdin=b'{"mounts": []}')
+        return {"ok": True, "result": r}
+
     def pc_remote_asks(self) -> dict:
         """The open questions of all the user's computers, each tied to this workspace's chat tab."""
         r = remote_python(self.conf, PC_BRIDGE_PY, ["asks"])
@@ -10375,6 +10438,10 @@ class Handler(BaseHTTPRequestHandler):
             return app.client_error(self._body())
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
+        if route == ("GET", "setup-check"):
+            return app.setup_check()
+        if route == ("POST", "setup-check") and parts[1:] == ["sshfs"]:
+            return app.setup_fix_sshfs()
         if parts[:1] == ["pc"]:
             return app.pc_api(method, parts[1:], self._body() if method == "POST" else {})
         if route == ("GET", "state"):

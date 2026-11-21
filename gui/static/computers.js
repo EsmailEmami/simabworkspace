@@ -306,6 +306,53 @@
     }).catch(fail);
   }
 
+  // ------------------------------------------------------------------ setup check (⚙ → Setup check…)
+  var CLAUDE_INSTALL = 'curl -fsSL https://claude.ai/install.sh | bash';
+  function setupCheck(auto) {
+    var list = h('div', { class: 'setup-list' }, h('div', { class: 'muted' }, 'Checking…'));
+    var md = null;
+    function fixBtn(it) {
+      var go = function (label, fn) { return h('button', { class: 'btn sm primary', onclick: fn }, label); };
+      switch (it.fix) {
+        case 'connection': case 'tools': return go(it.fix === 'tools' ? 'Install…' : 'Settings…', function () { md.close(); SW.settingsDialog(); });
+        case 'install-claude': return go('Open server terminal', function () {
+          md.close(); SW.openSession({ kind: 'shell', where: 'server' });
+          if (navigator.clipboard) navigator.clipboard.writeText(CLAUDE_INSTALL).catch(function () {});
+          toast('Paste and run: ' + CLAUDE_INSTALL + ' (copied)', 'ok', { sticky: true });
+        });
+        case 'login': return go('Sign in', function () { md.close(); SW.openSession({ kind: 'claude', where: 'server' }); toast('Sign in to Claude in this terminal (it asks the first time), then close it', 'ok', { timeout: 9000 }); });
+        case 'computer': return go('Connect', function () { api('POST', 'pc', { on: true }).then(function () { S.pc = { on: true }; setTimeout(run, 4000); }).catch(fail); });
+        case 'sshfs': return go('Prepare now', function (e) { e.currentTarget.disabled = true; e.currentTarget.textContent = 'Fetching…'; api('POST', 'setup-check/sshfs').then(run).catch(fail); });
+        default: return null;
+      }
+    }
+    function run() {
+      return api('GET', 'setup-check').then(function (d) {
+        kids(list, d.items.map(function (it) {
+          return h('div', { class: 'setup-row ' + (it.ok ? 'ok' : it.optional ? 'opt' : 'bad') },
+            h('span', { class: 'setup-ic' }, it.ok ? '✓' : it.optional ? '○' : '✗'),
+            h('div', { class: 'setup-main' }, h('b', null, it.title), h('small', null, it.detail)),
+            it.ok ? null : fixBtn(it));
+        }));
+        return d;
+      }).catch(function (e) { kids(list, [h('div', { class: 'pc-note err' }, e.message || String(e))]); });
+    }
+    function open1() {
+      md = SW.openModal({ title: 'Setup check', body: h('div', null, h('div', { class: 'pc-note', style: 'margin-top:0' },
+        'Everything Simab Workspace needs, with a button to fix what is missing.'), list),
+        foot: [h('button', { class: 'btn', onclick: function () { run(); } }, 'Check again'), h('button', { class: 'btn primary', onclick: function () { md.close(); } }, 'Done')] });
+    }
+    if (!auto) { open1(); return run(); }
+    // at start: only when something needed is missing (once per device until it is fine)
+    return api('GET', 'setup-check').then(function (d) {
+      var bad = d.items.some(function (it) { return !it.ok && !it.optional; });
+      if (bad) { open1(); run(); }
+      return !bad;
+    }).catch(function () { return false; });
+  }
+  // once at start, until everything needed is there (then never again on this device)
+  setTimeout(function () { if (!localStorage.getItem('sw-setup-ok')) setupCheck(true).then(function (fine) { if (fine) localStorage.setItem('sw-setup-ok', '1'); }); }, 6000);
+
   function showRun(id) {
     api('GET', 'pc/run/' + id).then(function (r) {
       SW.openModal({ title: r.cmd, size: 'wide', body: h('pre', { class: 'pc-out' }, r.out || '(no output)') });
@@ -604,6 +651,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, setupCheck: setupCheck, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

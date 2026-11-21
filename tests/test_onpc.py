@@ -777,3 +777,40 @@ class ClaudeFolderOfLocalOnly(unittest.TestCase):
                 self.assertNotIn(b"No such file", r.stderr + r.stdout)
             r = subprocess.run([sys.executable, "-c", sw.REMOTE_LIST_PY, "~/.simab-mnt/x"], env=env, capture_output=True, timeout=20)
             self.assertIn(conv.encode(), r.stdout, "History lists the conversation")
+
+
+class SetupCheck(unittest.TestCase):
+    def test_server_script(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, HOME=home, PATH="/usr/bin:/bin")
+            env.pop("ANTHROPIC_API_KEY", None)
+            run = lambda: json.loads(subprocess.run([sys.executable, "-c", sw.SERVER_CHECK_PY], env=env, capture_output=True, timeout=20).stdout)
+            r = run()
+            self.assertEqual((r["claude"], r["login"]), ("", False))
+            os.makedirs(os.path.join(home, ".local", "bin"))
+            Path(home, ".local", "bin", "claude").write_text("#!/bin/sh\n")
+            os.chmod(os.path.join(home, ".local", "bin", "claude"), 0o755)
+            os.makedirs(os.path.join(home, ".claude"))
+            Path(home, ".claude", ".credentials.json").write_text("{}")
+            r = run()
+            self.assertEqual((r["claude"], r["login"]), (os.path.join(home, ".local", "bin", "claude"), True))
+            self.assertIn(r["sshfs"], ("system", "own", "apt", ""))
+
+    def test_items(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": t}):
+            app = sw.App(sw.Store(Path(t) / "gui.json"), sw.ServerConf("esi", "h"))
+            with mock.patch.object(app, "status", return_value={"ssh": "ok"}), \
+                    mock.patch.object(sw, "remote_python", return_value={"claude": "/x/claude", "login": False, "sshfs": "apt", "fuse": True}), \
+                    mock.patch.object(app, "prereqs", return_value={"items": [{"name": "mutagen", "ok": False}, {"name": "git", "ok": True}]}):
+                items = {i["id"]: i for i in app.setup_check()["items"]}
+            self.assertTrue(items["server"]["ok"] and items["claude"]["ok"])
+            self.assertFalse(items["login"]["ok"])
+            self.assertEqual(items["login"]["fix"], "login")
+            self.assertEqual(items["tools"]["detail"], "missing: mutagen")
+            self.assertTrue(items["computer"]["optional"] and items["sshfs"]["optional"])
+            self.assertEqual(items["sshfs"]["fix"], "sshfs")
+            with mock.patch.object(app, "status", return_value={"ssh": "error", "sshError": "Permission denied"}), \
+                    mock.patch.object(app, "prereqs", return_value={"items": []}):
+                items = {i["id"]: i for i in app.setup_check()["items"]}
+            self.assertEqual((items["server"]["ok"], items["server"]["detail"]), (False, "Permission denied"))
+            self.assertFalse(items["claude"]["ok"], "unknown without the server")

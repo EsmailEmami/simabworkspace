@@ -4835,6 +4835,7 @@
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
+    settingsDialog: function () { settingsDialog(); },
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
   };
 
@@ -4860,6 +4861,7 @@
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
+        { label: 'Setup check…', action: function () { if (window.SWComputers) window.SWComputers.setupCheck(); } },
         { label: 'Computers — builds on your own computers…', action: function () { if (window.SWComputers) window.SWComputers.open(); } },
         { label: 'Grid: all tabs side by side', action: gridAll },
         { label: 'Single section', disabled: L.groups.length < 2, action: mergeAll },

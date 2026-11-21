@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.50.1"
+VERSION = "1.50.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6279,6 +6279,8 @@ class PcHub:
         for a in asks:
             a["session"] = tabs.get(a["chat"], "") if a["chat"] else ""     # the chat tab that ran onpc (asked only there)
         runs = [{k: v for k, v in r.items() if k != "out"} for r in list(self.runs)]
+        for r in runs:
+            r["session"] = tabs.get(r.get("chat") or "", "") if r.get("chat") else ""   # its output shows in that chat
         c = self.cfg()
         return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"]}
 

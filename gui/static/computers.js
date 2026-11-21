@@ -55,6 +55,7 @@
     info = x;
     if (str !== infoStr && SW.renderProjects) SW.renderProjects();
     infoStr = str;
+    decorate();
   }
   function refreshInfo() {
     return api('GET', 'pc/devices').then(function (x) { setInfo(x); return x; }).catch(function () { return info; });
@@ -321,6 +322,34 @@
     shown[a.id] = { a: a, left: views.map(function (x) { return x.left; }), close: function (text) { views.forEach(function (x) { x.close(text); }); } };
   }
 
+  // ------------------------------------------------------------------ in the chat itself
+  var chatRuns = {};            // run id -> finished and shown
+  function chatTab(sid) {
+    return (S.tabs || []).filter(function (t) { return t.pcRunView && !t.closed && t.info && t.info.id === sid; })[0];
+  }
+  function myName() {
+    var d = info && (info.devices || []).filter(function (x) { return x.id === info.self; })[0];
+    return d ? d.name : 'this computer';
+  }
+  var bootAt = Date.now() / 1000 - 2;
+  function showInChat(tab, r) {
+    if (chatRuns[r.id]) return;
+    if (r.start < bootAt && !(tab.pcRuns && tab.pcRuns[r.id])) { chatRuns[r.id] = 1; return; }   // from before this window
+    if (r.state !== 'running' && r.state !== 'asking') chatRuns[r.id] = 1;     // last update, then leave it
+    if (r.state === 'asking') { tab.pcRunView(r, null, myName()); return; }
+    api('GET', 'pc/run/' + r.id).then(function (d) { tab.pcRunView(d, d.out, myName()); }).catch(function () {});
+  }
+  // every chat says where its work runs (Local only / builds on your computers)
+  function decorate() {
+    (S.tabs || []).forEach(function (t) {
+      if (!t.setWhere || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
+      var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
+      var st = p ? buildState(p.name) : null;
+      if (!st || st.on === 'server') { t.setWhere(''); return; }
+      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ builds on PC' + (st.ok ? '' : ' · off'), st.text, st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad');
+    });
+  }
+
   // ------------------------------------------------------------------ live output box
   function liveBox(run) {
     if (live) live.el.remove();
@@ -362,11 +391,14 @@
         s.left.forEach(function (el) { el.textContent = 'not run if nobody answers in ' + Math.max(0, Math.round(s.a.until - now)) + 's'; });
       });
       (x.runs || []).forEach(function (r) {
+        var tab = r.session && chatTab(r.session);
+        if (tab) { showInChat(tab, r); return; }       // in its own chat, inside the Bash card
         if (seenRuns[r.id]) return;
         seenRuns[r.id] = 1;
-        if (r.state === 'running' && x.output === 'panel') liveBox(r);
+        if (r.state === 'running' && x.output === 'panel' && !r.session) liveBox(r);
       });
       if (live) refreshLive();
+      decorate();
     }).catch(function () {});
   }
   function startPoll() {
@@ -386,6 +418,7 @@
   setTimeout(refreshInfo, 1500);
   setInterval(function () { if (!document.hidden) refreshInfo(); }, INFO_POLL);
 
-  window.SWComputers = { open: open, poll: poll, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  setInterval(decorate, 5000);         // new chat tabs
+  window.SWComputers = { open: open, poll: poll, decorate: decorate, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

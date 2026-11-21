@@ -1647,6 +1647,25 @@ const tests = {
     assert.ok(q('.pcb', head())[0].classList.contains('bad'));
     assert.strictEqual(q('.pcb', head())[0].textContent, '⌂ local off');
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only · off');
+    // its chat says where the work runs, and a command's live output is inside its own Bash card
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'local', shop: 'server' } }));
+    S.pc = { on: true };
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const chat = S.active;
+    global.SWComputers.decorate();
+    assert.strictEqual(chat.whereEl.textContent, '⌂ local');
+    assert.match(chat.whereEl.getAttribute('title') || chat.whereEl.title, /Lives on laptop/);
+    chat.onEvent({ type: 'assistant', message: { id: 'm9', content: [{ type: 'tool_use', id: 'tb1', name: 'Bash', input: { command: 'npm run build' } }] } });
+    fakePc.asks = { asks: [], runs: [{ id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', start: Date.now() / 1000, session: chat.info.id }], now: Date.now() / 1000, output: 'panel' };
+    await global.SWComputers.poll(); await settle();
+    const live = q('.pc-run-live', chat.cards.tb1)[0];
+    assert.ok(live, 'the output is in the Bash card of that chat');
+    assert.match(live.textContent, /running on laptop/);
+    assert.match(live.textContent, /building…/);
+    assert.strictEqual(q('.pc-live').length, 0, 'no floating box over other tabs');
+    fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' };
+    SW.closeTab(chat, true); await settle();
+    S.pc = { on: false };
     delete pr.localOnly;
     // a project built on the computers: its run commands run here, even one saved as "server"
     pr.buildsOn = 'computers';

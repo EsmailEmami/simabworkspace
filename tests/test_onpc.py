@@ -259,6 +259,7 @@ class EndToEnd(unittest.TestCase):
         a = self.hub.pending()["asks"][0]
         self.assertEqual((a["project"], a["cmd"]), ("proj", "echo built"))
         self.assertEqual((a["chat"], a["session"]), ("00112233445566ff", "tab7"), "asked only in the chat that ran it")
+        self.assertEqual(self.hub.pending()["runs"][0]["session"], "tab7", "its output shows in that chat")
         del self.app.sessions["tab7"]
         self.hub.answer(a["id"], "always")
         out, err = p.communicate(timeout=20)

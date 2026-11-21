@@ -1395,6 +1395,38 @@
     return { left: left, close: function (text) { self.closePerm(key, text); } };
   };
 
+  // Computers (computers.js): where this chat's work runs, shown next to the status
+  P.setWhere = function (text, title, cls) {
+    if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.statusEl.append(this.whereEl); }
+    this.whereEl.textContent = text || '';
+    this.whereEl.title = title || '';
+    this.whereEl.className = 'pc-where' + (cls ? ' ' + cls : '') + (text ? '' : ' hidden');
+  };
+  // the live output of a command that runs on the user's computer, inside its Bash card
+  P.pcRunView = function (run, out, who) {
+    var self = this, v = (this.pcRuns = this.pcRuns || {})[run.id];
+    if (!v) {
+      var cards = Object.keys(this.cards).map(function (k) { return self.cards[k]; })
+        .filter(function (c) { return c._name === 'Bash' && c._status && !/\b(ok|err)\b/.test(c._status.className); });   // not finished yet
+      var card = cards[cards.length - 1];
+      if (!card) return false;
+      var head = h('div', { class: 'pc-run-h' }), pre = h('pre', { class: 'pc-out' });
+      card.querySelector('.tool-body').append(h('div', { class: 'pc-run-live' }, head, pre));
+      card.classList.add('open');
+      v = this.pcRuns[run.id] = { head: head, pre: pre };
+    }
+    var done = run.state === 'done';
+    v.head.textContent = '⌂ ' + (done ? (run.code === 0 ? 'ran on ' : 'failed on ') + who + (run.code ? ' · exit ' + run.code : '')
+      : run.state === 'running' ? 'running on ' + who + '…' : run.state + ' on ' + who);
+    v.head.className = 'pc-run-h ' + (done ? (run.code === 0 ? 'ok' : 'err') : run.state === 'running' ? 'run' : 'err');
+    if (typeof out === 'string') {
+      var bottom = v.pre.scrollTop + v.pre.clientHeight >= v.pre.scrollHeight - 4;
+      v.pre.textContent = out.length > 6000 ? '…' + out.slice(-6000) : out;
+      if (bottom) v.pre.scrollTop = v.pre.scrollHeight;
+    }
+    return true;
+  };
+
   P.alertUser = function (text, kind) {
     this.stick = true;
     this.scrollEnd();

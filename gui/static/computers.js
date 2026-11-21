@@ -44,6 +44,13 @@
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
     }
     if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Commands run on the server' };
+    var pin = (d.pins || {})[name];
+    if (pin) {                                       // a computer chosen for this project
+      var pd = (d.devices || []).filter(function (x) { return x.id === pin; })[0];
+      var pn = pd ? pd.name : 'the chosen computer';
+      return pd && pd.online ? { on: 'computers', ok: true, text: 'Commands run on ' + pn + ' (chosen; files synced with the server)' }
+        : { on: 'computers', ok: false, text: pn + ' (chosen for this project) is not connected — Claude cannot run its commands' };
+    }
     var on = online(d);
     return on.length ? { on: 'computers', ok: true, text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
       : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude cannot run its commands' };
@@ -154,6 +161,18 @@
       var b = devs.builds || {};
       var names = Object.keys(b).sort();
       if (!names.length) { kids(buildBox, [h('div', { class: 'muted' }, 'No project with a server folder.')]); return; }
+      function pinSel(n) {
+        var sel = h('select', { class: 'inp pc-pin', title: 'Which computer runs this project\'s commands' },
+          [h('option', { value: '' }, 'Any connected')].concat((devs.devices || []).map(function (x) { return h('option', { value: x.id }, x.name); })));
+        sel.value = (devs.pins || {})[n] || '';
+        sel.addEventListener('change', function () {
+          api('POST', 'pc/builds', { project: n, on: 'computers', dev: sel.value }).then(function (x) {
+            devs = x; setInfo(x); renderBuilds();
+            toast(n + ': commands run on ' + (sel.value ? sel.options[sel.selectedIndex].textContent : 'any connected computer'), 'ok');
+          }).catch(fail);
+        });
+        return sel;
+      }
       kids(buildBox, [h('div', { class: 'pc-note' }, 'My computers: the files stay on the server (synced with this computer) and Claude works on them there, '
         + 'but every command it runs (build, npm, git, tests, dev servers…) runs on a connected computer. If none is connected it stops and tells you — '
         + 'it never runs them on the server instead. New chats pick up a change.')].concat(names.map(function (n) {
@@ -171,6 +190,7 @@
             h('small', { class: st.on === 'server' ? 'muted' : st.ok ? 'ok' : 'err' }, (st.on === 'server' ? '' : st.ok ? '● ' : '⚠ ') + st.text),
             mountErr ? h('small', { class: 'err' }, '⚠ the server could not open it: ' + mountErr, ' ',
               h('button', { class: 'btn sm', onclick: function () { api('POST', 'pc/mount').then(load).catch(fail); } }, 'Try again')) : null),
+          b[n] === 'computers' && (devs.devices || []).length > 1 ? pinSel(n) : null,
           st.on === 'local' ? h('span', { class: 'pc-tag' }, 'Local only') : h('div', { class: 'pc-seg' },
             h('button', { class: b[n] === 'server' ? 'on' : '', onclick: function () { pick('server'); } }, 'Server'),
             h('button', { class: b[n] === 'computers' ? 'on' : '', onclick: function () { pick('computers'); } }, 'My computers')));

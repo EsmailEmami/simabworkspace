@@ -1520,6 +1520,20 @@ const tests = {
     assert.strictEqual(fakePc.devs.builds.cheshmeh, 'computers');
     const row2 = q('.pc-build', md).find((r) => r.classList.contains('focus'));
     assert.match(row2.textContent, /Commands run on laptop/, 'says where it runs now');
+    // with two computers, one can be chosen for the project
+    fakePc.devs.devices.push({ id: 'b2b2b2b2b2b2', name: 'desk', os: 'windows', since: 1, online: false });
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
+    q('button', md).find((b) => b.textContent === 'Refresh').click(); await settle();
+    const pinRow = q('.pc-build', md).find((r) => r.classList.contains('focus'));
+    const pin = q('select', pinRow)[0];
+    assert.ok(pin, 'choose the computer');
+    pin.value = 'b2b2b2b2b2b2'; pin.dispatch('change'); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/pc/builds').pop().body, { project: 'cheshmeh', on: 'computers', dev: 'b2b2b2b2b2b2' });
+    fakePc.devs.pins = { cheshmeh: 'b2b2b2b2b2b2' };
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
+    assert.match(global.SWComputers.buildState('cheshmeh').text, /desk \(chosen for this project\) is not connected/);
+    fakePc.devs.devices.pop(); delete fakePc.devs.pins;
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     // the sidebar marks it: works (a computer is connected) / will stop (none)
     await settle();
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));

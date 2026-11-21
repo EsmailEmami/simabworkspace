@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.54.1"
+VERSION = "1.54.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5501,6 +5501,16 @@ def project_on(cwd):
     return "", ""
 
 
+def pinned(cwd):
+    """The computer chosen for this project (Computers → Commands run on), or ""."""
+    m = load("pins.json", {})
+    best, dev = "", ""
+    for p, v in (m.items() if isinstance(m, dict) else []):
+        if (cwd == p or cwd.startswith(p.rstrip("/") + "/")) and len(p) > len(best):
+            best, dev = p, v
+    return dev
+
+
 def send(d, cwd, cmd):
     s = reach(d)
     if s is None:
@@ -5545,7 +5555,13 @@ def send(d, cwd, cmd):
 
 def run(cmd, on):
     cwd = os.path.realpath(os.getcwd())
-    devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id")))]
+    pin = "" if on else pinned(cwd)
+    devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id"))) and (not pin or d["id"] == pin)]
+    if pin and not devs:
+        name = next((d.get("name") for d in devices() if d["id"] == pin), "") or "the chosen computer"
+        sys.stderr.write("onpc: %s (chosen for this project) is not connected — the command was NOT run.\n"
+                         "Do not run it on the server or elsewhere: tell the user to open Simab Workspace there.\n" % name)
+        return 255
     if not devs:
         sys.stderr.write("onpc: none of your computers is connected%s — the command was NOT run.\n"
                          "Do not run it on the server instead: tell the user to open Simab Workspace on their "
@@ -5630,9 +5646,11 @@ def hook():
 
 def bg(body):
     """Dev servers on the computer, kept by the app there: --bg NAME CMD | --logs NAME | --stop NAME | --ps"""
-    devs = [d for d in devices() if d["online"]]
+    pin = pinned(os.path.realpath(os.getcwd())) if body.get("op") == "start" else ""
+    devs = [d for d in devices() if d["online"] and (not pin or d["id"] == pin)]
     if not devs:
-        sys.stderr.write("onpc: none of your computers is connected — nothing was started or stopped.\n")
+        sys.stderr.write("onpc: %s is not connected — nothing was started or stopped.\n"
+                         % ("the computer chosen for this project" if pin else "none of your computers"))
         return 255
     body["cwd"] = os.path.realpath(os.getcwd())
     body["chat"] = os.environ.get("SIMAB_CHAT", "")[:64]
@@ -5789,7 +5807,13 @@ if op == "list":
             s.close()
         devs.append({"id": d.get("id"), "name": d.get("name") or "", "os": d.get("os") or "",
                      "since": d.get("since") or 0, "version": d.get("version") or "", "online": on})
-    print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {})}))
+    pins = load("pins.json", {})
+    pinned = {}
+    for name, p in (cfg.get("paths") or {}).items():
+        r = os.path.realpath(os.path.expanduser(p)) if isinstance(p, str) and p else ""
+        if r and isinstance(pins, dict) and pins.get(r):
+            pinned[name] = pins[r]
+    print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {}), "pins": pinned}))
 elif op == "remove":
     for ext in (".json", ".sock"):
         try:
@@ -5811,6 +5835,18 @@ elif op == "builds":
     with os.fdopen(fd, "w") as f:
         json.dump(m, f)
     os.replace(os.path.join(D, "projects.json.tmp"), os.path.join(D, "projects.json"))
+    # which computer (empty = any connected one)
+    pins = load("pins.json", {})
+    pins = pins if isinstance(pins, dict) else {}
+    dev = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] == "computers" else ""
+    if dev:
+        pins[r] = dev
+    else:
+        pins.pop(r, None)
+    fd = os.open(os.path.join(D, "pins.json.tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(pins, f)
+    os.replace(os.path.join(D, "pins.json.tmp"), os.path.join(D, "pins.json"))
     print(json.dumps({"path": r, "on": sys.argv[3]}))
 '''
 
@@ -9188,7 +9224,10 @@ class App:
                 raise ApiError(400, "this project has no server folder")
             if (p.get("endpoint") or {}).get("host") not in (None, "", self.conf.host):
                 raise ApiError(400, "this project is on another server")
-            remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], on])
+            dev = body.get("dev") or ""
+            if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
+                raise ApiError(400, "invalid computer")
+            remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], on] + ([dev] if dev and on == "computers" else []))
             return self.pc_devices()
         if self.web:
             raise ApiError(403, "not available in the web version")
@@ -9299,7 +9338,7 @@ class App:
         paths = {p["name"]: p["remote"] for p in self.projects() if p.get("remote")}
         r = remote_python(self.conf, PC_ADMIN_PY, ["list"], stdin=json.dumps({"paths": paths}).encode())
         r = r if isinstance(r, dict) else {}
-        out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {},
+        out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {}, "pins": r.get("pins") or {},
                "self": "" if self.web else self.pc.cfg()["id"]}
         self._pc_cache = (time.time(), out)
         return out

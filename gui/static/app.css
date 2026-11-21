@@ -1258,3 +1258,4 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-dev-chip a { color: var(--accent); text-decoration: none; }
 .pc-dev-chip .icon-btn { width: 18px; height: 18px; font-size: 10px; }
 .pc-dev-chip.off { border-color: #ef444455; }
+.pc-pin { width: auto; max-width: 150px; height: 28px; font-size: 12px; flex: none; }

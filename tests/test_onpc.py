@@ -123,7 +123,11 @@ class ServerScripts(unittest.TestCase):
                       "My computers: every Bash command goes to the computer too (no mount needed)")
         self.assertEqual(subprocess.run([sys.executable, onpc, "--hint"], cwd=self.home, env=self.env,
                                         capture_output=True, timeout=10).stdout, b"")
+        self.py(sw.PC_ADMIN_PY, ["builds", "~/proj", "computers", "abcdef012345"])
+        self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], json.dumps({"paths": {"p": "~/proj"}}).encode()))["pins"],
+                         {"p": "abcdef012345"}, "tied to one computer")
         self.py(sw.PC_ADMIN_PY, ["builds", "~/proj", "server"])
+        self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], json.dumps({"paths": {"p": "~/proj"}}).encode()))["pins"], {})
         self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], b"{}"))["builds"], {})
         self.py(sw.PC_ADMIN_PY, ["remove", dev["id"]])
         self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], b"{}"))["devices"], [])
@@ -305,6 +309,15 @@ class EndToEnd(unittest.TestCase):
         _, out, _ = self.onpc("--list")
         self.assertIn("offline", out)
 
+    def test_a_project_can_be_tied_to_one_computer(self):
+        Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "ffffffffffff"}))
+        code, out, err = self.onpc("echo x")
+        self.assertEqual(code, 255)
+        self.assertIn("chosen for this project", err)
+        self.assertIn("NOT run", err)
+        Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): self.hub.cfg()["id"]}))
+        self.assertEqual(self.onpc("echo x")[:2], (0, "x\n"))
+
     def test_web_and_phone_see_and_answer_the_question(self):
         """PC_BRIDGE_PY (on the server as the user) asks the computer over its socket."""
         self.setcfg(mode="every")
@@ -462,6 +475,7 @@ class LocalOnly(EndToEnd):
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
     test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
     test_my_computers_project_runs_every_command_without_our_question = test_web_and_phone_see_and_answer_the_question = None
+    test_a_project_can_be_tied_to_one_computer = None
 
     def setUp(self):
         super().setUp()

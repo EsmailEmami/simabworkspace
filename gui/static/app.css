@@ -1249,3 +1249,6 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-net.q3 .nb.on { background: var(--warn); }
 .pc-net.q2 .nb.on, .pc-net.q1 .nb.on { background: var(--err); }
 .pc-net.q0 .nrate { color: var(--err); }
+.where-tag { font: 9.5px/14px var(--mono); padding: 0 5px; border-radius: 6px; margin-right: 6px; flex: none; }
+.where-tag.pc { color: #7dd3fc; background: #0c2a3a; }
+.where-tag.server { color: var(--muted); background: var(--bg3); }

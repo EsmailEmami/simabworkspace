@@ -441,7 +441,18 @@
   }
   setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
 
+  // where a Bash command of this chat ran: "pc" / "server" / "" (a server project: no tag).
+  // Same rules as onpc's hook: Local only → the computer, except commands about Claude's own files.
+  var CLAUDE_FILES = /~\/\.claude|\$\{?HOME\}?\/\.claude|\/\.claude\/|\/tmp\/claude-/;
+  function bashWhere(tab, cmd) {
+    var p = tab && tab.info && tab.info.spec && tab.info.spec.project;
+    var st = p ? buildState(p) : null;
+    if (!st || st.on === 'server' || typeof cmd !== 'string') return '';
+    if (st.on === 'local') return CLAUDE_FILES.test(cmd) ? 'server' : 'pc';
+    return /^\s*(\S*\/)?onpc\s/.test(cmd) ? 'pc' : 'server';       // builds on the computers: only onpc goes there
+  }
+
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

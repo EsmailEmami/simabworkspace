@@ -1077,6 +1077,13 @@
     this.scrollEnd();
   };
 
+  // a tiny PC / server tag on Bash cards of a chat whose work runs on the user's computer (computers.js)
+  P.whereTag = function (name, input) {
+    if (name !== 'Bash' || !window.SWComputers || !SWComputers.bashWhere) return null;
+    var w = SWComputers.bashWhere(this, (input || {}).command);
+    return w ? h('span', { class: 'where-tag ' + w, title: w === 'pc' ? 'Ran on your computer' : 'Ran on the server' }, w === 'pc' ? 'PC' : 'server') : null;
+  };
+
   P.toolCard = function (b) {
     var self = this;
     var name = b.name || '?';
@@ -1087,7 +1094,7 @@
     var open = name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'TodoWrite';
     var card = h('div', { class: 'tool-card t-' + name + (open ? ' open' : '') },
       h('div', { class: 'tool-head', onclick: function () { card.classList.toggle('open'); } },
-        h('span', { class: 'tname' }, TOOL_FA[name] || name), h('span', { class: 'tsum' }, toolSummary(this, name, b.input)), status),
+        h('span', { class: 'tname' }, TOOL_FA[name] || name), this.whereTag(name, b.input), h('span', { class: 'tsum' }, toolSummary(this, name, b.input)), status),
       body, resBox);
     card._status = status;
     card._res = resBox;

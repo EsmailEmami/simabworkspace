@@ -1657,6 +1657,7 @@ const tests = {
     assert.strictEqual(chat.whereEl.textContent, '⌂ local');
     assert.match(chat.whereEl.getAttribute('title') || chat.whereEl.title, /Lives on laptop/);
     chat.onEvent({ type: 'assistant', message: { id: 'm9', content: [{ type: 'tool_use', id: 'tb1', name: 'Bash', input: { command: 'npm run build' } }] } });
+    assert.strictEqual(q('.where-tag', chat.cards.tb1)[0].textContent, 'PC', 'a tiny tag: ran on the computer');
     fakePc.asks = { asks: [], runs: [{ id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', start: Date.now() / 1000, session: chat.info.id }], now: Date.now() / 1000, output: 'panel' };
     await global.SWComputers.poll(); await settle();
     const live = q('.pc-run-live', chat.cards.tb1)[0];
@@ -1664,6 +1665,10 @@ const tests = {
     assert.match(live.textContent, /running on laptop/);
     assert.match(live.textContent, /building…/);
     assert.strictEqual(q('.pc-live').length, 0, 'no floating box over other tabs');
+    chat.onEvent({ type: 'assistant', message: { id: 'm10', content: [{ type: 'tool_use', id: 'tb2', name: 'Bash', input: { command: 'ls ~/.claude/projects/x/memory/' } }] } });
+    assert.strictEqual(q('.where-tag', chat.cards.tb2)[0].textContent, 'server', "Claude's own files: on the server");
+    chat.onEvent({ type: 'assistant', message: { id: 'm11', content: [{ type: 'tool_use', id: 'tr1', name: 'Read', input: { file_path: '/x' } }] } });
+    assert.strictEqual(q('.where-tag', chat.cards.tr1).length, 0, 'only Bash cards');
     fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' };
     SW.closeTab(chat, true); await settle();
     // the link's quality next to "simab": 5 bars + what goes over it now

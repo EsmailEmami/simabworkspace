@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.53.0 2026-11-21  Connect a computer from the web version: one line with a one-time link (no password)
 #    1.52.0 2026-11-21  My computers = like Local only: every command of the project runs on your computer, files stay synced on the server
 #    1.51.0 2026-11-21  Dev servers on your computer (onpc --bg) with ↗ / ■ in the chat; the chat says at once when your computer drops off
 #    1.50.5 2026-11-21  Chat: a tiny PC / server tag on Bash cards of projects that work on your computer
@@ -357,7 +358,7 @@
 
 set -u -o pipefail
 
-VERSION="1.52.0"
+VERSION="1.53.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1835,6 +1836,14 @@ run_gui() {
   "$py" "$(winpath "$d/server.py")" "${1:-open}"
 }
 
+# server.py with arguments (pair <link>: connect this computer with a one-time link from the web version)
+run_gui_cmd() {
+  local d py
+  py=$(find_python) || { err "Python 3 is needed."; return 1; }
+  d=$(gui_dir) || { err "GUI files not found."; return 1; }
+  "$py" "$(winpath "$d/server.py")" "$@"
+}
+
 # The workspace in the browser, for a tablet or another computer (see `simabworkspace web --help`).
 run_web() {
   local d py
@@ -1959,6 +1968,7 @@ main() {
     install)   [ -x "$BIN_DIR/mutagen" ] && ensure_path; install_one "${2:-}"; exit $? ;;
     gui)       [ -x "$BIN_DIR/mutagen" ] && ensure_path; run_gui "${2:-open}"; exit $? ;;
     web)       shift; run_web "$@"; exit $? ;;
+    pair)      run_gui_cmd pair "${2:-}"; exit $? ;;
   esac
 
   # first run, or a tool went missing: full setup (prereqs → user → SSH key)

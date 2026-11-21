@@ -630,3 +630,86 @@ class LinkQuality(unittest.TestCase):
             self.assertEqual(hub.net["down"], 0.0, "reset when the link stops")
             hub.state = "error"
             self.assertEqual(hub.net_info()["bars"], 0)
+
+
+class Pairing(unittest.TestCase):
+    """Connect a computer from the web version with a one-time link."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        self.envp = mock.patch.dict(os.environ, {"HOME": self.home, "USERPROFILE": self.home,
+                                                 "XDG_CONFIG_HOME": os.path.join(self.home, ".config")})
+        self.envp.start()
+        self.keygen = mock.patch.object(sw, "ensure_ssh_key", lambda p: None)
+        self.keygen.start()
+        self.gate = sw.WebGate(Path(self.tmp.name) / "web", ["127.0.0.1:2222"], verify=lambda c, pw: None, start_loops=False)
+        tok = self.gate.login("1.2.3.4", {"host": "127.0.0.1", "port": "2222", "user": "sara", "password": "x"})
+        self.app = self.gate.app_for(tok)
+        httpd = sw.make_web_server(self.gate, "127.0.0.1", 0, "", "")
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.port = httpd.server_address[1]
+        self.added = []
+        self.rp = mock.patch.object(sw, "remote_python", side_effect=lambda conf, code, args, **kw: self.added.append((conf.target, code, kw.get("stdin"))) or {})
+        self.rp.start()
+
+    def tearDown(self):
+        self.rp.stop()
+        self.keygen.stop()
+        self.gate.shutdown()
+        self.envp.stop()
+        self.tmp.cleanup()
+
+    def test_one_line_connects_a_new_computer(self):
+        r = self.app.pc_api("POST", ["pair"], {})
+        url = f"http://127.0.0.1:{self.port}/pair/{r['code']}"
+        self.assertAlmostEqual(r["until"] - time.time(), sw.PAIR_TTL, delta=5)
+        with self.assertRaises(sw.ApiError):
+            self.app.pc.app.web = False
+            sw.App.pc_api(self.app, "POST", ["pair"], {})          # only the web version makes links
+        self.app.web = True
+        self.assertEqual(sw.pair_computer(url), 0)                  # what install.sh runs on the new computer
+        target, code, key = self.added[-1]
+        self.assertEqual((target, code), ("sara@127.0.0.1", sw.ADD_KEY_PY))
+        self.assertTrue(key.decode().startswith("ssh-ed25519 "))
+        self.assertEqual(key.decode().strip(), Path(self.home, ".ssh", "id_ed25519.pub").read_text().strip())
+        conf = sw.load_server_conf()
+        self.assertEqual((conf.user, conf.host, str(conf.port)), ("sara", "127.0.0.1", "2222"))
+        self.assertTrue(sw.Store().db.get("pc")["on"], "Computers turned on")
+        self.assertEqual(sw.pair_computer(url), 1, "the link works once")
+        self.assertEqual(sw.pair_computer("https://x/notalink"), 1)
+
+    def test_link_rules(self):
+        import http.client
+        code = sw.pair_new(self.app.conf)["code"]
+
+        def req(method, body=None):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request(method, "/pair/" + code, body=json.dumps(body).encode() if body is not None else None,
+                      headers={"Content-Type": "application/json"} if body is not None else {})
+            r = c.getresponse()
+            out = r.status, json.loads(r.read() or b"{}")
+            c.close()
+            return out
+        self.assertEqual(req("GET"), (200, {"user": "sara", "host": "127.0.0.1", "port": "2222"}))
+        self.assertEqual(req("POST", {"pubkey": "ssh-ed25519 AAAA; rm -rf ~"})[0], 400)
+        self.assertEqual(req("POST", {"pubkey": "not a key"})[0], 400)
+        self.assertEqual(self.added, [])
+        self.assertEqual(req("POST", {"pubkey": "ssh-ed25519 " + "A" * 68 + " me@pc"})[0], 200)
+        self.assertEqual(req("GET")[0], 404, "used")
+        old = sw.pair_new(self.app.conf)["code"]
+        sw.PAIRS[old]["until"] = time.time() - 1
+        self.assertIsNone(sw.pair_take(old), "older than 10 minutes")
+
+    def test_add_key_script(self):
+        key = "ssh-ed25519 " + "B" * 68 + " me@pc"
+        for _ in range(2):
+            r = subprocess.run([sys.executable, "-c", sw.ADD_KEY_PY], input=key.encode(), env=dict(os.environ, HOME=self.home),
+                               capture_output=True, timeout=10)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        f = Path(self.home, ".ssh", "authorized_keys")
+        self.assertEqual(f.read_text().count(key), 1, "added once")
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)

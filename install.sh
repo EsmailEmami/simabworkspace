@@ -46,7 +46,13 @@ BIN="$HOME/.local/bin/simabworkspace"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/simabworkspace/config"
 # First time: ask for the server, user and SSH key right here in the terminal
 # (stdin is the download pipe, so read the answers from the terminal itself).
-if [ ! -f "$CONFIG" ] && [ -r /dev/tty ] && [ -z "${SIMAB_NO_SETUP:-}" ]; then
+if [ -n "${SIMAB_PAIR:-}" ]; then
+  # a one-time link from the web version (Computers → Connect a computer): no questions, no password
+  say ""
+  say "Connecting this computer to your server…"
+  "$BIN" pair "$SIMAB_PAIR" && { "$BIN" gui >/dev/null 2>&1 || true; } \
+    || say "The link did not work — make a new one in the web version (Computers → Connect a computer)."
+elif [ ! -f "$CONFIG" ] && [ -r /dev/tty ] && [ -z "${SIMAB_NO_SETUP:-}" ]; then
   say ""
   say "Set up this machine and your server:"
   "$BIN" setup </dev/tty || say "Setup did not finish — run: simabworkspace setup"

@@ -143,7 +143,9 @@
             });
           } }, 'Remove'));
       }) : [h('div', { class: 'muted' }, 'No computer connected yet.')]).concat([
-        S.web ? h('div', { class: 'pc-note' }, 'To connect a computer: open Simab Workspace on it → ⚙ → Computers → Connect this computer.') : null,
+        S.web ? h('div', { class: 'pc-actions', style: 'justify-content:flex-start' },
+          h('button', { class: 'btn primary sm', onclick: pairDialog }, '+ Connect a computer'),
+          h('span', { class: 'muted' }, 'one line on the new computer — no password, the link works once for 10 minutes')) : null,
         h('div', { class: 'pc-actions' }, h('button', { class: 'btn sm', onclick: load }, 'Refresh'))]));
     }
 
@@ -242,6 +244,43 @@
     render();
     load();
     return md;
+  }
+
+  // Connect a computer (web version): a one-time link → one line to paste on the new computer
+  var REL = 'https://github.com/EsmailEmami/simabworkspace/releases/latest/download/';
+  function pairDialog() {
+    api('POST', 'pc/pair').then(function (r) {
+      var link = location.origin + '/pair/' + r.code;
+      var cmds = {
+        unix: 'curl -fsSL ' + REL + "install.sh | SIMAB_PAIR='" + link + "' bash",
+        win: "$env:SIMAB_PAIR='" + link + "'; irm " + REL + 'install.ps1 | iex' };
+      var which = /Win/.test(navigator.platform || '') ? 'win' : 'unix';
+      var pre = h('pre', { class: 'pc-cmd' });
+      var left = h('span', { class: 'muted' });
+      var tabs = h('div', { class: 'pc-seg' });
+      function show(w) {
+        which = w;
+        pre.textContent = cmds[w];
+        kids(tabs, [['unix', 'Mac · Linux · WSL'], ['win', 'Windows (PowerShell)']].map(function (x) {
+          return h('button', { class: x[0] === w ? 'on' : '', onclick: function () { show(x[0]); } }, x[1]);
+        }));
+      }
+      show(which);
+      var copy = h('button', { class: 'btn primary', onclick: function () {
+        (navigator.clipboard ? navigator.clipboard.writeText(cmds[which]) : Promise.reject()).then(function () { toast('Copied — paste it on the new computer', 'ok'); }, function () { toast('Select the line and copy it', 'warn'); });
+      } }, 'Copy');
+      var md = SW.openModal({ title: 'Connect a computer', body: h('div', { class: 'pc-pair' },
+        h('div', { class: 'pc-note', style: 'margin-top:0' }, 'On the new computer open a terminal (Windows: PowerShell) and paste this one line. '
+          + 'It installs Simab Workspace, connects it to your server user and turns on Computers. Nothing else to type.'),
+        tabs, pre, left),
+        foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close'), copy] });
+      var t = setInterval(function () {
+        var s2 = Math.round(r.until - Date.now() / 1000);
+        left.textContent = s2 > 0 ? 'Works once, for ' + Math.floor(s2 / 60) + ':' + ('0' + (s2 % 60)).slice(-2) + ' more.' : 'Expired — close and make a new one.';
+        if (s2 <= 0) clearInterval(t);
+      }, 1000);
+      md.onclose = function () { clearInterval(t); };
+    }).catch(fail);
   }
 
   function showRun(id) {

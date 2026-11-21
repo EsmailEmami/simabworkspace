@@ -162,6 +162,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
+  else if (url === '/api/pc/pair') res = { code: 'C0de_' + 'x'.repeat(28), until: Date.now() / 1000 + 600 };
   else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
   else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
@@ -1720,6 +1721,28 @@ const tests = {
     delete pr.buildsOn;
     S.pc = { on: false };
     SW.renderProjects();
+  },
+
+  async 'web: Connect a computer gives one line with a one-time link'() {
+    const S = global.SW.S;
+    S.web = true;
+    global.location = global.location || {};
+    global.location.origin = 'https://ws.example';
+    document.body.querySelector('#modal-root').replaceChildren();
+    global.SWComputers.open(); await settle();
+    const md = q('.modal').pop();
+    q('button', md).find((b) => /Connect a computer/.test(b.textContent)).click(); await settle();
+    const dlg = q('.modal').pop();
+    const line = q('.pc-cmd', dlg)[0].textContent;
+    assert.match(line, /SIMAB_PAIR='https:\/\/ws\.example\/pair\/C0de_x+'/);
+    assert.match(line, /install\.(sh|ps1)/);
+    const tabs = q('.pc-seg button', dlg).length ? q('.pc-seg button', dlg) : q('button', q('.pc-seg', dlg)[0]);
+    tabs.find((b) => /Windows/.test(b.textContent)).click();
+    assert.match(q('.pc-cmd', dlg)[0].textContent, /^\$env:SIMAB_PAIR='https:\/\/ws\.example\/pair\/C0de_x+'; irm .*install\.ps1 \| iex$/);
+    tabs.find((b) => /Mac/.test(b.textContent)).click();
+    assert.match(q('.pc-cmd', dlg)[0].textContent, /^curl -fsSL .*install\.sh \| SIMAB_PAIR='.*' bash$/);
+    document.body.querySelector('#modal-root').replaceChildren();
+    S.web = false;
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.52.0"
+VERSION = "1.53.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5883,6 +5883,87 @@ print(json.dumps(out))
 '''
 
 
+# Connect a computer from the web version: a one-time code (10 minutes, one use) for THIS server
+# user. The new computer runs one line (install.sh / install.ps1 with SIMAB_PAIR=<url>), which
+# installs the app and runs `simabworkspace pair <url>`: GET → the server's user/host/port, POST its
+# new public key → the web version adds it to the user's authorized_keys (over its own ssh login).
+PAIR_TTL = 600
+PAIRS = {}                       # code -> {"conf": ServerConf, "until": time, "used": bool}
+PAIR_LOCK = threading.Lock()
+PUBKEY_RE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/=]{40,1000}( [^\r\n]{0,100})?")
+ADD_KEY_PY = r'''
+import os, sys
+key = sys.stdin.read().strip()
+d = os.path.expanduser("~/.ssh")
+os.makedirs(d, mode=0o700, exist_ok=True)
+f = os.path.join(d, "authorized_keys")
+have = open(f).read() if os.path.exists(f) else ""
+if key.split(" ")[1] not in have:
+    with open(f, "a") as fh:
+        fh.write(("" if not have or have.endswith("\n") else "\n") + key + "\n")
+os.chmod(f, 0o600)
+print("{}")
+'''
+
+
+def pair_new(conf: "ServerConf") -> dict:
+    code = secrets.token_urlsafe(24)
+    with PAIR_LOCK:
+        now = time.time()
+        for k in [k for k, v in PAIRS.items() if v["until"] < now]:
+            del PAIRS[k]
+        PAIRS[code] = {"conf": conf, "until": now + PAIR_TTL, "used": False}
+    return {"code": code, "until": now + PAIR_TTL}
+
+
+def pair_take(code: str, consume=False):
+    with PAIR_LOCK:
+        p = PAIRS.get(code)
+        if not p or p["used"] or p["until"] < time.time():
+            return None
+        if consume:
+            p["used"] = True
+        return p
+
+
+def pair_computer(url: str) -> int:
+    """`simabworkspace pair <url>` on the new computer: key, server, config, Computers on."""
+    if not re.fullmatch(r"https?://[^/\s]+/pair/[A-Za-z0-9_-]{20,64}", url or ""):
+        print("  ✗ not a pairing link — make a new one: web version → Computers → Connect a computer")
+        return 1
+    ctx = None
+    if os.environ.get("SIMAB_PAIR_INSECURE") == "1":          # the web version with its own (self-signed) certificate
+        import ssl
+        ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(url, timeout=20, context=ctx) as r:
+            info = json.loads(r.read().decode())
+    except (OSError, ValueError) as e:
+        print(f"  ✗ the link does not work (used, older than 10 minutes, or unreachable): {e}")
+        return 1
+    key = home_path(".ssh", "id_ed25519")
+    if not key.exists() or not Path(str(key) + ".pub").exists():
+        key = Path(create_ssh_key())
+    pub = Path(str(key) + ".pub").read_text().strip()
+    body = json.dumps({"pubkey": pub, "name": socket.gethostname().split(".")[0][:40], "os": pc_os()}).encode()
+    try:
+        req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
+            json.loads(r.read().decode() or "{}")
+    except (OSError, ValueError) as e:
+        print(f"  ✗ the server did not take this computer's key: {e}")
+        return 1
+    conf = ServerConf(info["user"], info["host"], str(info.get("port") or 22), str(key))
+    write_server_conf(conf)
+    store = Store()
+    c = dict(PC_DEFAULT)
+    c.update(store.db.get("pc", {}) or {})
+    c["on"] = True
+    store.db.put("pc", c)
+    print(f"  ✓ connected to {conf.target} (port {conf.port}) — Computers is on; open the app: simabworkspace gui")
+    return 0
+
+
 def pc_os() -> str:
     if IS_WIN:
         return "windows"
@@ -8993,6 +9074,12 @@ class App:
                 self.pc.update({"on": False})
             remote_python(self.conf, PC_ADMIN_PY, ["remove", did])
             return self.pc_devices()
+        if key == ("POST", "pair"):
+            if not self.web:
+                raise ApiError(400, "make the link in the web version (it is reachable from the new computer)")
+            if not self.conf.configured:
+                raise ApiError(400, "the server is not configured")
+            return pair_new(self.conf)
         if key == ("POST", "builds"):
             p = self._project(body.get("project") if isinstance(body.get("project"), str) else "")
             on = body.get("on")
@@ -9893,11 +9980,31 @@ class Handler(BaseHTTPRequestHandler):
         secure = "; Secure" if self.gate.secure else ""
         return {"Set-Cookie": f"{WEB_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"}
 
+    def _pair(self, method: str, code: str):
+        p = pair_take(code)
+        if not p:
+            raise ApiError(404, "this link was used already or is older than 10 minutes — make a new one")
+        c = p["conf"]
+        if method == "GET":
+            return self._json(200, {"user": c.user, "host": c.host, "port": c.port})
+        if method != "POST":
+            raise ApiError(405, "method not allowed")
+        key = self._body().get("pubkey")
+        if not isinstance(key, str) or not PUBKEY_RE.fullmatch(key.strip()):
+            raise ApiError(400, "not an ssh public key")
+        if not pair_take(code, consume=True):
+            raise ApiError(404, "this link was used already")
+        remote_python(c, ADD_KEY_PY, [], stdin=key.strip().encode())
+        return self._json(200, {"ok": True})
+
     def _web_dispatch(self, method: str):
         url = urllib.parse.urlsplit(self.path)
         path, query = url.path, urllib.parse.parse_qs(url.query)
         gate = self.gate
         try:
+            m = re.fullmatch(r"/pair/([A-Za-z0-9_-]{20,64})", path)
+            if m:                       # a new computer with a one-time code (no sign-in: the code is the secret)
+                return self._pair(method, m.group(1))
             if (method != "GET" or path == "/ws") and not self._origin_ok():
                 raise ApiError(403, "forbidden")
             if path == "/api/web-info" and method == "GET":
@@ -10804,6 +10911,8 @@ def main(argv):
         serve_web(argv[2:])
     elif cmd == "stop":
         print("  ✓ GUI stopped" if stop_running(read_state()) else "  GUI is not running")
+    elif cmd == "pair" and len(argv) > 2:      # install.sh / install.ps1 with SIMAB_PAIR
+        return pair_computer(argv[2])
     elif cmd == "shortcut" and IS_WIN:        # used by install.ps1
         print("  ✓ Added to the " + make_windows_shortcut())
     else:

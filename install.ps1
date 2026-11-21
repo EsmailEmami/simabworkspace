@@ -153,7 +153,14 @@ function Install-SimabWorkspace {
   # --- 3. first time: server, user, SSH key and the sync tools (questions in this window)
   $config = Join-Path $home2 '.config\simabworkspace\config'
   if ($env:XDG_CONFIG_HOME) { $config = Join-Path $env:XDG_CONFIG_HOME 'simabworkspace\config' }
-  if (-not (Test-Path $config) -and -not $env:SIMAB_NO_SETUP) {
+  if ($env:SIMAB_PAIR) {
+    # a one-time link from the web version (Computers → Connect a computer): no questions, no password
+    Say ''
+    Say 'Connecting this computer to your server…'
+    & $py $server pair $env:SIMAB_PAIR
+    if ($LASTEXITCODE -ne 0) { Say 'The link did not work — make a new one in the web version (Computers → Connect a computer).' }
+  }
+  elseif (-not (Test-Path $config) -and -not $env:SIMAB_NO_SETUP) {
     Say ''
     Say 'Set up this machine and your server:'
     & $bash ($cmd -replace '\\', '/') setup

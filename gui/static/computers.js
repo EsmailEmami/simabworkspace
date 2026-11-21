@@ -29,7 +29,11 @@
   }
   function lines(v) { return (v || '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean); }
   function dot(state) { return h('i', { class: 'pc-dot ' + state }); }
-  function online(d) { return ((d && d.devices) || []).filter(function (x) { return x.online; }); }
+  // a computer is up: the server says so, or it is THIS computer and its link is up right now
+  function isOn(x) { return !!x && (x.online || (info && x.id === info.self && lastLink === 'connected')); }
+  function online(d) { return ((d && d.devices) || []).filter(isOn); }
+  var infoFresh = false;        // the first answer after start: until then the marks say "checking"
+  var lastLink = '';
   function kids(el, list) { el.replaceChildren.apply(el, list.filter(Boolean)); }
 
   // where a project builds and whether that works right now
@@ -40,7 +44,7 @@
       var pr = (S.projects || []).filter(function (x) { return x.name === name; })[0] || {};
       var dev = ((d.devices) || []).filter(function (x) { return x.id === pr.localOnly; })[0];
       var who = dev ? dev.name : 'its computer';
-      return dev && dev.online ? { on: 'local', ok: true, text: 'Lives on ' + who + ' — Claude works on it there' }
+      return isOn(dev) ? { on: 'local', ok: true, text: 'Lives on ' + who + ' — Claude works on it there' }
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
     }
     if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Commands run on the server' };
@@ -48,7 +52,7 @@
     if (pin) {                                       // a computer chosen for this project
       var pd = (d.devices || []).filter(function (x) { return x.id === pin; })[0];
       var pn = pd ? pd.name : 'the chosen computer';
-      return pd && pd.online ? { on: 'computers', ok: true, text: 'Commands run on ' + pn + ' (chosen; files synced with the server)' }
+      return isOn(pd) ? { on: 'computers', ok: true, text: 'Commands run on ' + pn + ' (chosen; files synced with the server)' }
         : { on: 'computers', ok: false, text: pn + ' (chosen for this project) is not connected — Claude cannot run its commands' };
     }
     var on = online(d);
@@ -64,14 +68,23 @@
     infoStr = str;
     decorate();
   }
-  function refreshInfo() {
-    return api('GET', 'pc/devices').then(function (x) { setInfo(x); return x; }).catch(function () { return info; });
+  function refreshInfo(fresh) {
+    return api('GET', fresh || !infoFresh ? 'pc/devices/fresh' : 'pc/devices').then(function (x) {
+      var first = !infoFresh;
+      infoFresh = true;
+      if (first) infoStr = '';            // draw the real marks now
+      setInfo(x);
+      return x;
+    }).catch(function () { return info; });
   }
 
   // the sidebar: only projects that build on the computers get a mark (green: works, red: it will stop)
   function badge(p) {
     var st = buildState(p.name);
     if (!st || st.on === 'server') return null;
+    if (!infoFresh) {                     // not asked yet since the start: never an old "off"
+      return h('span', { class: 'gb pcb chk', title: 'checking where it runs…' }, st.on === 'local' ? '⌂ local …' : '⚒ PC …');
+    }
     // two different things: Local only = the files live there; My computers = only builds run there
     var local = st.on === 'local';
     return h('span', { class: 'gb pcb ' + (local ? 'lo ' : 'bd ') + (st.ok ? 'ok' : 'bad'), title: st.text + ' — click for Computers',
@@ -466,6 +479,7 @@
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
       var st = p ? buildState(p.name) : null;
       if (!st || st.on === 'server') { t.setWhere(''); return; }
+      if (!infoFresh) { t.setWhere(st.on === 'local' ? '⌂ local …' : '⚒ PC …', 'checking…', ''); return; }
       t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ runs on PC' + (st.ok ? '' : ' · off'), st.text, st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad');
     });
   }
@@ -679,11 +693,12 @@
 
   // the computer's link dropped while Claude works on a project here: say it in that chat at once,
   // and again when it is back (with Continue)
-  var lastLink = '', warned = {};
+  var warned = {};
   function linkWatch(state) {
     if (!state) return;
     var was = lastLink;
     lastLink = state;
+    if (was !== state && (was === 'connected' || state === 'connected')) refreshInfo(true);     // ask again at once
     if (!was || (was === 'connected') === (state === 'connected')) return;
     (S.tabs || []).forEach(function (t) {
       if (!t.system || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
@@ -717,6 +732,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

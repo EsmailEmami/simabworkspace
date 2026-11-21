@@ -1289,3 +1289,4 @@ body.compact .snd-name { flex-basis: 140px; }
 .speed-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .speed-tile b { font: 600 20px var(--mono); }
 .speed-tile small { color: var(--muted); font-size: 11px; }
+.gb.pcb.chk { color: var(--muted); background: var(--bg3); }

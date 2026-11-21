@@ -237,6 +237,7 @@ global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
 localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
 global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
 global.SW && require(path.join(ROOT, 'gui/static/prompts.js'));
+const freshMarks = () => global.SWComputers && global.SWComputers._fresh(true);      // as after the first answer
 
 const tests = {
   'local paths: ~ shown as the real folder (Windows and Linux)'() {
@@ -1524,6 +1525,7 @@ const tests = {
 
   async 'Computers: connect this computer, builds per project, rules; a question pops up in the window'() {
     const S = global.SW.S;
+    freshMarks();
     global.SWComputers.open('cheshmeh'); await settle();
     const md = q('.modal').pop();
     assert.match(md.textContent, /This computer/);
@@ -1930,7 +1932,33 @@ const tests = {
     assert.ok(!/body\.compact\.side-open \.rail \{[^}]*flex-direction: row/.test(css), 'no bottom row any more');
   },
 
+  async 'sidebar marks: "…" until the first fresh answer; this computer counts as on while its link is up'() {
+    const S = global.SW.S;
+    global.SWComputers._fresh(false);
+    const pr = S.projects.find((x) => x.name === 'cheshmeh');
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'computers', shop: 'server' },
+      devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] }));
+    const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ PC …', 'checking, not an old off');
+    // the fresh answer still says offline, but this computer's own link is up → on
+    S.pc = { on: true };
+    fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat', link: 'connecting', bg: [] };
+    await global.SWComputers.poll(); await settle();
+    fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat', link: 'connected', bg: [] };
+    fakePc.devs = Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'computers', shop: 'server' },
+      devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] });
+    await global.SWComputers.poll(); await settle();
+    assert.strictEqual(fakePc.devUrl, '/api/pc/devices/fresh', 'link came up: asked again at once');
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ PC');
+    fakePc.devs = Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: true })] });
+    delete fakePc.devs.builds;
+    fakePc.devs.builds = { cheshmeh: 'server', shop: 'server' };
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
+    S.pc = { on: false };
+  },
+
   async 'Computers: "checking…" until the fresh answer, never an old offline / connected first'() {
+    fakePc.devs = Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: true })] });
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));     // what the sidebar knew
     document.body.querySelector('#modal-root').replaceChildren();
     global.SWComputers.open();

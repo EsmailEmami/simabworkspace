@@ -719,5 +719,49 @@ class BrowserScripts(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class ProjectDialog(unittest.TestCase):
+    def test_project_share_dialog_lists_its_shares(self):
+        js = (ROOT / "gui" / "static" / "app.js").read_text()
+        add = js[js.index("function shareAddDialog"):js.index("function shareProjList")]
+        self.assertIn("project ? shareProjList(project", add)        # the ⋯ menu dialog shows what is shared already
+        lst = js[js.index("function shareProjList"):js.index("function shareRows")]
+        self.assertIn("x.project === project", lst)
+        self.assertIn("shareDialog(x)", lst)
+
+
+class PortStop(unittest.TestCase):
+    def test_pc_port(self):
+        self.assertEqual(sw.pc_port("http://localhost:6000/"), 6000)
+        self.assertEqual(sw.pc_port("https://x.dev/"), 443)
+        self.assertEqual(sw.pc_port("nonsense"), 0)
+
+    @unittest.skipIf(sw.IS_WIN, "posix")
+    def test_stop_port_kills_the_listener(self):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        p = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.assertTrue(wait_for(lambda: sw.port_open(port), 10))
+            if not sw.port_pids(port):
+                self.skipTest("no lsof / fuser here")
+            hub = object.__new__(sw.PcHub); hub.bg = {}
+            self.assertEqual(hub.stop_port(port)["port"], port)
+            self.assertIsNotNone(p.wait(5))
+            with self.assertRaises(sw.ApiError):
+                hub.stop_port(port)              # nothing runs there now
+        finally:
+            p.kill()
+
+    def test_web_never_kills_server_ports_and_ui_has_stop(self):
+        src = (ROOT / "gui" / "server.py").read_text()
+        i = src.index('if key == ("POST", "portstop"):')
+        self.assertIn("if self.web:", src[i:i + 200])
+        self.assertIn('"op") == "portstop"', src)
+        js = (ROOT / "gui" / "static" / "app.js").read_text()
+        self.assertIn("pc/remote-portstop", js)
+        self.assertIn("shareProgram(cur", js)                  # Manage dialog: ▤ Output / ■ Stop
+        self.assertIn("sharePortStop(x); } }, '■')", js)      # sidebar ■
+
+
 if __name__ == "__main__":
     unittest.main()

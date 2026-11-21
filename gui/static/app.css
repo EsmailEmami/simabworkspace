@@ -1368,3 +1368,4 @@ body.compact .snd-name { flex-basis: 140px; }
 .share-link { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-add-row { display: grid; grid-template-columns: 1fr 110px; gap: 8px; }
 
+.share-proj { margin: 4px 0 8px; }

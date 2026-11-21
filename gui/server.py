@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.1"
+VERSION = "1.64.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6772,6 +6772,17 @@ class PcHub:
                 x["state"] = "stopped"
                 pc_kill(x["_p"])
 
+    def stop_port(self, port: int) -> dict:
+        """Stop what listens on a port here (a shared port): its dev server if we started it, else the program."""
+        mine = [x for x in self.bg.values() if x["state"] == "running" and any(pc_port(u) == port for u in x.get("urls") or [])]
+        for x in mine:
+            self.stop_bg(x["name"])
+        pids = port_pids(port)
+        if not pids and not mine:
+            raise ApiError(404, f"nothing runs on :{port} here")
+        port_kill(pids)
+        return {"ok": True, "port": port, "bg": [x["name"] for x in mine]}
+
     def bg_list(self) -> list:
         return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in list(self.bg.values())]
 
@@ -7067,6 +7078,15 @@ class PcHub:
                 return h._json(404, {"error": "not running here"})
             self.stop_bg(b["name"])
             return h._json(200, {"ok": True})
+        if b.get("op") == "portstop":            # a shared port's program, stopped from the phone / web
+            port = clean_port(b.get("port"), "port")
+            if not port_pids(port) and not any(x["state"] == "running" and any(pc_port(v) == port for v in x.get("urls") or []) for x in self.bg.values()):
+                return h._json(404, {"error": f"nothing runs on :{port} on {c['name']}"})
+            if not u:
+                return h._json(403, {"error": f"unlock {c['name']} with your MFA code first", "locked": True})
+            r = self.stop_port(port)
+            self.audit("stop", f"port {port}", u["by"])
+            return h._json(200, dict(r, dev=c["id"]))
         if b.get("op") == "answer":
             if b.get("answer") != "deny" and not u:    # deny is always fine; allowing needs the unlock
                 return h._json(403, {"error": f"unlock {c['name']} with your MFA code to allow it from here", "locked": True})
@@ -7424,6 +7444,12 @@ class PcHub:
 PC_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::\d+)?[^\s'\"<>]*")
 
 
+def pc_port(url: str) -> int:
+    """The port of a dev server's printed URL (http://localhost:5173/ → 5173)."""
+    m = re.match(r"(https?)://[^/:]+(?::(\d+))?", url or "")
+    return int(m.group(2)) if m and m.group(2) else 443 if m and m.group(1) == "https" else 80 if m else 0
+
+
 def pc_urls(text: str, seen=()) -> list:
     """Every local address a dev server printed, one per port (a project may serve an API and a panel);
     SEEN: the ones found before (only the new output is searched again)."""
@@ -7487,6 +7513,59 @@ def pc_hung_up(conn) -> bool:
         return bool(r) and not conn.recv(1, socket.MSG_PEEK)
     except (OSError, ValueError):
         return True
+
+
+def port_pids(port: int) -> list:
+    """Pids listening on a TCP port of this computer (never this process)."""
+    pids = set()
+    try:
+        if IS_WIN:
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10).stdout
+            for ln in out.splitlines():
+                f = ln.split()
+                if len(f) >= 5 and f[3].upper() == "LISTENING" and f[1].rsplit(":", 1)[-1] == str(port) and f[4].isdigit():
+                    pids.add(int(f[4]))
+        else:
+            for cmd in (["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"], ["fuser", f"{port}/tcp"]):
+                if not shutil.which(cmd[0]):
+                    continue
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                pids.update(int(x) for x in re.findall(r"\d+", r.stdout))
+                if pids:
+                    break
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    pids.discard(os.getpid())
+    return sorted(pids)
+
+
+def port_kill(pids: list):
+    for pid in pids:
+        try:
+            if IS_WIN:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not IS_WIN:
+        end = time.time() + 3
+        while time.time() < end and any(pid_alive(x) for x in pids):
+            time.sleep(0.2)
+        for pid in pids:
+            if pid_alive(pid):
+                try:
+                    os.kill(pid, getattr(signal, "SIGKILL"))
+                except OSError:
+                    pass
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def pc_kill(p):
@@ -10051,6 +10130,14 @@ class App:
                 e = str((r or {}).get("error") or "no answer")
                 raise ApiError(409 if "already running" in e else 403 if (r or {}).get("locked") else 404, e)
             return r
+        if key == ("POST", "remote-portstop"):
+            dev = body.get("dev") or ""
+            if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
+                raise ApiError(400, "invalid computer")
+            r = self.pc_call(dev, {"op": "portstop", "port": clean_port(body.get("port"), "port")})
+            if not isinstance(r, dict) or r.get("error"):
+                raise ApiError(403 if (r or {}).get("locked") else 404, str((r or {}).get("error") or "no answer"))
+            return r
         if key == ("POST", "remote-answer"):
             dev, aid, ans = body.get("dev"), body.get("id"), body.get("answer")
             if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev) and isinstance(aid, str) and re.fullmatch(r"[0-9a-f]{12}", aid)
@@ -10119,6 +10206,10 @@ class App:
             return self.pc.net_info()
         if key == ("POST", "speed"):
             return ssh_speed(self.conf)
+        if key == ("POST", "portstop"):
+            if self.web:                    # never the server's own processes: the web asks the computer (remote-portstop)
+                raise ApiError(403, "not in the web version")
+            return self.pc.stop_port(clean_port(body.get("port"), "port"))
         if key == ("POST", "bgstop"):
             self.pc.stop_bg(str(body.get("name") or "") or "-")
             return {"bg": self.pc.bg_list()}

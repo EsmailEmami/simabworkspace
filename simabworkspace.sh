@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.64.2 2026-11-21  Share a port from a project lists what it shares already; stop the program on a shared port (■), see its output when the workspace started it
 #    1.64.1 2026-11-21  Share: new tabs stay on the project, link window redesigned, Revoke works at once (also on the computer); question windows close only by their answer; Settings share list cleaned, share a port from the project ⋯ menu
 #    1.64.0 2026-11-21  Share: one apps address (web --share-domain) https://APPS/<user>/<project>/<name>; shared links + dev servers in the sidebar; Computers in tabs
 #    1.63.2 2026-11-21  Settings in tabs (one per section); dev servers show every port they serve; QR code in the authenticator setup dialogs
@@ -379,7 +380,7 @@
 
 set -u -o pipefail
 
-VERSION="1.64.1"
+VERSION="1.64.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

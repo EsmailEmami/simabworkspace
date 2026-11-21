@@ -328,8 +328,35 @@
         h('span', { class: 'ic share-dot ' + st[0] }, '●'), h('span', { class: 'nm' }, '⇡ ' + x.name + ' → :' + x.port),
         asks ? h('span', { class: 'share-ask', title: asks + ' waiting for your answer' }, asks + ' ?') : null,
         online ? h('span', { class: 'tag', title: online + ' using it now' }, online + ' online') : null,
-        h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''));
+        h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''),
+        (S.shareSt || {})[shareKey(x)] === 'on' ? h('button', { class: 'icon-btn dev-stop', title: 'Stop what runs on :' + x.port,
+          onclick: function (e) { e.stopPropagation(); sharePortStop(x); } }, '■') : null);
     });
+  }
+  // The program behind a shared port: its dev server (output + stop) if the workspace started it, else stop only.
+  function shareDev(x) {
+    var C = window.SWComputers;
+    return ((S.web ? S.remoteBg : S.localBg) || []).filter(function (d) {
+      return d.state === 'running' && (d.urls && d.urls.length ? d.urls : d.url ? [d.url] : []).some(function (u) { return C && C.portOf(u) === String(x.port); });
+    })[0];
+  }
+  function sharePortStop(x) {
+    var C = window.SWComputers;
+    return confirmDlg('Stop what runs on :' + x.port + ' on your computer?').then(function (ok) {
+      if (!ok) return;
+      var go = S.web ? C.ensureUnlock().then(function (u) { return u && api('POST', 'pc/remote-portstop', { port: x.port }); })
+        : api('POST', 'pc/portstop', { port: x.port });
+      return go.then(function (r) { if (!r) return; toast(':' + x.port + ' stopped', 'ok'); loadShare(true); if (S.web) C.webPoll(); else C.poll(); });
+    }).catch(fail);
+  }
+  function shareProgram(x, st) {
+    var d = shareDev(x), C = window.SWComputers;
+    if (d) return h('div', { class: 'share-acts' }, h('span', { class: 'muted share-sub grow' }, 'Runs as ' + d.name + (d.devName ? ' on ' + d.devName : '')),
+      h('button', { class: 'btn sm', onclick: function () { C.devLog(d); } }, '▤ Output'),
+      h('button', { class: 'btn sm danger', onclick: function () { sharePortStop(x); } }, '■ Stop'));
+    if (st !== 'on') return null;
+    return h('div', { class: 'share-acts' }, h('span', { class: 'muted share-sub grow' }, 'Started outside the workspace — its output is not here. Start it with ▶ a run command to see it.'),
+      h('button', { class: 'btn sm danger', onclick: function () { sharePortStop(x); } }, '■ Stop'));
   }
   function shareDialog(x) {
     var box = h('div', { class: 'share-dlg' });
@@ -373,6 +400,7 @@
           url ? h('div', { class: 'share-acts' },
             h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, 'Open ↗'),
             h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link')) : null),
+        shareProgram(cur, (S.shareSt || {})[shareKey(x)]),
         h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg,
           h('div', { class: 'muted share-sub' }, (WHO.filter(function (a) { return a[0] === cur.access; })[0] || WHO[0])[2])),
         section('Asking now', asks.length, asks.map(function (a) {
@@ -445,6 +473,7 @@
     var md = openModal({ title: 'Share a port', size: 'sm', body: h('div', { class: 'share-dlg' },
       h('div', { class: 'muted share-sub' }, 'Open a port of your computer from anywhere, while your computer is on and the port runs.'),
       project ? null : field('Project', proj),
+      project ? shareProjList(project, function () { md.close(); }) : null,
       h('div', { class: 'share-add-row' }, field('Name', name), field('Port', port)),
       h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' The port speaks HTTPS'),
       h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg, hint),
@@ -455,6 +484,20 @@
             .then(function (d) { md.close(); toast('Shared', 'ok'); loadShare(true); if (done) done(d); }).catch(fail);
         } }, 'Share')] });
     setTimeout(function () { name.focus(); }, 50);
+  }
+  // What this project shares already (the ⋯ menu dialog): name → port, link, Manage.
+  function shareProjList(project, close) {
+    var mine = ((S.share && S.share.shares) || []).filter(function (x) { return x.project === project; });
+    if (!mine.length) return null;
+    return h('div', { class: 'share-rows share-proj' }, h('div', { class: 'share-lbl' }, 'Shared now'), mine.map(function (x) {
+      var url = x.urls && x.urls[0] || '';
+      return h('div', { class: 'share-row share-item' },
+        h('div', { class: 'grow' },
+          h('div', null, h('b', null, x.name), h('span', { class: 'muted mono share-sub' }, '  → :' + x.port)),
+          url ? h('a', { class: 'mono share-sub share-link', href: url, target: '_blank', rel: 'noopener' }, url) : null),
+        h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''),
+        h('button', { class: 'btn sm', onclick: function () { close(); shareDialog(x); } }, 'Manage'));
+    }));
   }
   function shareRows() {
     var doms = h('div', { class: 'muted share-sub' }), ports = h('div', { class: 'share-rows' }), guests = h('div', { class: 'share-rows' });

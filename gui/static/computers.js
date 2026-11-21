@@ -88,12 +88,15 @@
     var md = SW.openModal({ title: 'Computers', size: 'pcm', body: body,
       foot: [h('span', { class: 'left muted' }, 'Claude stays on the server · builds run where you choose'),
         h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
-    var me = null, devs = info, timer = null;
+    var me = null, devs = info, timer = null, checking = true;      // until the fresh answer: "checking…" 
     md.onclose = function () { clearInterval(timer); };
 
     function load() {
       var a = S.web ? Promise.resolve(null) : api('GET', 'pc').then(function (x) { me = Object.assign(x, { recent: me && me.recent }); });
-      var b = api('GET', 'pc/devices').then(function (x) { devs = x; setInfo(x); }).catch(function (e) { devs = { error: e.message || String(e) }; });
+      checking = true;
+      renderDevs();
+      var b = api('GET', 'pc/devices/fresh').then(function (x) { devs = x; setInfo(x); }).catch(function (e) { devs = { error: e.message || String(e) }; })
+        .then(function () { checking = false; });
       var c = S.web ? Promise.resolve() : api('GET', 'pc/asks').then(function (x) { if (me) me.recent = x; });
       return Promise.all([a, b]).then(function () { return c; }).then(render).catch(fail);
     }
@@ -140,10 +143,11 @@
       if (devs.error) { kids(devBox, [h('div', { class: 'pc-note err' }, devs.error)]); return; }
       var list = devs.devices || [];
       kids(devBox, (list.length ? list.map(function (d) {
-        return h('div', { class: 'pc-dev' }, dot(d.online ? 'on' : 'off'),
+        return h('div', { class: 'pc-dev' }, dot(checking ? 'wait' : d.online ? 'on' : 'off'),
           h('div', { class: 'pc-dev-main' },
             h('div', null, h('b', null, d.name || '?'), d.id === devs.self ? h('span', { class: 'pc-tag' }, 'this computer') : null),
-            h('small', { class: 'muted' }, (OS[d.os] || d.os) + ' · ' + (d.online ? 'connected' : 'offline') + (d.since ? ' · last connected ' + ago(d.since) : ''))),
+            h('small', { class: 'muted' }, (OS[d.os] || d.os) + ' · ' + (checking ? 'checking…' : d.online ? 'connected' : 'offline')
+              + (d.since && !checking ? ' · last connected ' + ago(d.since) : ''))),
           h('button', { class: 'btn sm danger', title: 'Forget this computer on the server', onclick: function () {
             SW.confirmDlg('Remove “' + (d.name || '?') + '”? Claude can no longer run commands there until it connects again.', 'Remove', true).then(function (ok) {
               if (ok) api('POST', 'pc/remove', { id: d.id }).then(function (x) { devs = x; setInfo(x); load(); }).catch(fail);

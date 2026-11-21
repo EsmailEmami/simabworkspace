@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.61.1"
+VERSION = "1.61.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -9562,7 +9562,7 @@ class App:
     def pc_api(self, method: str, rest: list, body: dict) -> dict:
         key = (method, rest[0] if rest else "")
         if key == ("GET", "devices"):
-            return self.pc_devices(cached=True)
+            return self.pc_devices(cached=rest[1:] != ["fresh"])      # the Computers dialog asks now, the sidebar may use 10 s old
         if key == ("POST", "remove"):
             did = body.get("id")
             if not isinstance(did, str) or not PC_ID_RE.fullmatch(did):

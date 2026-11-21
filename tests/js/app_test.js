@@ -158,7 +158,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/tasks') res = tasksOp(method === 'POST' ? body : null);
   else if (url === '/api/pc' && method === 'POST') { fakePc.posts.push(body); Object.assign(fakePc.me.config, body); res = fakePc.me; }
   else if (url === '/api/pc') res = fakePc.me;
-  else if (url === '/api/pc/devices') res = fakePc.devs;
+  else if (url === '/api/pc/devices' || url === '/api/pc/devices/fresh') { fakePc.devUrl = url; res = fakePc.devs; }
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
@@ -1928,6 +1928,20 @@ const tests = {
     assert.match(css, /body\.compact\.side-open \.rail \{ display: flex; position: fixed; z-index: 46; left: 0; top: 0; bottom: 0; width: 54px;/);
     assert.match(css, /body\.compact\.side-open #sidebar \{ left: 54px;/);
     assert.ok(!/body\.compact\.side-open \.rail \{[^}]*flex-direction: row/.test(css), 'no bottom row any more');
+  },
+
+  async 'Computers: "checking…" until the fresh answer, never an old offline / connected first'() {
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));     // what the sidebar knew
+    document.body.querySelector('#modal-root').replaceChildren();
+    global.SWComputers.open();
+    const md = q('.modal').pop();
+    const row = () => q('.pc-dev', md)[0];
+    assert.match(row().textContent, /checking…/);
+    assert.ok(!/connected|offline/.test(row().querySelector('small').textContent));
+    await settle();
+    assert.strictEqual(fakePc.devUrl, '/api/pc/devices/fresh', 'asked now, not the 10 s old list');
+    assert.match(row().textContent, /connected · last connected/);
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.61.2 2026-11-21  Computers: "checking…" until the fresh state, not an old offline first
 #    1.61.1 2026-11-21  Phone: the tools are a left column of the drawer, like on the laptop and tablet
 #    1.61.0 2026-11-21  Web / phone: a terminal of your computer (project ⋯ → Terminal on your computer)
 #    1.60.0 2026-11-21  Web / phone: start, watch and stop the run commands of your computer
@@ -371,7 +372,7 @@
 
 set -u -o pipefail
 
-VERSION="1.61.1"
+VERSION="1.61.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

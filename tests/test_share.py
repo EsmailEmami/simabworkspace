@@ -323,6 +323,20 @@ class EndToEnd(unittest.TestCase):
         th.join(15)
         self.assertEqual(out[-1], 502, out)
         self.assertIn(f"share port {free} on the internet", hub.cfg()["always"]["esi"])
+        hub.cfg()
+        self.store.db.put("pc", dict(hub.cfg(), always={}))
+        for ans in ("once", "hour"):                 # one answer is enough for the whole page (many requests)
+            hub.share_ok.clear()
+            hub.hour.clear()
+            th = threading.Thread(target=one)
+            th.start()
+            self.assertTrue(wait_for(lambda: hub.asks))
+            hub.answer(next(iter(hub.asks)), ans)
+            th.join(15)
+            for _ in range(3):
+                one()
+            self.assertEqual(out[-4:], [502] * 4, ans)
+            self.assertEqual(hub.asks, {})
 
     def test_not_a_web_server(self):
         x = socket.socket()

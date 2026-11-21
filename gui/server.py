@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.63.0"
+VERSION = "1.63.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6767,7 +6767,9 @@ class PcHub:
         anything on the server can read, must not open every port of this computer. Many requests of
         the first page wait for the one question."""
         cmd = f"share port {port} on the internet"
-        if cmd in (self.cfg()["always"].get(project) or []):
+        now = time.time()
+        ok = self.__dict__.setdefault("share_ok", {})      # (project, port) -> allowed until: "once" / "1 hour" = 1 h
+        if cmd in (self.cfg()["always"].get(project) or []) or ok.get((project, port), 0) > now or self.hour.get(project, 0) > now:
             return True
         with self.lock:
             waits = self.__dict__.setdefault("share_waits", {})
@@ -6780,6 +6782,8 @@ class PcHub:
             return w["ok"]
         try:
             w["ok"] = self.ask(project, cmd, {"id": "share", "chat": ""})
+            if w["ok"]:                     # a page is many requests: never ask again for each of them
+                ok[(project, port)] = time.time() + 3600
             self.audit("share", f"port {port} of {project} " + ("allowed" if w["ok"] else "refused") + " for the web")
         finally:
             w["ev"].set()

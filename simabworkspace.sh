@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.63.1 2026-11-21  Share on your domain: one answer per port is enough (once / 1 hour no longer asks again for every request of the page)
 #    1.63.0 2026-11-21  Share on your domain: https://DOMAIN/<project>/<name> opens a port of your computer (private or public), many projects on one domain
 #    1.62.0 2026-11-21  Computers: phone access with the computer's own MFA code (terminal, run commands, answers); rules no longer bypassed from the server; who is in + Disconnect + log
 #    1.61.3 2026-11-21  Sidebar marks: "…" until checked, asked again when this computer connects; this computer counts as on while its link is up
@@ -375,7 +376,7 @@
 
 set -u -o pipefail
 
-VERSION="1.63.0"
+VERSION="1.63.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

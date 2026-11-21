@@ -301,6 +301,49 @@
       h('div', { class: 'svc' }, h('span', null, 'Two-step sign-in', h('br'), h('small', { class: 'muted' }, 'A code from an authenticator app too — '), totpState), totpBtn),
       h('div', { class: 'svc' }, h('span', null, 'Signed-in devices'), othersBtn), devList);
   }
+  // ---- Share on your domain: ports of your computer at https://DOMAIN/<project>/<name> (server.py "share")
+  function shareRows() {
+    if (!S.web) return null;
+    var doms = h('div', { class: 'devices' }), ports = h('div', { class: 'devices' });
+    var dom = h('input', { class: 'inp mono', placeholder: 'projects.example.com' });
+    var proj = h('select', { class: 'inp' }), name = h('input', { class: 'inp mono', placeholder: 'front' });
+    var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, placeholder: '3001' });
+    var pub = h('input', { type: 'checkbox' });
+    function field(label, el) { return h('div', { class: 'field' }, h('label', null, label), el); }
+    function render(d) {
+      doms.replaceChildren.apply(doms, d.domains.map(function (x) {
+        return h('div', { class: 'dev' }, h('span', { class: 'grow mono' }, x),
+          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/domain', { domain: x, on: false }).then(render).catch(fail); } }, 'Remove'));
+      }));
+      ports.replaceChildren.apply(ports, d.shares.map(function (x) {
+        var url = x.urls[0] || '';
+        var box = h('input', { type: 'checkbox' });
+        box.checked = x.public;
+        box.onchange = function () { api('POST', 'account/share/port', Object.assign({}, x, { public: box.checked, on: true })).then(render).catch(fail); };
+        return h('div', { class: 'dev' }, h('span', { class: 'grow' },
+          url ? h('a', { class: 'mono', href: url, target: '_blank', rel: 'noopener' }, url) : h('span', { class: 'mono' }, '/' + x.slug + '/' + x.name),
+          h('br'), h('small', { class: 'muted' }, x.project + ' · port ' + x.port + ' · ' + (x.public ? 'anyone with the link' : 'only you, signed in'))),
+          h('label', { class: 'muted', title: 'Anyone with the link can open it' }, box, ' Public'),
+          url ? h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy') : null,
+          h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/port', { slug: x.slug, name: x.name, on: false }).then(render).catch(fail); } }, 'Remove'));
+      }));
+    }
+    proj.replaceChildren.apply(proj, (S.projects || []).map(function (p) { return h('option', { value: p.name }, p.name); }));
+    function load() { api('GET', 'account/share').then(render).catch(function () {}); }
+    load();
+    return h('div', null,
+      h('p', { class: 'muted' }, h('small', null, 'Open ports of your computer from anywhere: point a domain of yours to this server (like this site), add it here, then add a port. Works while your computer is on and the port runs.')),
+      doms,
+      h('div', { class: 'row' }, field('Domain', dom),
+        h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/domain', { domain: dom.value, on: true }).then(function (d) { dom.value = ''; render(d); }).catch(fail); } }, 'Add domain')),
+      ports,
+      h('div', { class: 'row' }, field('Project', proj), field('Name', name), field('Port', port),
+        h('label', { class: 'muted' }, pub, ' Public'),
+        h('button', { class: 'btn sm', onclick: function () {
+          api('POST', 'account/share/port', { project: proj.value, name: name.value, port: port.value, public: pub.checked, on: true })
+            .then(function (d) { name.value = ''; port.value = ''; pub.checked = false; render(d); }).catch(fail);
+        } }, 'Share port')));
+  }
   function totpSetup(done) {
     api('POST', 'account/totp/setup').then(function (d) {
       var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
@@ -3654,6 +3697,8 @@
         h('button', { class: 'btn sm', onclick: logout }, 'Sign out')),
       pushRow(),
       accountRows(),
+      h('div', { class: 'sec' }, 'Share on your domain'),
+      shareRows(),
       chk('serverPersist', 'Keep server terminals alive (tmux)', 'Shells survive a dropped connection; reopening attaches to the same one.'),
       h('div', { class: 'sec' }, 'Claude'),
       h('div', { class: 'row' },

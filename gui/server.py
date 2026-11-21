@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.62.0"
+VERSION = "1.63.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5916,6 +5916,11 @@ if op == "list":
         if r and isinstance(pins, dict) and pins.get(r):
             pinned[name] = pins[r]
     print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {}), "pins": pinned}))
+elif op == "link":                     # Share on your domain: the web version forwards to this socket
+    i = os.path.basename(sys.argv[2])
+    d = load(i + ".json", None)
+    d = d if isinstance(d, dict) else {}
+    print(json.dumps({"sock": os.path.join(D, i + ".sock"), "secret": d.get("secret") or "", "port": d.get("port") or 0}))
 elif op == "remove":
     for ext in (".json", ".sock"):
         try:
@@ -6756,6 +6761,72 @@ class PcHub:
 
     def bg_list(self) -> list:
         return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in list(self.bg.values())]
+
+    def share_allowed(self, project: str, port: int) -> bool:
+        """Only ports allowed HERE (asked once, "always" remembered per project): the secret alone, which
+        anything on the server can read, must not open every port of this computer. Many requests of
+        the first page wait for the one question."""
+        cmd = f"share port {port} on the internet"
+        if cmd in (self.cfg()["always"].get(project) or []):
+            return True
+        with self.lock:
+            waits = self.__dict__.setdefault("share_waits", {})
+            w = waits.get((project, port))
+            mine = w is None
+            if mine:
+                w = waits[(project, port)] = {"ev": threading.Event(), "ok": False}
+        if not mine:
+            w["ev"].wait(PC_ASK_WAIT + 5)
+            return w["ok"]
+        try:
+            w["ok"] = self.ask(project, cmd, {"id": "share", "chat": ""})
+            self.audit("share", f"port {port} of {project} " + ("allowed" if w["ok"] else "refused") + " for the web")
+        finally:
+            w["ev"].set()
+            with self.lock:
+                waits.pop((project, port), None)
+        return w["ok"]
+
+    def serve_proxy(self, h):
+        """POST /pc/proxy {port} from the web version (Share on your domain): after the "200", the bytes of
+        one connection to port PORT of this computer (127.0.0.1, else ::1) go both ways."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        try:
+            port = int(b.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        project = b.get("project") if isinstance(b.get("project"), str) else ""
+        if not 1 <= port <= 65535 or port == self.app.port or not project:
+            return h._json(400, {"error": "bad port"})
+        if not self.share_allowed(project, port):
+            return h._json(403, {"error": f"port {port} was not allowed on {c['name'] or 'your computer'}"})
+        up = None
+        for fam, addr in ((socket.AF_INET, ("127.0.0.1", port)), (socket.AF_INET6, ("::1", port, 0, 0))):
+            try:
+                s = socket.socket(fam, socket.SOCK_STREAM)
+            except OSError:              # no IPv6 here
+                continue
+            s.settimeout(3)
+            try:
+                s.connect(addr)
+                up = s
+                break
+            except OSError:
+                s.close()
+        if up is None:
+            return h._json(502, {"error": f"nothing is running on port {port} of {c['name'] or 'your computer'}"})
+        up.settimeout(None)
+        h.send_response(200)
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+        share_pipe(h.rfile, h.connection, up)
 
     def serve_term(self, h):
         """POST /pc/term {project, cols, rows} from onpc --term: a shell here in that project's folder."""
@@ -10511,6 +10582,606 @@ def ua_label(ua: str) -> str:
     return (br + (" on " + os_ if os_ else "")) if br else (os_ or "unknown device")
 
 
+# ----------------------------------------------------------------------------- share: your computer's ports on your own domain
+# A user of the web version points a domain of theirs here (CDN origin = this web server) and names ports
+# of a project: https://DOMAIN/<project>/<name> → that port on the computer the project runs on (onpc link:
+# one `ssh -L` from here to the computer's socket on the server per computer, closed when idle; then
+# POST /pc/proxy on the computer). Several projects on one domain must not mix their absolute paths
+# (/assets/…, /api/…): the first visit installs /__simab/sw.js, which keeps each TAB on its project
+# (sessionStorage + client id) and sends every request of that tab as /__simab/p/<project>/<name>/<path>.
+# HTML pages get /__simab/shim.js first: WebSockets to the same project, cookies + localStorage per project.
+# Private shares: a sign-in of the workspace on the main domain → one-time code → own cookie on DOMAIN.
+SHARE_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?")
+SHARE_DOMAIN_RE = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+SHARE_COOKIE = "__simab_share"
+SHARE_LAST = "__simab_last"         # the last project opened here: for a browser without service workers
+SHARE_DAYS = 30
+SHARE_CODE_TTL = 60
+SHARE_IDLE = 600                    # an ssh link with no connection for 10 min is closed
+SHARE_BODY_MAX = 64 << 20
+SHARE_HTML_MAX = 20 << 20
+SHARE_MAX = 50
+SHARE_HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te",
+             "trailer", "transfer-encoding", "upgrade"}
+SHARE_DROP_IN = {"host", "content-length", "x-real-ip", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"}
+
+
+def share_pipe(rfile, conn, other):
+    """Bytes both ways between an HTTP connection (its buffered reader + socket) and another socket, until
+    the other socket ends; then both are closed."""
+    read = getattr(rfile, "read1", None) or rfile.read
+
+    def up():
+        try:
+            while True:
+                d = read(65536)
+                if not d:
+                    break
+                other.sendall(d)
+        except (OSError, ValueError):
+            pass
+        try:
+            other.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+    threading.Thread(target=up, daemon=True).start()
+    try:
+        while True:
+            d = other.recv(65536)
+            if not d:
+                break
+            conn.sendall(d)
+    except OSError:
+        pass
+    for f in (lambda: conn.shutdown(socket.SHUT_RDWR), other.close):
+        try:
+            f()
+        except OSError:
+            pass
+
+
+def share_slug(s) -> str:
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(s or "").lower())).strip("-")[:40].strip("-")
+
+
+def share_domain_clean(s) -> str:
+    s = str(s or "").strip().lower()
+    if "//" in s:
+        s = urllib.parse.urlsplit(s).netloc
+    return s.split("/")[0].split(":")[0].rstrip(".")
+
+
+def share_cookies_in(header: str, prefix: str) -> str:
+    """Only the project's own cookies (their prefix taken off) go to its port."""
+    out = []
+    for part in (header or "").split(";"):
+        k, eq, v = part.strip().partition("=")
+        if eq and k.startswith(prefix) and len(k) > len(prefix):
+            out.append(k[len(prefix):] + "=" + v)
+    return "; ".join(out)
+
+
+def share_cookie_out(value: str, prefix: str):
+    """A Set-Cookie of the computer's app: the project's prefix on the name, Path=/ (the service worker's
+    requests go to /__simab/p/…) and no Domain (it would say localhost)."""
+    parts = (value or "").split(";")
+    k, eq, v = parts[0].strip().partition("=")
+    if not eq or not k.strip():
+        return None
+    attrs = [a.strip() for a in parts[1:] if a.strip() and a.split("=")[0].strip().lower() not in ("domain", "path")]
+    return "; ".join([prefix + k.strip() + "=" + v] + attrs + ["Path=/"])
+
+
+def share_location(loc: str, base: str) -> str:
+    """A redirect of the computer's app, on this domain (base "" through the service worker, else the prefix)."""
+    u = urllib.parse.urlsplit(loc or "")
+    if u.scheme in ("http", "https", "ws", "wss") and (u.hostname or "") in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        loc = urllib.parse.urlunsplit(("", "", u.path or "/", u.query, u.fragment))
+    if base and loc.startswith("/") and not loc.startswith("//"):
+        loc = base + loc
+    return loc
+
+
+def share_inject(html: bytes, target: str) -> bytes:
+    """/__simab/shim.js as the page's first script."""
+    tag = ('<script src="/__simab/shim.js" data-t="%s"></script>' % target).encode()
+    head = html[:65536]
+    m = (re.search(rb"<head\b[^>]*>", head, re.I) or re.search(rb"<html\b[^>]*>", head, re.I)
+         or re.search(rb"<!doctype[^>]*>", head, re.I))
+    i = m.end() if m else 0
+    return html[:i] + tag + html[i:]
+
+
+def share_page(title: str, text: str, script: str = "") -> bytes:
+    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+            '<title>' + esc(title) + '</title></head><body style="font:15px system-ui,sans-serif;color:#777;'
+            'padding:2em;max-width:36em"><p id="m">' + esc(text) + '</p>' + script + '</body></html>').encode()
+
+
+def share_js(v) -> str:
+    return json.dumps(v).replace("</", "<\\/")
+
+
+# the entry /<project>/<name>/…: remember the project in this tab, install the service worker, open the page
+SHARE_ENTRY_JS = """<script>(function(){
+var t = @@T@@, to = @@TO@@ + location.hash, sw = navigator.serviceWorker, tries = 0;
+try { sessionStorage.setItem('__simabT', t); } catch (e) {}
+function direct() { location.replace('/__simab/p/' + t + to); }
+if (!sw || !window.MessageChannel) return direct();
+function claim() {
+  var c = new MessageChannel();
+  c.port1.onmessage = function (e) {
+    if (e.data && e.data.ok) location.replace(to);
+    else if (++tries < 25) setTimeout(claim, 200); else direct();
+  };
+  sw.controller.postMessage({ simabClaim: new URL(to, location.href).href.split('#')[0], t: t }, [c.port2]);
+}
+function go() { if (sw.controller) claim(); else if (++tries < 200) setTimeout(go, 50); else direct(); }
+sw.register('/__simab/sw.js', { scope: '/' }).then(function () { return sw.ready; }).then(go, direct);
+})();</script>"""
+
+# any other page opened in a tab: back through the entry of this tab's project
+SHARE_LOST_JS = """<script>(function(){
+var t = null; try { t = sessionStorage.getItem('__simabT'); } catch (e) {}
+var p = location.pathname;
+if (t && p.indexOf('/' + t + '/') !== 0 && p !== '/' + t && p.indexOf('/__simab/') !== 0) {
+  location.replace('/' + t + p + location.search + location.hash);
+} else { try { sessionStorage.removeItem('__simabT'); } catch (e) {} }
+})();</script>"""
+
+
+class ShareHub:
+    """Domains, shared ports, sign-ins and ssh links of Share on your domain (one per WebGate)."""
+
+    def __init__(self, gate, popen=None):
+        self.gate, self.db = gate, gate.db
+        self.popen = popen or subprocess.Popen
+        self.lock = threading.Lock()
+        self.links, self.key_locks, self.codes = {}, {}, {}
+        self.reaper = None
+        self.db.run("CREATE TABLE IF NOT EXISTS web_share_domains (domain TEXT PRIMARY KEY, ws TEXT NOT NULL, main TEXT NOT NULL)")
+        self.db.run("CREATE TABLE IF NOT EXISTS web_shares (ws TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, "
+                    "project TEXT NOT NULL, port INTEGER NOT NULL, public INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, slug, name))")
+        self.db.run("CREATE TABLE IF NOT EXISTS web_share_tokens (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, domain TEXT NOT NULL, exp REAL NOT NULL)")
+
+    # settings (Settings → Share on your domain) ---------------------------------------------------
+    def domain(self, host: str):
+        d = share_domain_clean(host)
+        r = self.db.rows("SELECT domain, ws, main FROM web_share_domains WHERE domain = ?", (d,)) if d else []
+        return {"domain": r[0][0], "ws": r[0][1], "main": r[0][2]} if r else None
+
+    def find(self, ws: str, slug: str, name: str):
+        r = self.db.rows("SELECT slug, name, project, port, public FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+        return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4])} if r else None
+
+    def state(self, ws: str) -> dict:
+        doms = [d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ? ORDER BY domain", (ws,))]
+        shares = []
+        for slug, name, project, port, pub in self.db.rows(
+                "SELECT slug, name, project, port, public FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
+            shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub),
+                           "urls": [f"https://{d}/{slug}/{name}" for d in doms]})
+        return {"domains": doms, "shares": shares}
+
+    def api(self, ws: str, method: str, sub: str, body: dict, host: str) -> dict:
+        if method == "GET" and sub == "":
+            return self.state(ws)
+        if method == "POST" and sub == "/domain":
+            d = share_domain_clean(body.get("domain"))
+            if not body.get("on"):
+                self.db.run("DELETE FROM web_share_domains WHERE domain = ? AND ws = ?", (d, ws))
+                self.db.run("DELETE FROM web_share_tokens WHERE domain = ? AND ws = ?", (d, ws))
+                return self.state(ws)
+            main = (host or "").lower()
+            if not SHARE_DOMAIN_RE.fullmatch(d):
+                raise ApiError(400, "enter a domain like projects.example.com")
+            if d == main.split(":")[0] or any(x.split(":")[0] == d for x in self.gate.hosts):
+                raise ApiError(400, "this is the address of the workspace itself — use another domain or subdomain")
+            other = self.domain(d)
+            if other and other["ws"] != ws:
+                raise ApiError(409, "this domain is used by another workspace")
+            if len(self.state(ws)["domains"]) >= 10 and not other:
+                raise ApiError(400, "at most 10 domains")
+            self.db.run("INSERT OR REPLACE INTO web_share_domains (domain, ws, main) VALUES (?, ?, ?)", (d, ws, main))
+            return self.state(ws)
+        if method == "POST" and sub == "/port":
+            slug = share_slug(body.get("slug") or body.get("project"))
+            name = share_slug(body.get("name"))
+            if not SHARE_SLUG_RE.fullmatch(slug) or not SHARE_SLUG_RE.fullmatch(name) or slug == "__simab":
+                raise ApiError(400, "use letters, digits and - in the address")
+            if not body.get("on"):
+                self.db.run("DELETE FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+                return self.state(ws)
+            try:
+                port = int(body.get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if not 1 <= port <= 65535:
+                raise ApiError(400, "enter the port it runs on, like 3000")
+            project = clean_str(body.get("project"), 200, "project", required=True)
+            old = body.get("old")
+            if isinstance(old, dict):
+                self.db.run("DELETE FROM web_shares WHERE ws = ? AND slug = ? AND name = ?",
+                            (ws, share_slug(old.get("slug")), share_slug(old.get("name"))))
+            n = self.db.rows("SELECT COUNT(*) FROM web_shares WHERE ws = ?", (ws,))[0][0]
+            if n >= SHARE_MAX and not self.find(ws, slug, name):
+                raise ApiError(400, f"at most {SHARE_MAX} shared ports")
+            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public) VALUES (?, ?, ?, ?, ?, ?)",
+                        (ws, slug, name, project, port, 1 if body.get("public") else 0))
+            return self.state(ws)
+        raise ApiError(404, "not found")
+
+    # sign-in of private shares ---------------------------------------------------------------------
+    def code(self, ws: str, domain: str) -> str:
+        now = time.time()
+        with self.lock:
+            for k in [k for k, v in self.codes.items() if v[2] < now]:
+                del self.codes[k]
+            c = secrets.token_urlsafe(24)
+            self.codes[c] = (ws, domain, now + SHARE_CODE_TTL)
+        return c
+
+    def take_code(self, c: str, domain: str):
+        with self.lock:
+            v = self.codes.pop(c or "", None)
+        if not v or v[2] < time.time() or v[1] != domain:
+            return None
+        tok = secrets.token_urlsafe(32)
+        self.db.run("INSERT INTO web_share_tokens (hash, ws, domain, exp) VALUES (?, ?, ?, ?)",
+                    (hashlib.sha256(tok.encode()).hexdigest(), v[0], domain, time.time() + SHARE_DAYS * 86400))
+        return tok
+
+    def token_ok(self, tok: str, ws: str, domain: str) -> bool:
+        if not tok or len(tok) > 200:
+            return False
+        r = self.db.rows("SELECT ws, domain, exp FROM web_share_tokens WHERE hash = ?", (hashlib.sha256(tok.encode()).hexdigest(),))
+        return bool(r) and r[0][0] == ws and r[0][1] == domain and r[0][2] > time.time()
+
+    # the way to the computer --------------------------------------------------------------------------
+    def device(self, app, project: str) -> str:
+        info = app.pc_devices(cached=True)
+        on = [d for d in info.get("devices") or [] if d.get("online")]
+        pin = (info.get("pins") or {}).get(project)
+        for d in on:
+            if d.get("id") == pin:
+                return d["id"]
+        if on:
+            return on[0]["id"]
+        raise ApiError(503, "your computer is not connected — open Simab Workspace on it")
+
+    def link(self, ws: str, app, dev: str) -> dict:
+        """The local socket of an `ssh -L` to this computer's socket on the server (started when needed)."""
+        key = (ws, dev)
+        with self.lock:
+            kl = self.key_locks.setdefault(key, threading.Lock())
+        with kl:
+            with self.lock:
+                ln = self.links.get(key)
+                if ln and ln["proc"].poll() is None and os.path.exists(ln["sock"]):
+                    ln["used"] = time.time()
+                    return ln
+            if ln:
+                self._drop(key)
+            info = remote_python(app.conf, PC_ADMIN_PY, ["link", dev], multiplex=False, timeout=20)
+            info = info if isinstance(info, dict) else {}
+            if not info.get("secret") or not info.get("sock"):
+                raise ApiError(503, "this computer is not set up on the server")
+            d = self.gate.root / "share"
+            d.mkdir(mode=0o700, exist_ok=True)
+            local = str(d / (hashlib.sha256(f"{ws}/{dev}".encode()).hexdigest()[:16] + ".sock"))
+            try:
+                os.unlink(local)
+            except OSError:
+                pass
+            argv = ssh_base(app.conf, multiplex=False, batch=True, forwards=True) + [
+                "-N", "-T", "-o", "StreamLocalBindUnlink=yes", "-L", f"{local}:{info['sock']}", app.conf.target]
+            proc = self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+            end = time.time() + 15
+            while not os.path.exists(local):
+                if proc.poll() is not None or time.time() > end:
+                    pc_kill(proc)
+                    raise ApiError(503, "could not reach the server")
+                time.sleep(0.05)
+            ln = {"proc": proc, "sock": local, "secret": info["secret"], "port": int(info.get("port") or 0),
+                  "used": time.time(), "active": 0}
+            with self.lock:
+                self.links[key] = ln
+                if self.reaper is None:
+                    self.reaper = threading.Thread(target=self._reap_loop, daemon=True)
+                    self.reaper.start()
+            return ln
+
+    def _drop(self, key):
+        with self.lock:
+            ln = self.links.pop(key, None)
+        if ln:
+            pc_kill(ln["proc"])
+            try:
+                os.unlink(ln["sock"])
+            except OSError:
+                pass
+
+    def reap(self, now=None):
+        now = now or time.time()
+        with self.lock:
+            old = [k for k, v in self.links.items() if v["active"] <= 0 and now - v["used"] > SHARE_IDLE]
+        for k in old:
+            self._drop(k)
+
+    def _reap_loop(self):
+        while True:
+            time.sleep(60)
+            self.reap()
+
+    def dial(self, ws: str, app, share: dict):
+        """→ (socket to the port of the computer, link) after the computer said yes."""
+        ln = self.link(ws, app, self.device(app, share["project"]))
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(PC_ASK_WAIT + 15)       # the first time, the computer asks its user
+        try:
+            s.connect(ln["sock"])
+            body = json.dumps({"port": share["port"], "project": share["project"]}).encode()
+            s.sendall(("POST /pc/proxy HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                       "Content-Length: %d\r\n\r\n" % (ln["port"], ln["secret"], len(body))).encode() + body)
+            head = b""
+            while not head.endswith(b"\r\n\r\n") and len(head) < 16384:
+                c = s.recv(1)
+                if not c:
+                    break
+                head += c
+        except OSError:
+            s.close()
+            raise ApiError(503, "your computer did not answer")
+        first = head.split(b"\r\n", 1)[0].split()
+        if len(first) >= 2 and first[1] == b"200":
+            s.settimeout(None)
+            return s, ln
+        why = ""
+        try:
+            s.settimeout(3)
+            why = json.loads(s.recv(65536).decode("utf-8", "replace") or "{}").get("error") or ""
+        except (OSError, ValueError, AttributeError):
+            pass
+        s.close()
+        raise ApiError(502, why or "your computer refused the connection")
+
+    # requests on a share domain ---------------------------------------------------------------------
+    def handle(self, h, method: str, sd: dict):
+        ws, domain = sd["ws"], sd["domain"]
+        url = urllib.parse.urlsplit(h.path)
+        path, q = url.path, url.query
+        hd = h.headers
+        nav = hd.get("Sec-Fetch-Mode") == "navigate" or (not hd.get("Sec-Fetch-Mode") and method == "GET"
+                                                         and "text/html" in (hd.get("Accept") or ""))
+        try:
+            if path == "/__simab/sw.js" and method == "GET":
+                return h._send(200, (STATIC / "share-sw.js").read_bytes(), MIME[".js"], {"Service-Worker-Allowed": "/"})
+            if path == "/__simab/shim.js" and method == "GET":
+                return h._send(200, (STATIC / "share-shim.js").read_bytes(), MIME[".js"], {"Cache-Control": "max-age=300"})
+            if path == "/__simab/auth" and method == "GET":
+                qs = urllib.parse.parse_qs(q)
+                tok = self.take_code((qs.get("c") or [""])[0], domain)
+                to = (qs.get("to") or ["/"])[0]
+                to = to if to.startswith("/") and not to.startswith("//") else "/"
+                if not tok:
+                    return h._send(403, share_page("Sign-in", "This sign-in link was used already or is too old — open the link again."),
+                                   MIME[".html"])
+                sec = "; Secure" if self.gate.secure else ""
+                return h._send(302, b"", "text/plain", {"Location": to, "Set-Cookie":
+                               f"{SHARE_COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SHARE_DAYS * 86400}{sec}"})
+            with self.gate.lock:
+                app = self.gate._app(ws)
+            if app is None:
+                return h._send(404, share_page("Not found", "Nothing is shared here."), MIME[".html"])
+            if path.startswith("/__simab/p/"):
+                slug, name, sub = self._split(path[len("/__simab/p"):])
+                sh = self.find(ws, slug, name) if slug else None
+                if not sh:
+                    return h._send(404, share_page("Not found", "This link is not shared (any more)."), MIME[".html"])
+                if hd.get("X-Simab-SW") == "1":
+                    swnav = hd.get("X-Simab-Nav") == "1"
+                    s2, n2, sub2 = self._split(sub)
+                    other = self.find(ws, s2, n2) if swnav and s2 else None
+                    if other:
+                        return self._entry(h, ws, domain, sd, other, sub2, q, sw=True)
+                    return self._serve(h, method, ws, domain, sd, app, sh, sub, q, "", swnav, sw=True)
+                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/__simab/p/{slug}/{name}", nav)
+            slug, name, sub = self._split(path)
+            sh = self.find(ws, slug, name) if slug else None
+            if sh:
+                if nav and method == "GET":
+                    return self._entry(h, ws, domain, sd, sh, sub, q)
+                return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/{slug}/{name}", False)
+            if nav:
+                return h._send(200, share_page("Not found", "Nothing is shared at this address.", SHARE_LOST_JS), MIME[".html"])
+            last = self._cookie(h, SHARE_LAST)
+            s2, _, n2 = last.partition("/")
+            sh = self.find(ws, s2, n2) if s2 and n2 else None
+            if sh:
+                return self._serve(h, method, ws, domain, sd, app, sh, path, q, f"/__simab/p/{s2}/{n2}", False)
+            return h._send(404, b"not found", "text/plain")
+        except ApiError as e:
+            if nav:
+                return h._send(e.status, share_page("Not available", e.message), MIME[".html"])
+            return h._send(e.status, e.message.encode(), "text/plain; charset=utf-8")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    @staticmethod
+    def _split(path: str):
+        parts = path.split("/", 3)
+        if len(parts) < 3 or not SHARE_SLUG_RE.fullmatch(parts[1]) or not SHARE_SLUG_RE.fullmatch(parts[2]):
+            return "", "", ""
+        return parts[1], parts[2], "/" + (parts[3] if len(parts) > 3 else "")
+
+    @staticmethod
+    def _cookie(h, name: str) -> str:
+        for part in (h.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v.strip()
+        return ""
+
+    def _allowed(self, h, ws, domain, sh) -> bool:
+        return sh["public"] or self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
+
+    def _signin_url(self, sd: dict, to: str) -> str:
+        scheme = "https" if self.gate.secure else "http"
+        return (f"{scheme}://{sd['main']}/__simab/share-auth?d={urllib.parse.quote(sd['domain'])}"
+                f"&to={urllib.parse.quote(to)}")
+
+    def _entry(self, h, ws, domain, sd, sh, sub, q, sw=False):
+        t = f"{sh['slug']}/{sh['name']}"
+        to = sub + ("?" + q if q else "")
+        if not self._allowed(h, ws, domain, sh):
+            loc = self._signin_url(sd, f"/{t}{to}")
+            return h._send(200 if sw else 302, b"", "text/plain", {"X-Simab-Location" if sw else "Location": loc})
+        js = SHARE_ENTRY_JS.replace("@@T@@", share_js(t)).replace("@@TO@@", share_js(to))
+        sec = "; Secure" if self.gate.secure else ""
+        return h._send(200, share_page("Opening…", "Opening…", js), MIME[".html"],
+                       {"Set-Cookie": f"{SHARE_LAST}={t}; Path=/; HttpOnly; SameSite=Lax{sec}"})
+
+    def _serve(self, h, method, ws, domain, sd, app, sh, sub, q, base, nav, sw=False):
+        t = f"{sh['slug']}/{sh['name']}"
+        if not self._allowed(h, ws, domain, sh):
+            if nav:
+                loc = self._signin_url(sd, f"/{t}{sub}" + ("?" + q if q else ""))
+                return h._send(200 if sw else 302, b"", "text/plain", {"X-Simab-Location" if sw else "Location": loc})
+            return h._send(401, b"sign in to the workspace first", "text/plain")
+        hd = h.headers
+        if "chunked" in (hd.get("Transfer-Encoding") or "").lower():
+            return h._send(411, b"length required", "text/plain")
+        n = int(hd.get("Content-Length") or 0)
+        if n > SHARE_BODY_MAX:
+            return h._send(413, b"too large", "text/plain")
+        body = h.rfile.read(n) if n else b""
+        upgrade = (hd.get("Upgrade") or "").lower() == "websocket"
+        origin = ("https://" if self.gate.secure else "http://") + (hd.get("Host") or "")
+        prefix = f"{sh['slug']}.{sh['name']}."
+        local = f"http://localhost:{sh['port']}"
+        lines = [f"{method} {sub}{'?' + q if q else ''} HTTP/1.1", f"Host: localhost:{sh['port']}"]
+        for k, v in hd.items():
+            lk = k.lower()
+            if lk in SHARE_HOP or lk in SHARE_DROP_IN or lk.startswith("x-simab-"):
+                continue
+            if lk == "cookie":
+                v = share_cookies_in(v, prefix)
+                if not v:
+                    continue
+            elif lk == "origin" and v == origin:
+                v = local
+            elif lk == "referer" and (v == origin or v.startswith(origin + "/")):
+                v = local + v[len(origin):]
+            elif lk == "accept-encoding" and nav:
+                v = "identity"
+            lines.append(f"{k}: {v}")
+        lines += ["Connection: Upgrade", "Upgrade: websocket"] if upgrade else ["Connection: close"]
+        if body or method in ("POST", "PUT", "PATCH"):
+            lines.append(f"Content-Length: {len(body)}")
+        lines += [f"X-Forwarded-Proto: {origin.split(':')[0]}", f"X-Forwarded-Host: {hd.get('Host') or ''}"]
+        s, ln = self.dial(ws, app, sh)
+        with self.lock:
+            ln["active"] += 1
+        try:
+            s.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("utf-8", "surrogateescape") + body)
+            if upgrade:
+                return self._upgrade(h, s)
+            return self._answer(h, method, s, t, prefix, base, nav, sw)
+        finally:
+            with self.lock:
+                ln["active"] -= 1
+                ln["used"] = time.time()
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def _upgrade(self, h, s):
+        h.close_connection = True
+        head = b""
+        while not head.endswith(b"\r\n\r\n") and len(head) < 65536:
+            c = s.recv(1)
+            if not c:
+                break
+            head += c
+        h.wfile.write(head)
+        h.wfile.flush()
+        share_pipe(h.rfile, h.connection, s)
+
+    def _answer(self, h, method, s, t, prefix, base, nav, sw):
+        import http.client
+        h.close_connection = True
+        resp = http.client.HTTPResponse(s, method=method)
+        try:
+            resp.begin()
+        except (http.client.HTTPException, OSError):
+            raise ApiError(502, "this port did not answer like a web server")
+        status, headers = resp.status, resp.getheaders()
+        ctype = resp.getheader("Content-Type") or ""
+        enc = (resp.getheader("Content-Encoding") or "").lower()
+        inject = (nav and ctype.lower().startswith("text/html") and method != "HEAD" and status not in (204, 304)
+                  and enc in ("", "identity", "gzip"))
+        out = []
+        loc = None
+        for k, v in headers:
+            lk = k.lower()
+            if lk in SHARE_HOP or lk == "content-length":
+                continue
+            if lk == "set-cookie":
+                v = share_cookie_out(v, prefix)
+                if not v:
+                    continue
+            elif lk == "location":
+                loc = share_location(v, base)
+                continue
+            elif inject and (lk.startswith("content-security-policy") or lk == "content-encoding"):
+                continue
+            out.append((k, v))
+        if loc is not None and 300 <= status < 400 and sw:      # the service worker turns it into a redirect
+            h.send_response(200)
+            for k, v in out:
+                h.send_header(k, v)
+            h.send_header("X-Simab-Location", loc)
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return
+        if loc is not None:
+            out.append(("Location", loc))
+        if inject:
+            data = resp.read(SHARE_HTML_MAX + 1)
+            if enc == "gzip":
+                import gzip
+                try:
+                    data = gzip.decompress(data)
+                except (OSError, EOFError):
+                    pass
+            data = share_inject(data, t)
+            h.send_response(status)
+            for k, v in out:
+                h.send_header(k, v)
+            h.send_header("Content-Length", str(len(data)))
+            h.end_headers()
+            h.wfile.write(data)
+            return
+        h.send_response(status)
+        for k, v in out:
+            h.send_header(k, v)
+        if resp.length is not None and not resp.chunked:
+            h.send_header("Content-Length", str(resp.length))
+        h.end_headers()
+        if method == "HEAD" or status in (204, 304) or 100 <= status < 200:
+            return
+        read = getattr(resp, "read1", None) or resp.read
+        while True:
+            d = read(65536)
+            if not d:
+                break
+            h.wfile.write(d)
+            h.wfile.flush()
+
+
 class WebGate:
     SESSION_DAYS = 30
     IDLE_DAYS = 7
@@ -10534,6 +11205,7 @@ class WebGate:
         self.all_fails = collections.deque()
         self.db = open_db(self.root / "gate.db")
         self.pusher = Pusher(self.root / "vapid.json")
+        self.share = ShareHub(self)
         self.db.run("CREATE TABLE IF NOT EXISTS web_totp (ws TEXT PRIMARY KEY, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_step INTEGER NOT NULL DEFAULT 0)")
         for col in ("ua TEXT NOT NULL DEFAULT ''", "created REAL NOT NULL DEFAULT 0"):
             try:
@@ -10843,10 +11515,28 @@ class Handler(BaseHTTPRequestHandler):
             gate.totp_enable(ws, b.get("code"), bool(b.get("on")))
             log_line(f"web: two-step sign-in {'on' if b.get('on') else 'off'} for {self.app.conf.user}@{self.app.conf.host}")
             return {"totp": gate.totp_on(ws)}
+        if sub == "/share" or sub.startswith("/share/"):
+            return gate.share.api(ws, method, sub[len("/share"):], b, self.headers.get("Host") or "")
         if method == "POST" and sub == "/signout":
             gate.sign_out_device(ws, tok, b.get("id"))
             return {"devices": gate.devices(ws, tok)}
         raise ApiError(404, "not found")
+
+    def _share_auth(self, query: dict):
+        """A private shared port asks: is this browser signed in to the workspace that owns the domain?"""
+        gate = self.gate
+        ws = gate.ws_of(self._cookie())
+        if not ws:
+            return self._send(401, share_page("Sign in", "Sign in to the workspace in this browser first, then open the link again.",
+                                              '<p><a href="/">Sign in</a></p>'), MIME[".html"])
+        sd = gate.share.domain((query.get("d") or [""])[0])
+        if not sd or sd["ws"] != ws:
+            return self._send(403, share_page("Not yours", "This domain belongs to another workspace."), MIME[".html"])
+        to = (query.get("to") or ["/"])[0]
+        to = to if to.startswith("/") and not to.startswith("//") else "/"
+        scheme = "https" if gate.secure else "http"
+        return self._send(302, b"", "text/plain", {"Location": f"{scheme}://{sd['domain']}/__simab/auth?c="
+                                                   f"{gate.share.code(ws, sd['domain'])}&to={urllib.parse.quote(to)}"})
 
     def _set_cookie(self, value: str, max_age: int) -> dict:
         secure = "; Secure" if self.gate.secure else ""
@@ -10874,6 +11564,13 @@ class Handler(BaseHTTPRequestHandler):
         path, query = url.path, urllib.parse.parse_qs(url.query)
         gate = self.gate
         try:
+            sd = gate.share.domain(self.headers.get("Host") or "")
+            if sd:                      # Share on your domain: a port of the user's computer
+                return gate.share.handle(self, method, sd)
+            if method not in ("GET", "POST", "DELETE"):
+                raise ApiError(405, "method not allowed")
+            if path == "/__simab/share-auth" and method == "GET":
+                return self._share_auth(query)
             m = re.fullmatch(r"/pair/([A-Za-z0-9_-]{20,64})", path)
             if m:                       # a new computer with a one-time code (no sign-in: the code is the secret)
                 return self._pair(method, m.group(1))
@@ -10986,10 +11683,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch("DELETE")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
+    def do_PATCH(self):
+        self._dispatch("PATCH")
+
+    def do_HEAD(self):
+        self._dispatch("HEAD")
+
+    def do_OPTIONS(self):
+        self._dispatch("OPTIONS")
+
     def _dispatch(self, method: str):
         self._cached_body = None
         if self.gate is not None:
             return self._web_dispatch(method)
+        if method not in ("GET", "POST", "DELETE"):
+            return self._send(405, b"method not allowed", "text/plain")
         if not self._host_ok():
             return self._send(403, b"forbidden", "text/plain")
         url = urllib.parse.urlsplit(self.path)
@@ -10999,6 +11710,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_run(self)
             if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
                 return self.app.pc.serve_sftp(self)
+            if method == "POST" and path == "/pc/proxy":       # Share on your domain: one connection to a port here
+                return self.app.pc.serve_proxy(self)
             if method == "POST" and path == "/pc/term":        # a terminal of this computer in the web version
                 return self.app.pc.serve_term(self)
             if method == "POST" and path == "/pc/remote":      # the web version / phone: questions and answers

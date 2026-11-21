@@ -1362,4 +1362,9 @@ body.compact .snd-name { flex-basis: 140px; }
 .share-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 12.5px; }
 .share-btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .share-empty { font-size: 12px; color: var(--faint); }
+.share-set { display: flex; flex-direction: column; gap: 10px; }
+.share-item { border: 1px solid var(--line); }
+.share-item .grow { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.share-link { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-add-row { display: grid; grid-template-columns: 1fr 110px; gap: 8px; }
 

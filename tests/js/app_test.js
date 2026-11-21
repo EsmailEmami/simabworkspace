@@ -795,6 +795,29 @@ const tests = {
     md.close();
   },
 
+  async 'share: a port is shared from the project ⋯ menu, project preset'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const S = global.SW.S;
+    S.share = { base: 'https://apps.x/esi', shares: [{ slug: 'cheshmeh', name: 'panel', project: 'cheshmeh', port: 6001, access: 'ask', tls: false, urls: [] }] };
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    const item = q('button').find((b) => b.textContent.indexOf('Share a port on your domain…') === 0);
+    assert.strictEqual(item.querySelector('.k').textContent, '1', 'the menu shows how many are shared');
+    item.click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.ok(!q('select', modal).length, 'no project choice: it is the one of the menu');
+    const ins = q('input', modal);
+    ins[0].value = 'api'; ins[0].dispatch('input'); ins[1].value = '6000';
+    assert.ok(modal.textContent.includes('https://apps.x/esi/cheshmeh/api'), 'the link is shown before sharing');
+    q('.seg-b', modal).find((b) => b.textContent === 'Anyone').click();
+    q('button', modal).find((b) => b.textContent === 'Share').click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/share/port').pop().body;
+    assert.deepStrictEqual([post.project, post.name, post.port, post.access, post.on], ['cheshmeh', 'api', '6000', 'public', true]);
+    S.share = null;
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
   async 'settings: a sound or a voice per chat state, kept on this device'() {
     document.body.querySelector('#modal-root').replaceChildren();
     document.body.querySelector('#btn-settings').click();

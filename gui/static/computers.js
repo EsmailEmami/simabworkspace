@@ -293,7 +293,7 @@
   function askModal(a) {
     var left = h('span', { class: 'muted' });
     function answer(v) {
-      api('POST', 'pc/answer', { id: a.id, answer: v }).catch(function () { /* answered elsewhere */ });
+      sendAnswer(a, v);
       close();
     }
     function close() { if (shown[a.id]) { shown[a.id].close(); delete shown[a.id]; } }
@@ -310,6 +310,12 @@
     try {
       if (document.hidden && window.Notification && Notification.permission === 'granted') new Notification('Claude wants to run a command', { body: a.project + ': ' + a.cmd, icon: 'icon.svg' });
     } catch (e) { /* ignore */ }
+  }
+
+  // the installed app answers its own questions; the web version through the server (PC_BRIDGE_PY)
+  function sendAnswer(a, v) {
+    return (S.web ? api('POST', 'pc/remote-answer', { dev: a.dev, id: a.id, answer: v }) : api('POST', 'pc/answer', { id: a.id, answer: v }))
+      .catch(function () { /* answered elsewhere / gone */ });
   }
 
   // The question goes ONLY into the chat that ran onpc (a.session: its tab, found by the server from
@@ -338,7 +344,7 @@
     var views = [];
     if (mode === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; })) {      // the chat is in auto: no question
       shown[a.id] = { a: a, left: [], answered: 'once', close: function () {} };
-      api('POST', 'pc/answer', { id: a.id, answer: 'once' }).catch(function () {});
+      sendAnswer(a, 'once');
       tabs.filter(function (t) { return AUTO_CHAT[t.mode]; }).slice(0, 1).forEach(function (t) {
         if (t.system) t.system('⌂ Ran on this computer without asking (chat in auto): ' + a.cmd, 'mark');
       });
@@ -347,11 +353,11 @@
     function answer(v) {
       if (!shown[a.id] || shown[a.id].answered) return;
       shown[a.id].answered = v;
-      api('POST', 'pc/answer', { id: a.id, answer: v }).catch(function () { /* answered elsewhere */ });
+      sendAnswer(a, v);
       views.forEach(function (x) { x.close(DONE[v]); });
       delete shown[a.id];
     }
-    var modes = { list: MODES, value: mode || 'new', set: function (v) {
+    var modes = S.web ? null : { list: MODES, value: mode || 'new', set: function (v) {
       api('POST', 'pc', { mode: v }).then(function () {
         toast('This computer: ' + MODES.filter(function (m) { return m[0] === v; })[0][1], 'ok');
         // the new mode lets this command run without a question → run it now
@@ -483,6 +489,21 @@
   }
   setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
 
+  // web version: the questions of the user's computers, in the chat that asks (or one toast)
+  function webPoll() {
+    if (!S.web) return Promise.resolve();
+    return api('GET', 'pc/remote-asks').then(function (x) {
+      var now = x.now || Date.now() / 1000, openIds = {};
+      (x.asks || []).forEach(function (a) { openIds[a.id] = 1; if (!shown[a.id]) ask(a, ''); });
+      Object.keys(shown).forEach(function (id) {
+        var s = shown[id];
+        if (!openIds[id]) { s.close('Answered — see the chat'); delete shown[id]; return; }
+        s.left.forEach(function (el) { el.textContent = 'on ' + (s.a.devName || 'your computer') + ' · not run if nobody answers in ' + Math.max(0, Math.round(s.a.until - now)) + 's'; });
+      });
+    }).catch(function () {});
+  }
+  setInterval(function () { if (S.web && !document.hidden) webPoll(); }, 3000);
+
   // dev servers (onpc --bg) in the chats of their project
   var DEV_ACT = {
     stop: function (x) { api('POST', 'pc/bgstop', { name: x.name }).then(poll).catch(fail); },
@@ -544,6 +565,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

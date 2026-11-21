@@ -305,6 +305,32 @@ class EndToEnd(unittest.TestCase):
         _, out, _ = self.onpc("--list")
         self.assertIn("offline", out)
 
+    def test_web_and_phone_see_and_answer_the_question(self):
+        """PC_BRIDGE_PY (on the server as the user) asks the computer over its socket."""
+        self.setcfg(mode="every")
+        p = self.onpc_proc("echo from-web", chat="00112233445566ff")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]))
+        env = dict(os.environ, HOME=self.home)
+
+        def bridge(*args):
+            r = subprocess.run([sys.executable, "-c", sw.PC_BRIDGE_PY] + list(args), env=env, capture_output=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+        r = bridge("asks")
+        self.assertEqual(r["online"], 1)
+        a = r["asks"][0]
+        self.assertEqual((a["cmd"], a["devName"], a["dev"], a["chat"]), ("echo from-web", "laptop", self.hub.cfg()["id"], "00112233445566ff"))
+        # the web workspace ties it to its own chat tab
+        import types
+        web = sw.App(self.store, sw.ServerConf("esi", "h"), web=True)
+        web.sessions["webtab"] = types.SimpleNamespace(spec={"relay": "00112233445566ff"})
+        with mock.patch.object(sw, "remote_python", return_value=r):
+            self.assertEqual(web.pc_remote_asks()["asks"][0]["session"], "webtab")
+        self.assertEqual(bridge("answer", a["dev"], a["id"], "once"), {"ok": True})
+        out, _ = p.communicate(timeout=20)
+        self.assertEqual((p.returncode, out), (0, b"from-web\n"))
+        self.assertEqual(bridge("asks")["asks"], [])
+
     def test_my_computers_project_runs_every_command_without_our_question(self):
         # the server marks the folder "computers" → onpc says it comes from the hook: Claude's modes decided
         Path(self.pcdir, "projects.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "computers"}))
@@ -432,7 +458,7 @@ class LocalOnly(EndToEnd):
     test_runs_in_the_synced_copy_with_output_and_exit_code = test_ask_then_always = None      # EndToEnd's own
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
     test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
-    test_my_computers_project_runs_every_command_without_our_question = None
+    test_my_computers_project_runs_every_command_without_our_question = test_web_and_phone_see_and_answer_the_question = None
 
     def setUp(self):
         super().setUp()

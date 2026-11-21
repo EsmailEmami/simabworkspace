@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.53.1"
+VERSION = "1.54.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5980,6 +5980,59 @@ def pair_computer(url: str) -> int:
     return 0
 
 
+# The web version (and the phone) see and answer the permission questions of the user's computers:
+# this runs on the server as the user and asks every connected computer over its socket.
+# asks → {"asks": [...with dev, devName], "online": n};  answer DEV ID ANSWER → {}
+PC_BRIDGE_PY = r'''
+import os, sys, json, socket
+D = os.path.expanduser("~/.cache/simabworkspace/pc")
+def call(d, body):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(os.path.join(D, d["id"] + ".sock"))
+    raw = json.dumps(body).encode()
+    s.sendall(("POST /pc/remote HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+               % (int(d.get("port") or 0), d.get("secret") or "", len(raw))).encode() + raw)
+    data = b""
+    while True:
+        c = s.recv(65536)
+        if not c:
+            break
+        data += c
+    s.close()
+    return json.loads(data.partition(b"\r\n\r\n")[2] or b"{}")
+devs = []
+for f in sorted(os.listdir(D)) if os.path.isdir(D) else []:
+    if f.endswith(".json") and f != "projects.json":
+        try:
+            d = json.load(open(os.path.join(D, f)))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("id"):
+            devs.append(d)
+out = {"asks": [], "online": 0}
+if sys.argv[1] == "asks":
+    for d in devs:
+        try:
+            r = call(d, {"op": "asks"})
+        except (OSError, ValueError):
+            continue
+        out["online"] += 1
+        for a in r.get("asks") or []:
+            a.update(dev=d["id"], devName=d.get("name") or "")
+            out["asks"].append(a)
+elif sys.argv[1] == "answer":
+    d = next((x for x in devs if x["id"] == sys.argv[2]), None)
+    out = call(d, {"op": "answer", "id": sys.argv[3], "answer": sys.argv[4]}) if d else {"error": "no such computer"}
+print(json.dumps(out))
+'''
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
 def pc_os() -> str:
     if IS_WIN:
         return "windows"
@@ -6391,6 +6444,23 @@ class PcHub:
 
     def bg_list(self) -> list:
         return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in self.bg.values()]
+
+    def serve_remote(self, h):
+        """POST /pc/remote {op: asks | answer} from PC_BRIDGE_PY: the web version / the phone."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        if b.get("op") == "asks":
+            return h._json(200, {"asks": self.pending()["asks"]})
+        if b.get("op") == "answer":
+            try:
+                return h._json(200, self.answer(b.get("id"), b.get("answer")))
+            except ApiError as e:
+                return h._json(e.status, {"error": e.message})
+        return h._json(400, {"error": "bad request"})
 
     def _verify(self) -> str:
         """"" when the server reaches this computer through its socket, else why not."""
@@ -9090,6 +9160,17 @@ class App:
                 self.pc.update({"on": False})
             remote_python(self.conf, PC_ADMIN_PY, ["remove", did])
             return self.pc_devices()
+        if key == ("GET", "remote-asks"):
+            return self.pc_remote_asks()
+        if key == ("POST", "remote-answer"):
+            dev, aid, ans = body.get("dev"), body.get("id"), body.get("answer")
+            if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev) and isinstance(aid, str) and re.fullmatch(r"[0-9a-f]{12}", aid)
+                    and ans in PC_ANSWERS):
+                raise ApiError(400, "bad request")
+            r = remote_python(self.conf, PC_BRIDGE_PY, ["answer", dev, aid, ans])
+            if isinstance(r, dict) and r.get("error"):
+                raise ApiError(404, r["error"])
+            return {"ok": True}
         if key == ("POST", "pair"):
             if not self.web:
                 raise ApiError(400, "make the link in the web version (it is reachable from the new computer)")
@@ -9134,6 +9215,38 @@ class App:
         if key == ("GET", "run") and len(rest) == 2:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")
+
+    def pc_remote_asks(self) -> dict:
+        """The open questions of all the user's computers, each tied to this workspace's chat tab."""
+        r = remote_python(self.conf, PC_BRIDGE_PY, ["asks"])
+        r = r if isinstance(r, dict) else {}
+        tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.sessions.items()) if (x.spec or {}).get("relay")}
+        for a in r.get("asks") or []:
+            a["session"] = tabs.get(a.get("chat") or "", "")
+        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time()}
+
+    def pc_watch_loop(self):
+        """Web version: a question on one of the user's computers → a phone notification (when nobody
+        looks at a page). Quiet while no computer is connected."""
+        told = set()
+        while not getattr(self, "_stopping", False):
+            wait = 6
+            if self.pusher and self._push_subs():
+                try:
+                    r = self.pc_remote_asks()
+                    if not r["online"]:
+                        wait = 60
+                    for a in r["asks"]:
+                        if a["id"] in told:
+                            continue
+                        told.add(a["id"])
+                        sess = self.sessions.get(a["session"]) or types_ns(id=a["id"], title=a["project"], spec={"project": a["project"]})
+                        self.push_notify(sess, "ask", f"run on {a.get('devName') or 'your computer'}: {a['cmd'][:80]}")
+                except ApiError:
+                    wait = 60
+            else:
+                wait = 30
+            time.sleep(wait)
 
     def pc_add_local(self, b: dict) -> dict:
         """A Local only project: its files stay in `local` on this computer; the server mounts them
@@ -9856,6 +9969,7 @@ class WebGate:
             threading.Thread(target=app.git_watch_loop, daemon=True).start()
             threading.Thread(target=app.docker_watch_loop, daemon=True).start()
             threading.Thread(target=app.share_loop, daemon=True).start()
+            threading.Thread(target=app.pc_watch_loop, daemon=True).start()
         return app
 
     def shutdown(self):
@@ -10143,6 +10257,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_run(self)
             if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
                 return self.app.pc.serve_sftp(self)
+            if method == "POST" and path == "/pc/remote":      # the web version / phone: questions and answers
+                return self.app.pc.serve_remote(self)
             if method == "POST" and path == "/pc/bg":          # onpc --bg / --logs / --stop / --ps
                 return self.app.pc.serve_bg(self)
             if method == "GET" and path == "/ws":

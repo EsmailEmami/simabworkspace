@@ -162,6 +162,8 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
+  else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
+  else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
   else if (url === '/api/pc/pair') res = { code: 'C0de_' + 'x'.repeat(28), until: Date.now() / 1000 + 600 };
   else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
@@ -1742,6 +1744,19 @@ const tests = {
     tabs.find((b) => /Mac/.test(b.textContent)).click();
     assert.match(q('.pc-cmd', dlg)[0].textContent, /^curl -fsSL .*install\.sh \| SIMAB_PAIR='.*' bash$/);
     document.body.querySelector('#modal-root').replaceChildren();
+    // a question of one of the user's computers shows in the web chat that asks, and is answered from here
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const chat = S.active;
+    fakePc.remote = { asks: [{ id: 'abcdefabcdef', dev: 'a1b2c3d4e5f6', devName: 'laptop', project: 'cheshmeh', cmd: 'npm test',
+      until: Date.now() / 1000 + 90, chat: 'dddddddddddddddd', session: chat.info.id }], online: 1, now: Date.now() / 1000 };
+    await global.SWComputers.webPoll(); await settle();
+    const card = q('.pc-perm', chat.msgs).pop();
+    assert.ok(card, 'in the web chat');
+    assert.match(card.textContent, /on laptop/);
+    assert.strictEqual(q('select', card).length, 0, 'the mode is set on the computer itself');
+    q('button', card).find((b) => b.textContent === 'Allow once').click(); await settle();
+    assert.deepStrictEqual(fakePc.remoteAnswers.pop(), { dev: 'a1b2c3d4e5f6', id: 'abcdefabcdef', answer: 'once' });
+    SW.closeTab(chat, true); await settle();
     S.web = false;
   },
 

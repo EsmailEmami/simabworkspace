@@ -1213,6 +1213,7 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-state.asking, .pc-state.running { color: var(--warn); }
 .gb.pcb { cursor: pointer; }
 .gb.pcb.ok { color: var(--ok); }
+.gb.pcb.lo.ok { color: #7dd3fc; background: #0c2a3a; }
 .gb.pcb.bad { background: #3a1d24; color: var(--err); }
 .pc-cmd { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; word-break: break-all; max-height: 30vh; overflow: auto; margin: 8px 0; }
 .pc-ask-btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }

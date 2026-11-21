@@ -1518,7 +1518,7 @@ const tests = {
     // the sidebar marks it: works (a computer is connected) / will stop (none)
     await settle();
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
-    assert.match(q('.pcb', head())[0].textContent, /PC/);
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ PC', 'builds here: not the same mark as Local only');
     assert.ok(q('.pcb', head())[0].classList.contains('ok'));
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'My computers');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] }));
@@ -1640,10 +1640,12 @@ const tests = {
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { builds: { cheshmeh: 'local', shop: 'server' } }));
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
     assert.ok(q('.pcb', head())[0].classList.contains('ok'));
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⌂ local');
     assert.match(q('.pcb', head())[0].getAttribute('title'), /Lives on laptop/);
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [], builds: { cheshmeh: 'local', shop: 'server' } }));
     assert.ok(q('.pcb', head())[0].classList.contains('bad'));
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⌂ local off');
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only · off');
     delete pr.localOnly;
     // a project built on the computers: its run commands run here, even one saved as "server"

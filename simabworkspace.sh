@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.50.1 2026-11-21  Sidebar: different marks for Local only (⌂ local) and builds on your computers (⚒ PC)
 #    1.50.0 2026-11-21  Local only projects: files stay on your computer, Claude on the server works on them with all its tools; run commands follow; mode in the question card
 #    1.49.3 2026-11-21  Computers: connects even when ~/.ssh/config has a RemoteForward that fails on the server (Mac)
 #    1.49.2 2026-11-21  Computers: a question goes only to the chat that ran the command (no dialog over other tabs), with sound
@@ -350,7 +351,7 @@
 
 set -u -o pipefail
 
-VERSION="1.50.0"
+VERSION="1.50.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

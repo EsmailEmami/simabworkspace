@@ -64,8 +64,10 @@
   function badge(p) {
     var st = buildState(p.name);
     if (!st || st.on === 'server') return null;
-    return h('span', { class: 'gb pcb ' + (st.ok ? 'ok' : 'bad'), title: st.text + ' — click for Computers',
-      onclick: function (e) { e.stopPropagation(); open(p.name); } }, st.ok ? '⌂ PC' : '⌂ off');
+    // two different things: Local only = the files live there; My computers = only builds run there
+    var local = st.on === 'local';
+    return h('span', { class: 'gb pcb ' + (local ? 'lo ' : 'bd ') + (st.ok ? 'ok' : 'bad'), title: st.text + ' — click for Computers',
+      onclick: function (e) { e.stopPropagation(); open(p.name); } }, (local ? '⌂ local' : '⚒ PC') + (st.ok ? '' : ' off'));
   }
   function menuLabel(name) {
     var st = buildState(name);

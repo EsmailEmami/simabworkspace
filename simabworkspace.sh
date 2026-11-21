@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.52.0 2026-11-21  My computers = like Local only: every command of the project runs on your computer, files stay synced on the server
 #    1.51.0 2026-11-21  Dev servers on your computer (onpc --bg) with ↗ / ■ in the chat; the chat says at once when your computer drops off
 #    1.50.5 2026-11-21  Chat: a tiny PC / server tag on Bash cards of projects that work on your computer
 #    1.50.4 2026-11-21  Local only: Bash commands about Claude's own files (~/.claude memory, plans) stay on the server
@@ -356,7 +357,7 @@
 
 set -u -o pipefail
 
-VERSION="1.51.0"
+VERSION="1.52.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

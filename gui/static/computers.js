@@ -43,10 +43,10 @@
       return dev && dev.online ? { on: 'local', ok: true, text: 'Lives on ' + who + ' — Claude works on it there' }
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
     }
-    if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Builds run on the server' };
+    if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Commands run on the server' };
     var on = online(d);
-    return on.length ? { on: 'computers', ok: true, text: 'Builds run on ' + on.map(function (x) { return x.name; }).join(', ') }
-      : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude will not build this project' };
+    return on.length ? { on: 'computers', ok: true, text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
+      : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude cannot run its commands' };
   }
 
   var infoStr = '';
@@ -103,7 +103,7 @@
     kids(body, [
       S.web ? null : card('This computer', '', thisBox),
       card('Your computers', 'connected to this server user', devBox),
-      card('Builds run on', 'per project', buildBox),
+      card('Commands run on', 'per project', buildBox),
       S.web ? null : card('Permission on this computer', 'what Claude may run here', ruleBox),
       S.web ? null : card('Recent commands here', '', recentBox)]);
 
@@ -152,8 +152,9 @@
       var b = devs.builds || {};
       var names = Object.keys(b).sort();
       if (!names.length) { kids(buildBox, [h('div', { class: 'muted' }, 'No project with a server folder.')]); return; }
-      kids(buildBox, [h('div', { class: 'pc-note' }, 'My computers: Claude runs builds, tests and installs on a connected computer. '
-        + 'If none is connected it stops and tells you — it never builds on the server instead. New chats pick up a change.')].concat(names.map(function (n) {
+      kids(buildBox, [h('div', { class: 'pc-note' }, 'My computers: the files stay on the server (synced with this computer) and Claude works on them there, '
+        + 'but every command it runs (build, npm, git, tests, dev servers…) runs on a connected computer. If none is connected it stops and tells you — '
+        + 'it never runs them on the server instead. New chats pick up a change.')].concat(names.map(function (n) {
         var st = buildState(n, devs);
         function pick(v) {
           if (v === b[n]) return;
@@ -346,7 +347,7 @@
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
       var st = p ? buildState(p.name) : null;
       if (!st || st.on === 'server') { t.setWhere(''); return; }
-      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ builds on PC' + (st.ok ? '' : ' · off'), st.text, st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad');
+      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ runs on PC' + (st.ok ? '' : ' · off'), st.text, st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad');
     });
   }
 
@@ -500,8 +501,7 @@
     var p = tab && tab.info && tab.info.spec && tab.info.spec.project;
     var st = p ? buildState(p) : null;
     if (!st || st.on === 'server' || typeof cmd !== 'string') return '';
-    if (st.on === 'local') return CLAUDE_FILES.test(cmd) ? 'server' : 'pc';
-    return /^\s*(\S*\/)?onpc\s/.test(cmd) ? 'pc' : 'server';       // builds on the computers: only onpc goes there
+    return CLAUDE_FILES.test(cmd) ? 'server' : 'pc';     // Local only and My computers: every command, like onpc's hook
   }
 
   setInterval(decorate, 5000);         // new chat tabs

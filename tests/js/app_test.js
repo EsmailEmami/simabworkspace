@@ -1512,11 +1512,11 @@ const tests = {
     assert.strictEqual(S.pc.on, true);
     const row = q('.pc-build', md).find((r) => r.classList.contains('focus'));
     assert.ok(row, 'opened at the project of the menu');
-    assert.match(row.textContent, /Builds run on the server/);
+    assert.match(row.textContent, /Commands run on the server/);
     q('button', row).find((b) => b.textContent === 'My computers').click(); await settle();
     assert.strictEqual(fakePc.devs.builds.cheshmeh, 'computers');
     const row2 = q('.pc-build', md).find((r) => r.classList.contains('focus'));
-    assert.match(row2.textContent, /Builds run on laptop/, 'says where it builds now');
+    assert.match(row2.textContent, /Commands run on laptop/, 'says where it runs now');
     // the sidebar marks it: works (a computer is connected) / will stop (none)
     await settle();
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
@@ -1525,7 +1525,7 @@ const tests = {
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'My computers');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] }));
     assert.ok(q('.pcb', head())[0].classList.contains('bad'), 'red when no computer is connected');
-    assert.match(q('.pcb', head())[0].getAttribute('title'), /will not build/);
+    assert.match(q('.pcb', head())[0].getAttribute('title'), /cannot run its commands/);
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'My computers · none on');
     assert.ok(!q('.proj-head').some((x) => /shop/.test(x.textContent) && q('.pcb', x).length), 'server projects: no mark');
     const ta = q('textarea', md);

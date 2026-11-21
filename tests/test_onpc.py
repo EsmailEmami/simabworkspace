@@ -116,6 +116,11 @@ class ServerScripts(unittest.TestCase):
         hint = subprocess.run([sys.executable, onpc, "--hint"], cwd=os.path.join(self.home, "proj", "web"),
                               env=self.env, capture_output=True, timeout=10).stdout.decode()
         self.assertEqual(hint, sw.PC_HINT)
+        loc = subprocess.run([sys.executable, onpc, "--local"], cwd=os.path.join(self.home, "proj", "web"),
+                             env=self.env, capture_output=True, timeout=10)
+        self.assertEqual(loc.returncode, 0)
+        self.assertIn("--hook", json.loads(loc.stdout)["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+                      "My computers: every Bash command goes to the computer too (no mount needed)")
         self.assertEqual(subprocess.run([sys.executable, onpc, "--hint"], cwd=self.home, env=self.env,
                                         capture_output=True, timeout=10).stdout, b"")
         self.py(sw.PC_ADMIN_PY, ["builds", "~/proj", "server"])
@@ -300,6 +305,17 @@ class EndToEnd(unittest.TestCase):
         _, out, _ = self.onpc("--list")
         self.assertIn("offline", out)
 
+    def test_my_computers_project_runs_every_command_without_our_question(self):
+        # the server marks the folder "computers" → onpc says it comes from the hook: Claude's modes decided
+        Path(self.pcdir, "projects.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "computers"}))
+        self.setcfg(mode="every")
+        code, out, err = self.onpc("pwd; echo " + os.path.join(os.path.realpath(self.srv_dir), "web", "x"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, os.path.realpath(os.path.join(self.srv_dir, "web")) + "\n"
+                         + os.path.join(os.path.realpath(self.srv_dir), "web", "x") + "\n",
+                         "ran in the synced copy; paths shown as the server's both ways")
+        self.assertFalse(self.hub.pending()["asks"])
+
     def test_dev_server_in_the_background(self):
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
@@ -416,6 +432,7 @@ class LocalOnly(EndToEnd):
     test_runs_in_the_synced_copy_with_output_and_exit_code = test_ask_then_always = None      # EndToEnd's own
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
     test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
+    test_my_computers_project_runs_every_command_without_our_question = None
 
     def setUp(self):
         super().setUp()

@@ -2108,7 +2108,7 @@
       { label: 'Continue last chat', disabled: !r, action: function () { resumeLatest(p.name); } },
       { label: 'Sessions — running and past…', disabled: !r, k: runningOf(p.name).length ? runningOf(p.name).length + ' running' : '', action: function () { claudeSessionsDialog(p); } },
       { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
-      { label: 'Builds run on…', disabled: !r, k: window.SWComputers ? window.SWComputers.menuLabel(p.name) : '', action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
+      { label: 'Commands run on…', disabled: !r, k: window.SWComputers ? window.SWComputers.menuLabel(p.name) : '', action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
       { label: 'Claude text terminal (TUI)', disabled: !r || !!p.localOnly, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },

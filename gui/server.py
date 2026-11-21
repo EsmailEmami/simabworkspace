@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.51.0"
+VERSION = "1.52.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5398,15 +5398,17 @@ PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "
               "output": "chat"}
 PC_ID_RE = re.compile(r"[0-9a-f]{12}")
 PC_HINT = (
-    "This project is built and run on the user's own computer, not on this server. Run every build, "
-    "test, lint, package install (npm/yarn/pnpm install …) and run command of this project through "
-    "`onpc`, e.g. `onpc npm run build` — same folder; it runs in the synced copy on the user's computer "
-    "and gives back the output and exit code; the user may have to approve it there, so it can take a "
-    "while: give the Bash call a long timeout (600000 ms). Never run those commands directly on this server. If onpc says no computer is connected or "
-    "the user denied it, stop and tell the user; do not fall back to the server. `onpc --list` shows "
-    "the user's computers. Long-running dev servers (ng serve, npm start, go run …): `onpc --bg NAME "
-    "COMMAND` starts it there and returns at once with its first output and URL; `onpc --logs NAME` shows its "
-    "output, `onpc --stop NAME`, `onpc --ps` lists them. Never run a dev server in the foreground.")
+    "This project's commands run on the user's own computer, not on this server. The files here are "
+    "the server's copy, synced both ways with the copy on that computer (Read, Edit, Write, Grep and Glob "
+    "work here as usual). Every Bash command is run on the user's computer automatically, in the same "
+    "folder there, after the sync caught up — so tools, node, git, docker etc. are the ones installed there; "
+    "if it is Windows the shell is Git Bash. Your own files (~/.claude: memory, plans, settings; /tmp) are "
+    "on this server: use Read/Write/Glob for them; a Bash command that mentions ~/.claude runs here. `cd` "
+    "does not carry over to the next command: use `cd dir && command`. Give long builds a long Bash timeout "
+    "(600000 ms). If a command says no computer is connected, stop and tell the user; never try to run it "
+    "on the server instead. Dev servers (ng serve, npm start …): `onpc --bg NAME COMMAND` starts it on the "
+    "computer and returns at once with its URL; `onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never "
+    "run a dev server in the foreground.")
 
 PC_LOCAL_HINT = (
     "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
@@ -5488,7 +5490,8 @@ def send(d, cwd, cmd):
     if s is None:
         return NOT_HERE
     s.settimeout(None)
-    body = json.dumps({"cwd": cwd, "cmd": cmd, "chat": os.environ.get("SIMAB_CHAT", "")[:64]}).encode()
+    body = json.dumps({"cwd": cwd, "cmd": cmd, "chat": os.environ.get("SIMAB_CHAT", "")[:64],
+                       "hooked": bool(project_on(cwd)[0])}).encode()
     head = ("POST /pc/run HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
             "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))
     try:
@@ -5666,11 +5669,11 @@ def main(a):
         if on:
             sys.stdout.write(LOCAL_HINT if on == "local" else HINT)
         return 0
-    if a[:1] == ["--local"]:          # a Local only project: Claude's settings (the Bash hook); 3 = not mounted
+    if a[:1] == ["--local"]:          # Local only / My computers: Claude's settings (the Bash hook); 3 = not mounted
         on, root = project_on(os.path.realpath(os.getcwd()))
-        if on != "local":
+        if not on:
             return 0
-        if not os.path.ismount(root):
+        if on == "local" and not os.path.ismount(root):
             return 3
         me = shlex.quote(sys.executable) + " " + shlex.quote(os.path.realpath(os.path.abspath(sys.argv[0])))
         sys.stdout.write(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
@@ -6345,9 +6348,9 @@ class PcHub:
         if not os.path.isdir(local):
             return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
         paths = []
-        if project.get("localOnly"):
-            # Claude's own permission modes already decided (the hook runs every Bash command here);
-            # the server's paths of the mount mean this computer's folder, and back in the output
+        if project.get("localOnly") or b.get("hooked") is True:
+            # Local only / My computers: the hook sends every Bash command here, so Claude's own permission
+            # modes already decided; the server's paths mean this computer's folder, and back in the output
             lroot = project["local"].replace("\\", "/") if IS_WIN else project["local"]
             for sv in {root, (self.home + project["remote"][1:]) if self.home and project["remote"].startswith("~/") else ""} - {""}:
                 cmd = cmd.replace(sv, lroot)

@@ -280,6 +280,9 @@ class EndToEnd(unittest.TestCase):
         r, d = self.req("GET", "/products", {"Sec-Fetch-Mode": "navigate"})
         self.assertEqual(r.status, 200)
         self.assertIn(b"sessionStorage.getItem('__simabT')", d)
+        self.assertIn(b"if (!t) t = null;", d)
+        r, d = self.req("GET", "/portal", {"Sec-Fetch-Mode": "navigate", "Cookie": "__simab_last=esi/esi/front"})
+        self.assertIn(b'if (!t) t = "esi/esi/front";', d, "a new tab (no sessionStorage) goes to the last project opened here")
         r, d = self.req("GET", "/assets/a.js", {"Cookie": "__simab_last=esi/esi/front"})   # no service worker in this browser
         self.assertEqual(d, b"console.log(1)")
         r, _ = self.req("GET", "/assets/a.js")

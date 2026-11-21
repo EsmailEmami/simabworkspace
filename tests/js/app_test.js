@@ -776,10 +776,13 @@ const tests = {
     line.click();
     await settle();
     const modal = q('.modal').pop();
-    assert.ok(modal.textContent.includes('Asking now (1)') && modal.textContent.includes('Online now (1)') && modal.textContent.includes('Let in (1)'));
+    assert.strictEqual(q('.share-n', modal).map((n) => n.textContent).join(), '1,1,1', 'asking, online, let in');
+    assert.strictEqual(q('.seg-b.on', modal)[0].textContent, 'Ask me');
     q('button', modal).find((b) => b.textContent === '1 hour').click();
     q('button', modal).find((b) => b.textContent === 'Revoke').click();
+    q('.seg-b', modal).find((b) => b.textContent === 'Anyone').click();
     await settle();
+    assert.ok(calls.some((c) => c.url === '/api/share/port' && c.body.access === 'public'));
     assert.ok(calls.some((c) => c.url === '/api/pc/guest' && c.body.answer === 'hour' && c.body.id === 'aaaaaaaaaaaa'), 'the app answers on this computer');
     assert.ok(calls.some((c) => c.url === '/api/share/revoke' && c.body.id === '0123456789abcdef'));
     q('button', modal).find((b) => b.textContent === 'Close').click();

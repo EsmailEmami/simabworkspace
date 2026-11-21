@@ -348,34 +348,47 @@
     function draw() {
       var cur = ((S.share && S.share.shares) || []).filter(function (y) { return shareKey(y) === shareKey(x); })[0] || x;
       var st = SHARE_DOT[(S.shareSt || {})[shareKey(x)]] || ['off', 'Checking…'];
-      var who = h('select', { class: 'inp share-who' }, [['private', 'Only me'], ['ask', 'Ask me'], ['public', 'Anyone']].map(function (a) { return h('option', { value: a[0] }, a[1]); }));
-      who.value = cur.access;
-      who.onchange = function () { api('POST', 'share/port', Object.assign({}, cur, { access: who.value, on: true })).then(function () { loadShare(); toast('Saved', 'ok'); }).catch(fail); };
+      var WHO = [['private', 'Only me', 'Only you, signed in to the workspace'], ['ask', 'Ask me', 'Others wait while your phone / computer asks you'],
+        ['public', 'Anyone', 'Anyone with the link, no question']];
+      var seg = h('div', { class: 'seg' }, WHO.map(function (a) {
+        return h('button', { class: 'seg-b' + (cur.access === a[0] ? ' on' : ''), title: a[2], onclick: function () {
+          if (cur.access === a[0]) return;
+          api('POST', 'share/port', Object.assign({}, cur, { access: a[0], on: true })).then(function () { cur.access = a[0]; loadShare(); draw(); toast('Saved', 'ok'); }).catch(fail);
+        } }, a[1]);
+      }));
       var asks = shareLive(x, 'asks'), online = shareLive(x, 'active'), guests = shareLive(x, 'guests');
+      function section(title, n, rows, empty) {
+        return h('div', { class: 'share-sec' }, h('div', { class: 'share-sec-h' }, h('span', null, title), h('span', { class: 'share-n' + (n ? ' some' : '') }, String(n))),
+          n ? h('div', { class: 'share-rows' }, rows) : h('div', { class: 'share-empty' }, empty));
+      }
+      function person(main, sub, btns) {
+        return h('div', { class: 'share-row' }, h('div', { class: 'grow' }, h('div', null, main), h('div', { class: 'muted mono share-sub' }, sub)), btns || null);
+      }
       box.replaceChildren(
-        h('div', { class: 'svc' }, h('span', { class: 'grow' }, url ? h('a', { class: 'mono', href: url, target: '_blank', rel: 'noopener' }, url) : h('span', { class: 'muted' }, 'No link yet (the web version has not said its apps address)'),
-          h('br'), h('small', { class: 'muted' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' on your computer · ', h('span', { class: 'share-dot ' + st[0] }, '● '), st[1])),
-          url ? h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy') : null),
-        h('div', { class: 'svc' }, h('span', null, 'Who can open it'), who),
-        h('div', { class: 'sec' }, 'Asking now (' + asks.length + ')'),
-        asks.length ? h('div', { class: 'devices' }, asks.map(function (a) {
-          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, a.label, h('br'), h('small', { class: 'muted mono' }, a.ip + ' · ' + ago(a.at))),
+        h('div', { class: 'share-head' },
+          h('div', { class: 'share-url mono' }, url || 'No link yet — the web version has not said its apps address'),
+          h('div', { class: 'share-to' }, h('span', { class: 'share-pill ' + st[0] }, '● ' + st[1]),
+            h('span', { class: 'muted mono' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' on your computer')),
+          url ? h('div', { class: 'share-acts' },
+            h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, 'Open ↗'),
+            h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link')) : null),
+        h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg,
+          h('div', { class: 'muted share-sub' }, (WHO.filter(function (a) { return a[0] === cur.access; })[0] || WHO[0])[2])),
+        section('Asking now', asks.length, asks.map(function (a) {
+          return person(a.label, a.ip + ' · ' + ago(a.at), h('div', { class: 'share-btns' },
             h('button', { class: 'btn sm', onclick: function () { answer(a, 'deny'); } }, 'Deny'),
             h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'hour'); } }, '1 hour'),
             h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'day'); } }, '24 hours'),
-            h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'always'); } }, 'Always'));
-        })) : h('div', { class: 'muted' }, h('small', null, cur.access === 'ask' ? 'Nobody is waiting.' : 'Only with “Ask me”: people without your sign-in ask here.')),
-        h('div', { class: 'sec' }, 'Online now (' + online.length + ')'),
-        online.length ? h('div', { class: 'devices' }, online.map(function (a) {
-          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, a.label + ' · ' + ({ you: 'you', guest: 'let in by you', anyone: 'public link' }[a.who] || a.who),
-            h('br'), h('small', { class: 'muted mono' }, a.ip + ' · since ' + ago(a.since) + ' · last ' + ago(a.last))));
-        })) : h('div', { class: 'muted' }, h('small', null, 'Nobody used it in the last 5 minutes.')),
-        h('div', { class: 'sec' }, 'Let in (' + guests.length + ')'),
-        guests.length ? h('div', { class: 'devices' }, guests.map(function (g) {
-          return h('div', { class: 'dev' }, h('span', { class: 'grow' }, g.label, h('br'),
-            h('small', { class: 'muted mono' }, g.ip + ' · ' + (g.exp ? 'until ' + new Date(g.exp * 1000).toLocaleString() : 'until you revoke it'))),
+            h('button', { class: 'btn sm primary', onclick: function () { answer(a, 'always'); } }, 'Always')));
+        }), cur.access === 'ask' ? 'Nobody is waiting.' : 'Only with “Ask me”: people without your sign-in ask here.'),
+        section('Online now', online.length, online.map(function (a) {
+          return person(a.label + ' · ' + ({ you: 'you', guest: 'let in by you', anyone: 'public link' }[a.who] || a.who),
+            a.ip + ' · since ' + ago(a.since) + ' · last ' + ago(a.last));
+        }), 'Nobody used it in the last 5 minutes.'),
+        section('Let in', guests.length, guests.map(function (g) {
+          return person(g.label, g.ip + ' · ' + (g.exp ? 'until ' + new Date(g.exp * 1000).toLocaleString() : 'until you revoke it'),
             h('button', { class: 'btn sm', onclick: function () { api('POST', 'share/revoke', { id: g.id }).then(function () { toast(S.web ? 'Revoked' : 'Revoked — takes effect within 30 s', 'ok'); loadShare(); setTimeout(draw, 600); }).catch(fail); } }, 'Revoke'));
-        })) : h('div', { class: 'muted' }, h('small', null, 'Nobody.')));
+        }), 'Nobody.'));
     }
     draw();
     loadShare(true);
@@ -3369,7 +3382,8 @@
     var count = S.tabs.filter(function (t) { return t.info.spec.project === p.name && !t.gone; }).length;
     var sync = p.sync;
     var dot = sync ? sync.state : (p.localExists || p.remote ? 'ok' : '');
-    var el = h('div', { class: 'proj' + (open ? ' open' : ''), style: '--pc:' + projectColor(p.name) });
+    var pcSt = p.localOnly && window.SWComputers && window.SWComputers.fresh() ? window.SWComputers.buildState(p.name) : null;
+    var el = h('div', { class: 'proj' + (open ? ' open' : '') + (pcSt && !pcSt.ok ? ' pc-off' : ''), style: '--pc:' + projectColor(p.name) });
     var more = h('button', { class: 'icon-btn', title: 'More', onclick: function (e) { e.stopPropagation(); projectMenu(p, more); } }, '⋯');
     var tip = [p.title ? 'name: ' + p.name : '', p.remote ? 'server: ' + p.remote : '', p.local ? 'local: ' + p.local : '',
       sync ? 'sync: ' + sync.label + (sync.conflicts ? ', ' + plural(sync.conflicts, 'conflict') : '') : '',

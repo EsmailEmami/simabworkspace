@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.0"
+VERSION = "1.64.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2508,8 +2508,10 @@ def remote_python(conf: ServerConf, code: str, args: list, multiplex=True, timeo
                                stdout=subprocess.PIPE, stderr=errf, timeout=timeout)
             errf.seek(0)
             err = errf.read().decode("utf-8", "replace").strip()
+    except subprocess.TimeoutExpired:                # str(e) is the whole command (FS_PY): never show it
+        raise ApiError(504, f"cannot reach the server: no answer in {timeout}s")
     except (OSError, subprocess.SubprocessError) as e:
-        raise ApiError(502, f"cannot reach the server: {e}")
+        raise ApiError(502, "cannot reach the server: " + (e.strerror if isinstance(e, OSError) and e.strerror else type(e).__name__))
     if r.returncode != 0:
         raise ApiError(502, "server read failed: " + (err.splitlines() or ["?"])[-1][:200])
     try:
@@ -4198,7 +4200,7 @@ def fs_change_call(app, project: dict, op: str, body: dict) -> dict:
             raise ApiError(400, e.strerror or str(e))
     else:
         conf = app._project_conf(project) if project.get("name") else app.conf
-        res = remote_python(conf, FS_PY, [op, project["remote"], path, arg],
+        res = fs_remote(project, conf, [op, project["remote"], path, arg],
                             multiplex=bool(app.store.settings.get("sshMultiplex")),
                             timeout=120, stdin=text.encode("utf-8") if op == "write" else None)
         if not isinstance(res, dict):
@@ -4672,6 +4674,16 @@ def fs_path_ok(path: str) -> bool:
     return path == "" or git_path_ok(path.strip("/"))
 
 
+def fs_remote(project: dict, conf, args: list, **kw):
+    """remote_python for a project's files; a Local only project whose computer is off says so in one line."""
+    try:
+        return remote_python(conf, FS_PY, args, **kw)
+    except ApiError as e:
+        if project.get("localOnly") and e.status in (502, 504):
+            raise ApiError(503, "offline: the computer this project lives on is not connected")
+        raise
+
+
 def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
     """List a folder / read a file of a project, on this machine or on the server."""
     if op not in ("list", "read"):
@@ -4696,7 +4708,7 @@ def fs_call(app, project: dict, op: str, path: str, where: str = None) -> dict:
             raise ApiError(400, e.strerror or str(e))
     else:
         conf = app._project_conf(project) if project.get("name") else app.conf
-        res = remote_python(conf, FS_PY, [op, project["remote"], path],
+        res = fs_remote(project, conf, [op, project["remote"], path],
                             multiplex=bool(app.store.settings.get("sshMultiplex")), timeout=40)
         if not isinstance(res, dict):
             raise ApiError(502, "bad answer from the server")
@@ -10994,6 +11006,7 @@ ask();
 # any other page opened in a tab: back through the entry of this tab's project
 SHARE_LOST_JS = """<script>(function(){
 var t = null; try { t = sessionStorage.getItem('__simabT'); } catch (e) {}
+if (!t) t = @@LAST@@;            // a new tab (window.open, target=_blank): the last project opened in this browser
 var p = location.pathname;
 if (t && p.indexOf('/' + t + '/') !== 0 && p !== '/' + t && p.indexOf('/__simab/') !== 0) {
   location.replace('/' + t + p + location.search + location.hash);
@@ -11573,7 +11586,7 @@ class ShareHub:
             ws = self.ws_of_user(user) if user else ""
             if not ws:
                 if nav and not sw_req:
-                    return h._send(200, share_page("Not found", "Nothing is shared at this address.", SHARE_LOST_JS), MIME[".html"])
+                    return h._send(200, share_page("Not found", "Nothing is shared at this address.", self._lost_js(h)), MIME[".html"])
                 last = self._cookie(h, SHARE_LAST)                  # a browser without service workers
                 lu, ls, ln_, _ = self._split("/" + last + "/")
                 lws = self.ws_of_user(lu) if lu else ""
@@ -11609,7 +11622,7 @@ class ShareHub:
                     return self._entry(h, ws, domain, sd, sh, sub, q)
                 return self._serve(h, method, ws, domain, sd, app, sh, sub, q, f"/{user}/{slug}/{name}", False)
             if nav:
-                return h._send(200, share_page("Not found", "Nothing is shared at this address.", SHARE_LOST_JS), MIME[".html"])
+                return h._send(200, share_page("Not found", "Nothing is shared at this address.", self._lost_js(h)), MIME[".html"])
             return h._send(404, b"not found", "text/plain")
         except ApiError as e:
             if nav:
@@ -11617,6 +11630,10 @@ class ShareHub:
             return h._send(e.status, e.message.encode(), "text/plain; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _lost_js(self, h) -> str:
+        u, sl, nm, _ = self._split("/" + self._cookie(h, SHARE_LAST) + "/")
+        return SHARE_LOST_JS.replace("@@LAST@@", share_js(f"{u}/{sl}/{nm}" if u else None))
 
     @staticmethod
     def _split(path: str):

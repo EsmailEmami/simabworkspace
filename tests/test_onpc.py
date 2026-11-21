@@ -465,6 +465,11 @@ class LocalOnly(EndToEnd):
                          "ran on the computer; its folder shown as the server's")
         self.assertIn(b"b.txt", res.stdout)
         self.assertFalse(self.hub.pending()["asks"], "no extra question: Claude's own modes decide")
+        # Claude's own files (memory…) are on the server: such a command is not sent to the computer
+        for c in ("ls ~/.claude/projects/x/memory/", "cat $HOME/.claude/plans/a.md", "ls " + os.path.join(self.home, ".claude", "x")):
+            out = subprocess.run(hookcmd, shell=True, input=json.dumps({"tool_input": {"command": c}}).encode(),
+                                 env=self.env, capture_output=True, timeout=10).stdout
+            self.assertEqual(out, b"", c)
         # the hook leaves onpc itself alone
         out = subprocess.run(hookcmd, shell=True, input=json.dumps({"tool_input": {"command": new["command"]}}).encode(),
                              env=self.env, capture_output=True, timeout=10).stdout

@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.50.3"
+VERSION = "1.50.4"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5411,7 +5411,10 @@ PC_LOCAL_HINT = (
     "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
     "stored on this server). Read, Edit, Write, Grep and Glob work here as usual. Every Bash command is "
     "run on the user's computer automatically (in the same folder there) — so tools, node, git, docker "
-    "etc. are the ones installed there; if it is Windows the shell is Git Bash. `cd` does not carry over "
+    "etc. are the ones installed there; if it is Windows the shell is Git Bash. Your own files (~/.claude: "
+    "memory, plans, settings; /tmp) are on this server, not there: read and write them with Read/Write/Glob, "
+    "and put temporary files for commands inside the project folder, not in /tmp. A Bash command that "
+    "mentions ~/.claude runs on this server. `cd` does not carry over "
     "to the next command: use `cd dir && command`. Give long builds a long Bash timeout (600000 ms). If a "
     "command says the computer is not connected, stop and tell the user.")
 
@@ -5587,6 +5590,11 @@ def hook():
     cmd = ti.get("command")
     me = os.path.realpath(os.path.abspath(sys.argv[0]))
     if not isinstance(cmd, str) or not cmd.strip() or cmd.lstrip().startswith((me, "onpc ")):
+        return 0
+    # Claude's own files (memory, plans, settings, its task outputs) are on THIS server, not on the
+    # computer: such a command stays here
+    home = os.path.expanduser("~")
+    if any(x in cmd for x in ("~/.claude", "$HOME/.claude", "${HOME}/.claude", home + "/.claude", "/tmp/claude-")):
         return 0
     ti["command"] = shlex.quote(me) + " " + shlex.quote(cmd)
     sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": ti}}))

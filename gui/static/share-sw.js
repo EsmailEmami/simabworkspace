@@ -40,9 +40,20 @@ function targetOf(id) {
   return tabs.has(id) ? Promise.resolve(tabs.get(id)) : ask(id);
 }
 
-function pass(req, t, nav) {
+var portLists = {};        // project → {at, p: promise of [{port, t}]} (its own first)
+function portsOf(t) {
+  var sl = t.split('/')[0], c = portLists[sl];
+  if (!c || Date.now() - c.at > 30000) {
+    c = portLists[sl] = { at: Date.now(), p: fetch('/__simab/ports?t=' + encodeURIComponent(t), { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : []; }).catch(function () { return []; }) };
+  }
+  return c.p;
+}
+
+function pass(req, t, nav, from) {
   var u = new URL(req.url), h = new Headers(req.headers);
   h.set('X-Simab-SW', '1');
+  if (from && from !== t) h.set('X-Simab-From', from);
   if (nav) h.set('X-Simab-Nav', '1');
   var init = { method: req.method, headers: h, credentials: 'include', redirect: 'manual',
     cache: req.cache === 'only-if-cached' ? 'default' : req.cache };
@@ -61,7 +72,20 @@ function pass(req, t, nav) {
 
 self.addEventListener('fetch', function (e) {
   var req = e.request, u = new URL(req.url);
-  if (u.origin !== self.location.origin || u.pathname.indexOf('/__simab/') === 0) return;
+  if (u.origin !== self.location.origin) {
+    // the page calls its API on localhost:PORT (as on the computer): the shared port of that number
+    if (req.mode === 'navigate' || !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname)) return;
+    e.respondWith(targetOf(e.clientId).then(function (t) {
+      if (!t) return fetch(req);
+      return portsOf(t).then(function (list) {
+        var port = u.port || (u.protocol === 'https:' ? '443' : '80');
+        var hit = list.filter(function (x) { return String(x.port) === port; })[0];
+        return hit ? pass(req, hit.t, false, t) : fetch(req);
+      });
+    }));
+    return;
+  }
+  if (u.pathname.indexOf('/__simab/') === 0) return;
   if (req.mode === 'navigate') {
     var t = claims.get(noHash(req.url));
     if (!t) return;                // the server's page asks this tab's sessionStorage and comes back

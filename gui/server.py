@@ -6665,7 +6665,7 @@ class PcHub:
         b = h._body()
         op, name = b.get("op"), b.get("name") or ""
         if op == "ps":
-            rows = [f"{x['name']}  {x['state']}{' :' + str(x['code']) if x['state'] == 'exited' else ''}  {x['url'] or '-'}  {x['project']}: {x['cmd']}"
+            rows = [f"{x['name']}  {x['state']}{' :' + str(x['code']) if x['state'] == 'exited' else ''}  {' '.join(x['urls']) or '-'}  {x['project']}: {x['cmd']}"
                     for x in self.bg.values()]
             return h._json(200, {"text": "\n".join(rows) or f"no dev servers on {c['name']}"})
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
@@ -6721,13 +6721,13 @@ class PcHub:
         if x["state"] != "running":
             return h._json(422, {"error": f"{name} stopped at once (exit {x['code']}) on {c['name']}:\n{first}"})
         return h._json(200, {"text": f"started {name} on {c['name']} — keeps running (onpc --logs {name}, onpc --stop {name})\n"
-                                     + (f"URL: {x['url']}\n" if x["url"] else "no URL seen yet\n") + "--- output so far ---\n" + first})
+                                     + (f"URL: {' '.join(x['urls'])}\n" if x["urls"] else "no URL seen yet\n") + "--- output so far ---\n" + first})
 
     def start_bg(self, name, project, cmd, cwd, chat="", paths=()) -> dict:
         kw = {"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True}
         p = subprocess.Popen(pc_shell_argv(cmd), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, env=dict(os.environ, PATH=tool_path()), **kw)
-        x = {"name": name, "project": project, "cmd": cmd, "pid": p.pid, "start": time.time(), "url": "",
+        x = {"name": name, "project": project, "cmd": cmd, "pid": p.pid, "start": time.time(), "url": "", "urls": [],
              "state": "running", "code": None, "out": "", "chat": chat, "_p": p}
         self.bg[name] = x
 
@@ -6738,10 +6738,9 @@ class PcHub:
                 for a, b in paths:
                     t = t.replace(a, b)
                 x["out"] = (x["out"] + t)[-200000:]
-                if not x["url"]:
-                    m = PC_URL_RE.search(x["out"])
-                    if m:
-                        x["url"] = m.group(0).rstrip("/.,)").replace("0.0.0.0", "localhost").replace("[::]", "localhost")
+                if len(x["urls"]) < 8:
+                    x["urls"] = pc_urls(x["out"][-(len(t) + 300):], x["urls"])
+                    x["url"] = x["urls"][0] if x["urls"] else ""
             code = p.wait()
             if x["state"] == "running":
                 x["state"], x["code"] = "exited", code
@@ -7330,6 +7329,24 @@ class PcHub:
 
 
 PC_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::\d+)?[^\s'\"<>]*")
+
+
+def pc_urls(text: str, seen=()) -> list:
+    """Every local address a dev server printed, one per port (a project may serve an API and a panel);
+    SEEN: the ones found before (only the new output is searched again)."""
+    def port(u):
+        m = re.search(r"://[^/]*:(\d+)", u)
+        return m.group(1) if m else ("443" if u.startswith("https") else "80")
+    out = list(seen)
+    ports = {port(u) for u in out}
+    for m in PC_URL_RE.finditer(text):
+        u = m.group(0).rstrip("/.,)").replace("0.0.0.0", "localhost").replace("[::]", "localhost")
+        if port(u) not in ports:
+            ports.add(port(u))
+            out.append(u)
+            if len(out) >= 8:
+                break
+    return out
 
 
 def pc_rtt(host: str, port) -> float:
@@ -10682,9 +10699,10 @@ def share_location(loc: str, base: str) -> str:
     return loc
 
 
-def share_inject(html: bytes, target: str) -> bytes:
-    """/__simab/shim.js as the page's first script."""
-    tag = ('<script src="/__simab/shim.js" data-t="%s"></script>' % target).encode()
+def share_inject(html: bytes, target: str, ports=None) -> bytes:
+    """/__simab/shim.js as the page's first script (ports: {"6000": "project/api"} for localhost:6000 calls)."""
+    p = json.dumps(ports or {}, separators=(",", ":")).replace("&", "&amp;").replace('"', "&quot;")
+    tag = ('<script src="/__simab/shim.js" data-t="%s" data-p="%s"></script>' % (target, p)).encode()
     head = html[:65536]
     m = (re.search(rb"<head\b[^>]*>", head, re.I) or re.search(rb"<html\b[^>]*>", head, re.I)
          or re.search(rb"<!doctype[^>]*>", head, re.I))
@@ -10743,6 +10761,10 @@ class ShareHub:
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_domains (domain TEXT PRIMARY KEY, ws TEXT NOT NULL, main TEXT NOT NULL)")
         self.db.run("CREATE TABLE IF NOT EXISTS web_shares (ws TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, "
                     "project TEXT NOT NULL, port INTEGER NOT NULL, public INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, slug, name))")
+        try:
+            self.db.run("ALTER TABLE web_shares ADD COLUMN tls INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.Error:
+            pass                    # there already
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_tokens (hash TEXT PRIMARY KEY, ws TEXT NOT NULL, domain TEXT NOT NULL, exp REAL NOT NULL)")
 
     # settings (Settings → Share on your domain) ---------------------------------------------------
@@ -10752,15 +10774,25 @@ class ShareHub:
         return {"domain": r[0][0], "ws": r[0][1], "main": r[0][2]} if r else None
 
     def find(self, ws: str, slug: str, name: str):
-        r = self.db.rows("SELECT slug, name, project, port, public FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
-        return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4])} if r else None
+        r = self.db.rows("SELECT slug, name, project, port, public, tls FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+        return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4]),
+                "tls": bool(r[0][5])} if r else None
+
+    def ports(self, ws: str, slug: str, signed: bool) -> list:
+        """[{port, t}] of this workspace, this project first: a page that calls localhost:PORT (its API)
+        gets that shared port. Private ones only for a signed-in browser."""
+        out = []
+        for sl, name, port, pub in self.db.rows("SELECT slug, name, port, public FROM web_shares WHERE ws = ? ORDER BY slug != ?, slug, name", (ws, slug)):
+            if pub or signed:
+                out.append({"port": port, "t": f"{sl}/{name}"})
+        return out
 
     def state(self, ws: str) -> dict:
         doms = [d for d, in self.db.rows("SELECT domain FROM web_share_domains WHERE ws = ? ORDER BY domain", (ws,))]
         shares = []
-        for slug, name, project, port, pub in self.db.rows(
-                "SELECT slug, name, project, port, public FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
-            shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub),
+        for slug, name, project, port, pub, tls in self.db.rows(
+                "SELECT slug, name, project, port, public, tls FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
+            shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub), "tls": bool(tls),
                            "urls": [f"https://{d}/{slug}/{name}" for d in doms]})
         return {"domains": doms, "shares": shares}
 
@@ -10807,8 +10839,8 @@ class ShareHub:
             n = self.db.rows("SELECT COUNT(*) FROM web_shares WHERE ws = ?", (ws,))[0][0]
             if n >= SHARE_MAX and not self.find(ws, slug, name):
                 raise ApiError(400, f"at most {SHARE_MAX} shared ports")
-            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public) VALUES (?, ?, ?, ?, ?, ?)",
-                        (ws, slug, name, project, port, 1 if body.get("public") else 0))
+            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (ws, slug, name, project, port, 1 if body.get("public") else 0, 1 if body.get("tls") else 0))
             return self.state(ws)
         raise ApiError(404, "not found")
 
@@ -10975,6 +11007,10 @@ class ShareHub:
                 app = self.gate._app(ws)
             if app is None:
                 return h._send(404, share_page("Not found", "Nothing is shared here."), MIME[".html"])
+            if path == "/__simab/ports" and method == "GET":
+                slug = urllib.parse.parse_qs(q).get("t", [""])[0].split("/")[0]
+                signed = self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
+                return h._json(200, self.ports(ws, slug, signed))
             if path.startswith("/__simab/p/"):
                 slug, name, sub = self._split(path[len("/__simab/p"):])
                 sh = self.find(ws, slug, name) if slug else None
@@ -11059,8 +11095,12 @@ class ShareHub:
         body = h.rfile.read(n) if n else b""
         upgrade = (hd.get("Upgrade") or "").lower() == "websocket"
         origin = ("https://" if self.gate.secure else "http://") + (hd.get("Host") or "")
-        prefix = f"{sh['slug']}.{sh['name']}."
-        local = f"http://localhost:{sh['port']}"
+        prefix = f"{sh['slug']}."            # cookies of localhost are the same on every port: one jar per project
+        page = sh
+        fs, _, fn = (hd.get("X-Simab-From") or "").partition("/")
+        if fs and fn and (fs, fn) != (sh["slug"], sh["name"]):
+            page = self.find(ws, fs, fn) or sh            # the page that calls this port (its panel)
+        local = f"{'https' if page.get('tls') else 'http'}://localhost:{page['port']}"
         lines = [f"{method} {sub}{'?' + q if q else ''} HTTP/1.1", f"Host: localhost:{sh['port']}"]
         for k, v in hd.items():
             lk = k.lower()
@@ -11085,10 +11125,24 @@ class ShareHub:
         with self.lock:
             ln["active"] += 1
         try:
+            if sh.get("tls"):                # the port speaks HTTPS (its own certificate: not checked, it is localhost)
+                import ssl
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                try:
+                    s = ctx.wrap_socket(s, server_hostname="localhost")
+                except (ssl.SSLError, OSError):
+                    raise ApiError(502, "this port does not speak HTTPS — turn HTTPS off for it")
             s.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("utf-8", "surrogateescape") + body)
             if upgrade:
                 return self._upgrade(h, s)
-            return self._answer(h, method, s, t, prefix, base, nav, sw)
+            pmap = {}
+            if nav:
+                signed = self.token_ok(self._cookie(h, SHARE_COOKIE), ws, domain)
+                for x in self.ports(ws, sh["slug"], signed):
+                    pmap.setdefault(str(x["port"]), x["t"])
+            return self._answer(h, method, s, t, prefix, base, nav, sw, pmap)
         finally:
             with self.lock:
                 ln["active"] -= 1
@@ -11110,7 +11164,7 @@ class ShareHub:
         h.wfile.flush()
         share_pipe(h.rfile, h.connection, s)
 
-    def _answer(self, h, method, s, t, prefix, base, nav, sw):
+    def _answer(self, h, method, s, t, prefix, base, nav, sw, pmap=None):
         import http.client
         h.close_connection = True
         resp = http.client.HTTPResponse(s, method=method)
@@ -11157,7 +11211,7 @@ class ShareHub:
                     data = gzip.decompress(data)
                 except (OSError, EOFError):
                     pass
-            data = share_inject(data, t)
+            data = share_inject(data, t, pmap)
             h.send_response(status)
             for k, v in out:
                 h.send_header(k, v)

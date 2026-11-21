@@ -5,6 +5,8 @@
   var me = document.currentScript, t = me && me.getAttribute('data-t');
   if (!t || window.__simabShim) return;
   window.__simabShim = t;
+  var ports = {};             // "6000" → "project/api": this page's calls to localhost:6000 go there
+  try { ports = JSON.parse(me.getAttribute('data-p') || '{}') || {}; } catch (e) { /* none */ }
   try { sessionStorage.setItem('__simabT', t); } catch (e) { /* storage off */ }
 
   var swc = navigator.serviceWorker;
@@ -26,7 +28,11 @@
       var u = new URL(url, location.href);
       if (u.protocol === 'http:') u.protocol = 'ws:';
       if (u.protocol === 'https:') u.protocol = 'wss:';
-      if (u.host === location.host && u.pathname.indexOf('/__simab/') !== 0) u.pathname = '/__simab/p/' + t + u.pathname;
+      var lp = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname) && ports[u.port || (u.protocol === 'wss:' ? '443' : '80')];
+      if (lp) {
+        u = new URL('/__simab/p/' + lp + u.pathname + u.search, location.href);
+        u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      } else if (u.host === location.host && u.pathname.indexOf('/__simab/') !== 0) u.pathname = '/__simab/p/' + t + u.pathname;
       return protocols === undefined ? new WS(u.href) : new WS(u.href, protocols);
     };
     P.prototype = WS.prototype;
@@ -34,7 +40,7 @@
     window.WebSocket = P;
   }
 
-  var CP = t.replace('/', '.') + '.';
+  var CP = t.split('/')[0] + '.';     // localhost cookies are the same on every port: one jar per project
   var cd = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
   if (cd && cd.get && cd.set) {
     Object.defineProperty(document, 'cookie', {

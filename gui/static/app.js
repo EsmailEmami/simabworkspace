@@ -308,7 +308,7 @@
     var dom = h('input', { class: 'inp mono', placeholder: 'projects.example.com' });
     var proj = h('select', { class: 'inp' }), name = h('input', { class: 'inp mono', placeholder: 'front' });
     var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, placeholder: '3001' });
-    var pub = h('input', { type: 'checkbox' });
+    var pub = h('input', { type: 'checkbox' }), tls = h('input', { type: 'checkbox' });
     function field(label, el) { return h('div', { class: 'field' }, h('label', null, label), el); }
     function render(d) {
       doms.replaceChildren.apply(doms, d.domains.map(function (x) {
@@ -322,7 +322,7 @@
         box.onchange = function () { api('POST', 'account/share/port', Object.assign({}, x, { public: box.checked, on: true })).then(render).catch(fail); };
         return h('div', { class: 'dev' }, h('span', { class: 'grow' },
           url ? h('a', { class: 'mono', href: url, target: '_blank', rel: 'noopener' }, url) : h('span', { class: 'mono' }, '/' + x.slug + '/' + x.name),
-          h('br'), h('small', { class: 'muted' }, x.project + ' · port ' + x.port + ' · ' + (x.public ? 'anyone with the link' : 'only you, signed in'))),
+          h('br'), h('small', { class: 'muted' }, x.project + ' · ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port + ' · ' + (x.public ? 'anyone with the link' : 'only you, signed in'))),
           h('label', { class: 'muted', title: 'Anyone with the link can open it' }, box, ' Public'),
           url ? h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy') : null,
           h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/port', { slug: x.slug, name: x.name, on: false }).then(render).catch(fail); } }, 'Remove'));
@@ -338,10 +338,11 @@
         h('button', { class: 'btn sm', onclick: function () { api('POST', 'account/share/domain', { domain: dom.value, on: true }).then(function (d) { dom.value = ''; render(d); }).catch(fail); } }, 'Add domain')),
       ports,
       h('div', { class: 'row' }, field('Project', proj), field('Name', name), field('Port', port),
+        h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' HTTPS'),
         h('label', { class: 'muted' }, pub, ' Public'),
         h('button', { class: 'btn sm', onclick: function () {
-          api('POST', 'account/share/port', { project: proj.value, name: name.value, port: port.value, public: pub.checked, on: true })
-            .then(function (d) { name.value = ''; port.value = ''; pub.checked = false; render(d); }).catch(fail);
+          api('POST', 'account/share/port', { project: proj.value, name: name.value, port: port.value, public: pub.checked, tls: tls.checked, on: true })
+            .then(function (d) { name.value = ''; port.value = ''; pub.checked = false; tls.checked = false; render(d); }).catch(fail);
         } }, 'Share port')));
   }
   function totpSetup(done) {

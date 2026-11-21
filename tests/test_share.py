@@ -44,7 +44,8 @@ class Helpers(unittest.TestCase):
 
     def test_inject_first_in_head(self):
         out = sw.share_inject(b"<!doctype html><html><HEAD lang=x><script src=/a.js></script></head>", "esi/front")
-        self.assertTrue(out.startswith(b'<!doctype html><html><HEAD lang=x><script src="/__simab/shim.js" data-t="esi/front"></script><script src=/a.js>'))
+        self.assertTrue(out.startswith(b'<!doctype html><html><HEAD lang=x><script src="/__simab/shim.js" data-t="esi/front" data-p="{}"></script><script src=/a.js>'))
+        self.assertIn(b'data-p="{&quot;6000&quot;:&quot;esi/api&quot;}"', sw.share_inject(b"<head>", "esi/front", {"6000": "esi/api"}))
         self.assertTrue(sw.share_inject(b"<!DOCTYPE html><p>x", "a/b").startswith(b"<!DOCTYPE html><script"))
         self.assertTrue(sw.share_inject(b"hello", "a/b").startswith(b"<script"))
 
@@ -206,7 +207,9 @@ class EndToEnd(unittest.TestCase):
     def test_page_through_the_worker_gets_the_shim(self):
         r, d = self.req("GET", "/__simab/p/esi/front/", dict(self.NAV, **{"Accept-Encoding": "gzip"}))
         self.assertEqual(r.status, 200)
-        self.assertIn(b'<head><script src="/__simab/shim.js" data-t="esi/front"></script><title>', d)
+        self.assertIn(b'<head><script src="/__simab/shim.js" data-t="esi/front" data-p="', d)
+        self.assertIn(b"&quot;:&quot;esi/front&quot;", d)
+        self.assertNotIn(b"esi/api", d, "private ports are not listed for a browser that is not signed in")
         self.assertIsNone(r.getheader("Content-Security-Policy"))
         self.assertEqual(int(r.getheader("Content-Length")), len(d))
         _, path, hd = DevServer.seen[-1]
@@ -220,8 +223,8 @@ class EndToEnd(unittest.TestCase):
         r, d = self.req("GET", "/__simab/p/esi/front/assets/a.js", self.SW)
         self.assertEqual((r.status, d), (200, b"console.log(1)"))
         r, _ = self.req("GET", "/__simab/p/esi/front/set", self.SW)
-        self.assertEqual(r.getheader("Set-Cookie"), "esi.front.sid=1; HttpOnly; Path=/")
-        r, d = self.req("GET", "/__simab/p/esi/front/echo?q=1", dict(self.SW, Cookie="esi.front.sid=1; mmd.front.sid=2; __simab_share=zz",
+        self.assertEqual(r.getheader("Set-Cookie"), "esi.sid=1; HttpOnly; Path=/")
+        r, d = self.req("GET", "/__simab/p/esi/front/echo?q=1", dict(self.SW, Cookie="esi.sid=1; mmd.sid=2; __simab_share=zz",
                                                                     Origin=f"http://{DOM}", Referer=f"http://{DOM}/products"))
         hd = json.loads(d)["headers"]
         self.assertEqual(json.loads(d)["path"], "/echo?q=1")
@@ -235,6 +238,37 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(d, b"PUT:x")
         r, d = self.req("GET", "/__simab/p/esi/front/chunk", self.SW)
         self.assertEqual(d, b"abcd")
+
+    def test_https_port_and_calls_from_the_panel(self):
+        certs = Path(self.tmp.name, "certs")
+        certs.mkdir()
+        cert, key = sw.self_signed_cert(certs, "localhost")
+        import ssl
+        tls = ThreadingHTTPServer(("127.0.0.1", 0), DevServer)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
+        threading.Thread(target=tls.serve_forever, daemon=True).start()
+        self.addCleanup(tls.server_close)
+        self.addCleanup(tls.shutdown)
+        p = tls.server_address[1]
+        self.store.db.put("pc", dict(self.pc.pc.cfg(), always={"esi": [f"share port {p} on the internet", f"share port {self.devport} on the internet"]}))
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "secure", "port": p, "tls": True, "public": True, "on": True}, MAIN)
+        r, d = self.req("GET", "/__simab/p/esi/secure/echo", dict(self.SW, **{"X-Simab-From": "esi/front", "Origin": f"http://{DOM}"}))
+        self.assertEqual(r.status, 200, d)
+        hd = json.loads(d)["headers"]
+        self.assertEqual(hd["Origin"], f"http://localhost:{self.devport}", "as if the panel on the computer called it")
+        self.assertEqual(hd["Host"], f"localhost:{p}")
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "front", "port": p, "tls": False, "public": True, "on": True}, MAIN)
+        r, d = self.req("GET", "/__simab/p/esi/front/echo", self.SW)
+        self.assertEqual(r.status, 502, "plain HTTP to an HTTPS port")
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "secure", "port": self.devport, "tls": True, "public": True, "on": True}, MAIN)
+        r, d = self.req("GET", "/__simab/p/esi/secure/echo", self.SW)
+        self.assertEqual((r.status, d), (502, b"this port does not speak HTTPS \xe2\x80\x94 turn HTTPS off for it"))
+
+    def test_ports_list(self):
+        r, d = self.req("GET", "/__simab/ports?t=esi%2Ffront")
+        self.assertEqual(sorted(x["t"] for x in json.loads(d)), ["esi/front", "esi/off", "esi/ws"], "private ones only when signed in")
 
     def test_redirects(self):
         r, _ = self.req("GET", "/__simab/p/esi/front/go", self.SW)
@@ -385,7 +419,7 @@ class Settings(unittest.TestCase):
     def test_ports(self):
         self.hub.api("a", "POST", "/domain", {"domain": DOM, "on": True}, MAIN)
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "name": "Front", "port": "3001", "on": True}, MAIN)
-        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False,
+        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False,
                                          "urls": [f"https://{DOM}/my-shop/front"]}])
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "slug": "shop", "name": "front", "port": 3001, "public": True,
                                                  "old": {"slug": "my-shop", "name": "front"}, "on": True}, MAIN)

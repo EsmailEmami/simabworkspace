@@ -4300,6 +4300,55 @@
       'Memory ' + gb(d.memUsed) + ' of ' + gb(d.memTotal) + '\nDisk ' + gb(d.diskUsed) + ' of ' + gb(d.diskTotal) + ' (' + gb(d.diskFree) + ' free)\nclick for details';
     el.replaceChildren(statMeter('cpu', d.cpu), statMeter('ram', mem), statMeter('disk', disk));
   }
+  // Health: everything at a glance, each row opens its details
+  function healthDialog() {
+    var box = h('div', { class: 'health' });
+    var md = openModal({ title: 'Health', body: box, onclose: function () { clearInterval(t); },
+      foot: [h('span', { class: 'left muted' }, 'Updates every 5 seconds'), h('button', { class: 'btn primary', onclick: function () { md.close(); } }, 'Done')] });
+    function row(level, title, detail, open) {
+      return h('div', { class: 'hl-row ' + level + (open ? ' link' : ''), onclick: open ? function () { md.close(); open(); } : null },
+        h('i', { class: 'hl-dot' }), h('div', { class: 'hl-main' }, h('b', null, title), h('small', null, detail)), open ? h('span', { class: 'muted' }, '›') : null);
+    }
+    function lv(v, warn, err) { return v >= err ? 'err' : v >= warn ? 'warn' : 'ok'; }
+    function render() {
+      var rows = [], d = S.stats;
+      if (d && d.memTotal) {
+        var mem = Math.round(100 * d.memUsed / d.memTotal), disk = Math.round(100 * d.diskUsed / d.diskTotal), cpu = Math.round(d.cpu || 0);
+        var worst = [lv(cpu, 60, 85), lv(mem, 75, 90), lv(disk, 80, 92)].sort(function (a, b) { return ['ok', 'warn', 'err'].indexOf(b) - ['ok', 'warn', 'err'].indexOf(a); })[0];
+        rows.push(row(worst, 'Server', 'CPU ' + cpu + '% · memory ' + mem + '% · disk ' + disk + '% · load ' + (d.load || []).map(function (x) { return (+x).toFixed(1); }).join(' '), statsDialog));
+      } else rows.push(row('off', 'Server', 'no numbers yet', null));
+      var C = window.SWComputers, info = C && C._info ? C._info() : null;
+      if (info && info.devices) {
+        var on = info.devices.filter(function (x) { return x.online; });
+        var stuck = S.projects.filter(function (p) { var st = C.buildState(p.name); return st && st.on !== 'server' && !st.ok; });
+        rows.push(row(stuck.length ? 'err' : info.devices.length && !on.length ? 'warn' : 'ok', 'Computers',
+          (info.devices.length ? on.length + ' of ' + info.devices.length + ' connected' : 'none') + (stuck.length ? ' · cannot work now: ' + stuck.map(function (p) { return p.name; }).join(', ') : ''),
+          function () { C.open(); }));
+      }
+      var net = document.getElementById('pc-net');
+      if (net && !net.classList.contains('hidden')) {
+        var q = (/q(\d)/.exec(net.className) || [])[1] | 0;
+        rows.push(row(q >= 4 ? 'ok' : q >= 2 ? 'warn' : 'err', 'This computer ↔ server', (net.title || '').split('\n').join(' · '), null));
+      }
+      var sync = S.projects.filter(function (p) { return p.sync; });
+      var bad = sync.filter(function (p) { return p.sync.conflicts || p.sync.state !== 'ok'; });
+      if (sync.length) rows.push(row(bad.some(function (p) { return p.sync.conflicts; }) ? 'err' : bad.length ? 'warn' : 'ok', 'Sync',
+        bad.length ? bad.map(function (p) { return p.name + ': ' + (p.sync.conflicts ? p.sync.conflicts + ' conflict' + (p.sync.conflicts > 1 ? 's' : '') : p.sync.label); }).join(' · ')
+          : sync.length + ' project' + (sync.length > 1 ? 's' : '') + ' in sync', bad.length ? function () { syncDetails(bad[0]); } : null));
+      var dk = S.projects.filter(function (p) { return S.docker[p.name] && S.docker[p.name].bad; });
+      rows.push(row(dk.length ? 'err' : 'ok', 'Containers', dk.length ? dk.map(function (p) { return p.name + ': ' + S.docker[p.name].bad + ' with problems'; }).join(' · ') : 'no problems',
+        dk.length ? function () { dockerDialog(dk[0]); } : null));
+      var u = S.usage || {}, w = liveWindows(u), top = Object.keys(w).map(function (k) { return pct(w[k]); }).sort(function (a, b) { return b - a; })[0] || 0;
+      rows.push(row(lv(top, 70, 90), 'Claude', runningTotal() + ' running · limit ' + top + '% used · today ≈ ' + money(u.today || 0) + ' (API price)', usageDialog));
+      box.replaceChildren.apply(box, rows);
+    }
+    var t = setInterval(function () { refreshStats().then(render); }, 5000);
+    render();
+    refreshStats().then(render);
+    refreshUsage();
+    return md;
+  }
+
   function refreshStats() {
     if (!serverReady() || document.hidden) return Promise.resolve();
     return api('GET', 'server-stats').then(function (d) { S.stats = d; renderStats(); }).catch(function () {});
@@ -4859,7 +4908,7 @@
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
     gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
-    settingsDialog: function () { settingsDialog(); },
+    settingsDialog: function () { settingsDialog(); }, healthDialog: function () { return healthDialog(); },
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
   };
 
@@ -4885,6 +4934,7 @@
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
+        { label: 'Health — everything at a glance…', action: healthDialog },
         { label: 'Saved prompts…', action: function () { if (window.SWPrompts) window.SWPrompts.dialog(); } },
         { label: 'Setup check…', action: function () { if (window.SWComputers) window.SWComputers.setupCheck(); } },
         { label: 'Computers — builds on your own computers…', action: function () { if (window.SWComputers) window.SWComputers.open(); } },

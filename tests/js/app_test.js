@@ -1852,6 +1852,21 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  async 'Health: everything at a glance, a row opens its details'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    SW.healthDialog(); await settle();
+    const md = q('.modal').pop();
+    const rows = q('.hl-row', md);
+    const byTitle = (t) => rows.find((r) => r.querySelector('b').textContent === t);
+    assert.ok(byTitle('Server').classList.contains('err'), 'CPU 92%');
+    assert.match(byTitle('Server').textContent, /CPU 92% · memory 78% · disk 24%/);
+    assert.ok(byTitle('Containers'), 'containers row');
+    assert.match(byTitle('Claude').textContent, /running/);
+    byTitle('Server').click(); await settle();
+    assert.ok(q('.modal').pop() !== md, 'server details opened');
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
   async 'Setup check: what is missing, with a fix button each'() {
     document.body.querySelector('#modal-root').replaceChildren();
     await global.SWComputers.setupCheck(); await settle();

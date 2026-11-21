@@ -2,8 +2,8 @@
    Network first (a new version is used at once); the saved copy only when offline.
    Never touches /api or /ws. */
 'use strict';
-var CACHE = 'simab-shell-8';
-var SHELL = ['/', '/app.css', '/voice.js', '/sounds.js', '/app.js', '/chat.js', '/files.js', '/tasks.js', '/computers.js', '/icon.svg', '/manifest.webmanifest', '/vendor/xterm.css', '/vendor/xterm.js',
+var CACHE = 'simab-shell-9';
+var SHELL = ['/', '/app.css', '/voice.js', '/sounds.js', '/app.js', '/chat.js', '/files.js', '/tasks.js', '/computers.js', '/prompts.js', '/icon.svg', '/manifest.webmanifest', '/vendor/xterm.css', '/vendor/xterm.js',
   '/vendor/addon-fit.js', '/vendor/addon-web-links.js', '/vendor/addon-search.js', '/vendor/addon-unicode11.js', '/vendor/addon-webgl.js'];
 
 self.addEventListener('install', function (e) {

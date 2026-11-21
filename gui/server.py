@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.55.0"
+VERSION = "1.56.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6107,6 +6107,44 @@ print(json.dumps({"claude": c, "login": login, "sshfs": fs, "fuse": os.path.exis
 '''
 
 
+# Saved prompts: kept on the SERVER (~/.config/simabworkspace/prompts.json) so the app and the web
+# version share them. get → {rev, prompts}; put (stdin {rev, prompts}) → saved, or conflict + current.
+PROMPTS_PY = r'''
+import os, sys, json
+d = os.path.expanduser("~/.config/simabworkspace")
+f = os.path.join(d, "prompts.json")
+try:
+    cur = json.load(open(f))
+except (OSError, ValueError):
+    cur = {"rev": 0, "prompts": []}
+if sys.argv[1] == "put":
+    new = json.loads(sys.stdin.read() or "{}")
+    if int(new.get("rev", -1)) != int(cur.get("rev", 0)):
+        print(json.dumps(dict(cur, conflict=True)))
+        sys.exit()
+    os.makedirs(d, exist_ok=True)
+    cur = {"rev": int(cur.get("rev", 0)) + 1, "prompts": new.get("prompts") or []}
+    with open(f + ".tmp", "w") as fh:
+        json.dump(cur, fh, ensure_ascii=False)
+    os.replace(f + ".tmp", f)
+print(json.dumps(cur, ensure_ascii=False))
+'''
+
+
+def clean_prompts(v) -> list:
+    if not isinstance(v, list) or len(v) > 200:
+        raise ApiError(400, "invalid prompts")
+    out = []
+    for x in v:
+        if not isinstance(x, dict):
+            raise ApiError(400, "invalid prompt")
+        out.append({"id": x.get("id") if isinstance(x.get("id"), str) and re.fullmatch(r"[0-9a-f]{8}", x.get("id") or "") else secrets.token_hex(4),
+                    "name": clean_str(x.get("name"), 60, "name", required=True),
+                    "text": clean_str(x.get("text"), 20000, "text", required=True),
+                    "project": clean_str(x.get("project"), 64, "project")})
+    return out
+
+
 def pc_os() -> str:
     if IS_WIN:
         return "windows"
@@ -10438,6 +10476,15 @@ class Handler(BaseHTTPRequestHandler):
             return app.client_error(self._body())
         if route == ("GET", "ping"):
             return {"ok": True, "version": VERSION, "pid": os.getpid()}
+        if route == ("GET", "prompts"):
+            return remote_python(app.conf, PROMPTS_PY, ["get"])
+        if route == ("POST", "prompts"):
+            b = self._body()
+            r = remote_python(app.conf, PROMPTS_PY, ["put"], stdin=json.dumps(
+                {"rev": int(b.get("rev") or 0), "prompts": clean_prompts(b.get("prompts"))}, ensure_ascii=False).encode())
+            if isinstance(r, dict) and r.get("conflict"):
+                raise ApiError(409, "changed on another device — reopen to see the new list")
+            return r
         if route == ("GET", "setup-check"):
             return app.setup_check()
         if route == ("POST", "setup-check") and parts[1:] == ["sshfs"]:

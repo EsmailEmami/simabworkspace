@@ -4861,6 +4861,7 @@
         { label: 'History…', action: function () { historyDialog(); } },
         { label: 'Check for updates', action: function () { checkUpdate(true); } },
         { label: 'Settings…', action: settingsDialog },
+        { label: 'Saved prompts…', action: function () { if (window.SWPrompts) window.SWPrompts.dialog(); } },
         { label: 'Setup check…', action: function () { if (window.SWComputers) window.SWComputers.setupCheck(); } },
         { label: 'Computers — builds on your own computers…', action: function () { if (window.SWComputers) window.SWComputers.open(); } },
         { label: 'Grid: all tabs side by side', action: gridAll },

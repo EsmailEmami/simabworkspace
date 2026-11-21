@@ -1712,10 +1712,12 @@
     var v = this.ta.value, pos = this.ta.selectionStart;
     var items = null, pt;
     var sm = v.match(/^\/([\w:-]*)$/);
-    if (sm && this.commands.length) {
+    var saved = sm && window.SWPrompts ? SWPrompts.match(sm[1], this.info.spec.project || '') : [];
+    if (sm && (this.commands.length || saved.length || window.SWPrompts)) {
       var q = sm[1].toLowerCase();
-      items = this.commands.filter(function (c) { return c.name.toLowerCase().indexOf(q) === 0; }).slice(0, 12)
-        .map(function (c) { return { kind: 'cmd', c: c }; });
+      items = saved.map(function (p) { return { kind: 'prompt', p: p }; }).concat(this.commands.filter(function (c) { return c.name.toLowerCase().indexOf(q) === 0; }).slice(0, 12)
+        .map(function (c) { return { kind: 'cmd', c: c }; }));
+      if (window.SWPrompts && !q) items.push({ kind: 'manage' });
     } else if ((pt = this.pathToken(v, pos))) {
       // a path on the server: ~/… or /… — the SSH user's files, like @ for the project
       this.mentionStart = pos - pt.length;
@@ -1748,6 +1750,11 @@
       if (it.kind === 'path') {
         return h('div', { class: 'sl', title: it.path, onmousedown: function (e) { e.preventDefault(); self.pickSlash(i); } },
           h('span', { class: 'fi' }, /\/$/.test(it.path) ? '📁' : '📄'), h('span', { class: 'fp', dir: 'ltr' }, it.name));
+      }
+      if (it.kind === 'prompt' || it.kind === 'manage') {
+        return h('div', { class: 'sl' + (it.kind === 'manage' ? ' muted' : ''), onmousedown: function (e) { e.preventDefault(); self.pickSlash(i); } },
+          it.kind === 'manage' ? h('span', null, '★ saved prompts…')
+            : [h('span', { class: 'fi' }, '★'), h('b', { dir: 'auto' }, '/' + it.p.name), h('span', { class: 'sd', dir: 'auto' }, it.p.text.slice(0, 80))]);
       }
       var row = it.kind === 'cmd'
         ? [h('b', { dir: 'ltr' }, '/' + it.c.name), it.c.argumentHint ? h('span', { class: 'muted', dir: 'ltr' }, ' ' + it.c.argumentHint) : null,
@@ -1822,7 +1829,15 @@
   P.pickSlash = function (i) {
     var it = this.slashItems[i];
     if (!it) return;
-    if (it.kind === 'cmd') {
+    if (it.kind === 'prompt') {                 // a saved prompt: its text into the message box
+      this.ta.value = it.p.text;
+      this.slashEl.classList.add('hidden');
+    } else if (it.kind === 'manage') {
+      this.ta.value = '';
+      this.slashEl.classList.add('hidden');
+      SWPrompts.dialog(this.info.spec.project || '');
+      return;
+    } else if (it.kind === 'cmd') {
       this.ta.value = '/' + it.c.name + ' ';
       this.slashEl.classList.add('hidden');
     } else if (it.kind === 'file' || it.kind === 'path') {

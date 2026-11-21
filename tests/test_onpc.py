@@ -814,3 +814,27 @@ class SetupCheck(unittest.TestCase):
                 items = {i["id"]: i for i in app.setup_check()["items"]}
             self.assertEqual((items["server"]["ok"], items["server"]["detail"]), (False, "Permission denied"))
             self.assertFalse(items["claude"]["ok"], "unknown without the server")
+
+
+class SavedPrompts(unittest.TestCase):
+    def test_server_file_and_conflict(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, HOME=home)
+
+            def run(op, body=None):
+                r = subprocess.run([sys.executable, "-c", sw.PROMPTS_PY, op], input=json.dumps(body or {}).encode(), env=env,
+                                   capture_output=True, timeout=20)
+                return json.loads(r.stdout)
+            self.assertEqual(run("get"), {"rev": 0, "prompts": []})
+            p = [{"id": "abcd1234", "name": "تست", "text": "بنویس", "project": ""}]
+            self.assertEqual(run("put", {"rev": 0, "prompts": p}), {"rev": 1, "prompts": p})
+            self.assertTrue(run("put", {"rev": 0, "prompts": []})["conflict"], "changed on another device")
+            self.assertEqual(run("get")["prompts"], p)
+
+    def test_clean(self):
+        out = sw.clean_prompts([{"name": "a", "text": "b"}, {"id": "abcd1234", "name": "c", "text": "d", "project": "shop"}])
+        self.assertRegex(out[0]["id"], r"^[0-9a-f]{8}$")
+        self.assertEqual(out[1], {"id": "abcd1234", "name": "c", "text": "d", "project": "shop"})
+        for bad in ("x", [{"name": "", "text": "b"}], [{"name": "a"}], [{}] * 201):
+            with self.assertRaises(sw.ApiError):
+                sw.clean_prompts(bad)

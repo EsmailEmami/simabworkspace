@@ -164,6 +164,10 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
   else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
+  else if (url === '/api/prompts' && method === 'GET') res = fakePc.prompts || { rev: 3, prompts: [
+    { id: 'aaaaaaaa', name: 'tests', text: 'Write tests and run them.', project: '' },
+    { id: 'bbbbbbbb', name: 'deploy', text: 'Deploy shop.', project: 'shop' }] };
+  else if (url === '/api/prompts' && method === 'POST') { fakePc.promptsSaved = body; res = { rev: body.rev + 1, prompts: body.prompts }; }
   else if (url === '/api/setup-check' && method === 'GET') res = { items: [
     { id: 'server', ok: true, title: 'Server connection', detail: 'esi@h port 225', fix: 'connection' },
     { id: 'login', ok: false, title: 'Claude signed in on the server', detail: 'not signed in yet', fix: 'login' },
@@ -225,6 +229,7 @@ global.SW && require(path.join(ROOT, 'gui/static/files.js'));
 global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
 localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
 global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
+global.SW && require(path.join(ROOT, 'gui/static/prompts.js'));
 
 const tests = {
   'local paths: ~ shown as the real folder (Windows and Linux)'() {
@@ -1792,6 +1797,36 @@ const tests = {
     assert.deepStrictEqual(fakePc.remoteAnswers.pop(), { dev: 'a1b2c3d4e5f6', id: 'abcdefabcdef', answer: 'once' });
     SW.closeTab(chat, true); await settle();
     S.web = false;
+  },
+
+  async 'Saved prompts: "/" in a chat lists them (this project + all), the text goes in; dialog saves'() {
+    await global.SWPrompts.load();
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const tab = global.SW.S.active;
+    tab.ta.value = '/'; tab.ta.selectionStart = tab.ta.selectionEnd = 1;
+    tab.slashPopup();
+    const rows = q('.sl', tab.slashEl).map((e) => e.textContent);
+    assert.ok(rows[0].indexOf('/tests') >= 0, 'saved prompts first');
+    assert.ok(!rows.some((r) => /deploy/.test(r)), 'not the one of another project');
+    assert.ok(rows.some((r) => /saved prompts…/.test(r)), 'manage entry');
+    tab.ta.value = '/te'; tab.ta.selectionStart = tab.ta.selectionEnd = 3;
+    tab.slashPopup();
+    tab.pickSlash(0);
+    assert.strictEqual(tab.ta.value, 'Write tests and run them.');
+    SW.closeTab(tab, true); await settle();
+    document.body.querySelector('#modal-root').replaceChildren();
+    global.SWPrompts.dialog(); await settle();
+    const md = q('.modal').pop();
+    assert.strictEqual(q('.pr-row', md).length, 2);
+    q('button', md).find((b) => b.textContent === '+ New prompt').click(); await settle();
+    const rowsEl = q('.pr-row', md);
+    const last = rowsEl[rowsEl.length - 1];
+    const name = q('input', last)[0]; name.value = 'lint'; name.dispatch('input');
+    const text = q('textarea', last)[0]; text.value = 'Run the linter.'; text.dispatch('input');
+    q('button', md).find((b) => b.textContent === 'Save').click(); await settle();
+    assert.strictEqual(fakePc.promptsSaved.rev, 3);
+    assert.deepStrictEqual(fakePc.promptsSaved.prompts.map((p) => p.name), ['tests', 'deploy', 'lint']);
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'Setup check: what is missing, with a fix button each'() {

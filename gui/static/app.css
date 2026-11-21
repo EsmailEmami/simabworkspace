@@ -1228,3 +1228,7 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-perm .pc-left { font-size: 11px; color: var(--faint); margin-left: auto; align-self: center; }
 .seg.pc-modes { grid-template-columns: repeat(4, 1fr); }
 @media (max-width: 640px) { .seg.pc-modes { grid-template-columns: 1fr 1fr; } }
+.pc-mode-l { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--faint); margin-left: 6px; }
+.pc-mode-l .mini-sel { font-size: 11px; }
+.seg.seg4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 640px) { .seg.seg4 { grid-template-columns: 1fr 1fr; } }

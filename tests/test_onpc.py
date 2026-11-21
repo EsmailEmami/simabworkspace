@@ -1,5 +1,6 @@
 """Builds on the user's own computer: onpc on the server → ssh -R socket → the app → a shell here."""
 import json
+import shutil
 import os
 import socket
 import stat
@@ -375,3 +376,172 @@ class Link(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SSHFS = shutil.which("sshfs") or os.path.expanduser("~/.local/lib/simabworkspace/sshfs/usr/bin/sshfs")
+
+
+@unittest.skipUnless(os.path.isfile(SSHFS) and os.path.exists("/dev/fuse"), "sshfs / FUSE not here")
+class LocalOnly(EndToEnd):
+    """A Local only project: the server mounts the computer's folder (real sshfs through the link)."""
+    test_runs_in_the_synced_copy_with_output_and_exit_code = test_ask_then_always = None      # EndToEnd's own
+    test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
+    test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = None
+
+    def setUp(self):
+        super().setUp()
+        self.pp.stop()
+        self.laptop = os.path.join(self.tmp.name, "laptop", "lo")             # the only copy of the files
+        os.makedirs(os.path.join(self.laptop, "src"))
+        Path(self.laptop, "src", "a.txt").write_text("hello\n")
+        Path(self.tmp.name, "secret.txt").write_text("outside\n")
+        os.symlink(os.path.join(self.tmp.name, "secret.txt"), os.path.join(self.laptop, "escape"))
+        self.mnt = os.path.join(self.home, ".simab-mnt", "lo")
+        c = self.hub.cfg()
+        proj = {"name": "lo", "remote": "~/.simab-mnt/lo", "local": self.laptop, "localExists": True, "source": "manual",
+                "localOnly": c["id"]}
+        self.pp = mock.patch.object(self.app, "projects", return_value=[proj])
+        self.pp.start()
+        bindir = os.path.join(self.home, ".local", "bin")
+        os.makedirs(bindir)
+        shutil.copy(self.onpc_file, os.path.join(bindir, "onpc"))
+        os.chmod(os.path.join(bindir, "onpc"), 0o755)
+        lib = os.path.join(self.home, ".local/lib/simabworkspace/sshfs/usr/bin")
+        os.makedirs(lib)
+        os.symlink(SSHFS, os.path.join(lib, "sshfs"))
+        self.env = dict(os.environ, HOME=self.home, PATH="/usr/bin:/bin")      # no system sshfs: our own copy
+        self.server_py(sw.PC_ADMIN_PY, ["builds", "~/.simab-mnt/lo", "local"])
+        self.dev = c["id"]
+
+    def tearDown(self):
+        subprocess.run(["fusermount3", "-u", "-z", self.mnt], capture_output=True)
+        super().tearDown()
+
+    def server_py(self, code, args, stdin=b"{}"):
+        r = subprocess.run([sys.executable, "-c", code] + args, input=stdin, capture_output=True, env=self.env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout or b"null")
+
+    def mount(self):
+        return self.server_py(sw.PC_MOUNT_PY, ["mount"], json.dumps({"dev": self.dev, "mounts": [{"name": "lo", "path": "~/.simab-mnt/lo"}]}).encode())
+
+    def test_mounted_files_commands_hook_and_unmount(self):
+        self.assertEqual(self.mount(), {"lo": "ok"})
+        self.assertTrue(os.path.ismount(self.mnt))
+        self.assertEqual(self.mount(), {"lo": "ok"}, "already mounted: left alone")
+        # Claude's own tools on the server = plain files here
+        self.assertEqual(Path(self.mnt, "src", "a.txt").read_text(), "hello\n")
+        Path(self.mnt, "src", "b.txt").write_text("from claude\n")
+        self.assertEqual(Path(self.laptop, "src", "b.txt").read_text(), "from claude\n", "written on the computer")
+        Path(self.mnt, "src", "c.tmp").write_text("new")
+        os.replace(os.path.join(self.mnt, "src", "c.tmp"), os.path.join(self.mnt, "src", "a.txt"))   # how editors save
+        self.assertEqual(Path(self.laptop, "src", "a.txt").read_text(), "new")
+        os.makedirs(os.path.join(self.mnt, "src", "d", "e"))
+        self.assertTrue(os.path.isdir(os.path.join(self.laptop, "src", "d", "e")))
+        self.assertEqual(os.stat(os.path.join(self.mnt, "src", "a.txt")).st_uid, os.getuid())
+        with self.assertRaises(OSError):
+            Path(self.mnt, "escape").read_text()                  # a link out of the project folder
+        # the chat: hint + the Bash hook; every command runs on the computer, paths translated both ways
+        hint = subprocess.run([sys.executable, os.path.join(self.home, ".local/bin/onpc"), "--hint"], cwd=self.mnt,
+                              env=self.env, capture_output=True, timeout=10).stdout.decode()
+        self.assertEqual(hint, sw.PC_LOCAL_HINT)
+        r = subprocess.run([sys.executable, os.path.join(self.home, ".local/bin/onpc"), "--local"], cwd=self.mnt,
+                           env=self.env, capture_output=True, timeout=10)
+        hookcmd = json.loads(r.stdout)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        out = subprocess.run(hookcmd, shell=True, input=json.dumps({"tool_input": {"command": "ls src", "timeout": 5}}).encode(),
+                             env=self.env, capture_output=True, timeout=10).stdout
+        new = json.loads(out)["hookSpecificOutput"]["updatedInput"]
+        self.assertEqual(new["timeout"], 5)
+        self.assertIn("onpc", new["command"])
+        res = subprocess.run(new["command"] + "; cat " + os.path.join(self.mnt, "src", "b.txt") + "; pwd", shell=True,
+                             cwd=self.mnt, env=self.env, capture_output=True, timeout=30)
+        res2 = subprocess.run([sys.executable, os.path.join(self.home, ".local/bin/onpc"),
+                               "cat " + os.path.join(self.mnt, "src", "b.txt") + "; pwd; echo $0 >/dev/null"],
+                              cwd=os.path.join(self.mnt, "src"), env=self.env, capture_output=True, timeout=30)
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        self.assertEqual(res2.stdout.decode(), "from claude\n" + os.path.realpath(os.path.join(self.mnt, "src")) + "\n",
+                         "ran on the computer; its folder shown as the server's")
+        self.assertIn(b"b.txt", res.stdout)
+        self.assertFalse(self.hub.pending()["asks"], "no extra question: Claude's own modes decide")
+        # the hook leaves onpc itself alone
+        out = subprocess.run(hookcmd, shell=True, input=json.dumps({"tool_input": {"command": new["command"]}}).encode(),
+                             env=self.env, capture_output=True, timeout=10).stdout
+        self.assertEqual(out, b"")
+        # unmount: the folder leaves the server, files stay on the computer
+        self.assertEqual(self.server_py(sw.PC_MOUNT_PY, ["umount"], json.dumps({"mounts": [{"name": "lo", "path": "~/.simab-mnt/lo"}]}).encode()), {"lo": "ok"})
+        self.assertFalse(os.path.exists(self.mnt))
+        self.assertTrue(os.path.isfile(os.path.join(self.laptop, "src", "b.txt")))
+
+    def test_chat_refuses_when_not_mounted(self):
+        os.makedirs(self.mnt)
+        script = sw.chat_remote_script(self.mnt, "echo started", [])
+        r = subprocess.run(["sh", "-c", script], env=dict(self.env, SHELL="/bin/sh"), capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 98)
+        self.assertIn(b"lives on your computer", r.stderr)
+        self.assertEqual(r.stdout, b"", "Claude did not start in the empty folder")
+        self.assertEqual(self.mount(), {"lo": "ok"})
+        r = subprocess.run(["sh", "-c", sw.chat_remote_script(self.mnt, "printf '[%s]'", [])], env=dict(self.env, SHELL="/bin/sh"),
+                           capture_output=True, timeout=20)
+        self.assertIn(b"[--settings]", r.stdout, "mounted: Claude starts with the Bash hook")
+        self.assertIn(b"[--append-system-prompt]", r.stdout)
+
+    def test_not_empty_folder_is_not_covered(self):
+        os.makedirs(self.mnt)
+        Path(self.mnt, "x").write_text("server file")
+        self.assertIn("not empty", self.mount()["lo"])
+
+
+class LocalOnlyApp(unittest.TestCase):
+    """Adding / removing a Local only project, and run commands of projects built on the computer."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.envp = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp.name})
+        self.envp.start()
+        self.store = sw.Store(Path(self.tmp.name) / "gui.json")
+        self.app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        self.folder = os.path.join(self.tmp.name, "mine")
+        os.makedirs(self.folder)
+        self.mut = mock.patch.object(sw, "mutagen_sessions", return_value=[])
+        self.mut.start()
+
+    def tearDown(self):
+        self.mut.stop()
+        self.envp.stop()
+        self.tmp.cleanup()
+
+    def test_add_and_remove(self):
+        with self.assertRaises(sw.ApiError) as e:
+            self.app.pc_add_local({"local": self.folder})
+        self.assertIn("Connect this computer", e.exception.message)
+        self.store.db.put("pc", dict(self.app.pc.cfg(), on=True))
+        calls = []
+        with mock.patch.object(sw, "remote_python", side_effect=lambda conf, code, args, **kw: calls.append(args) or {}), \
+                mock.patch.object(self.app.pc, "unmount") as um:
+            r = self.app.pc_add_local({"local": self.folder})
+            self.assertEqual(r["project"]["remote"], "~/.simab-mnt/mine")
+            self.assertEqual(calls[-1], ["builds", "~/.simab-mnt/mine", "local"])
+            p = next(x for x in self.app.projects(max_age=0) if x["name"] == "mine")
+            self.assertEqual(p["localOnly"], self.app.pc.cfg()["id"])
+            self.assertEqual(p["buildsOn"], "local")
+            self.assertEqual(self.app.pc.local_projects()[0]["name"], "mine")
+            with self.assertRaises(sw.ApiError) as e:
+                self.app.pc_add_local({"local": self.folder})
+            self.assertEqual(e.exception.status, 409)
+            with self.assertRaises(sw.ApiError):
+                self.app.pc_add_local({"local": os.path.join(self.tmp.name, "nope")})
+            self.app.pc_forget_local("mine")
+            self.assertEqual(um.call_args[0][0][0]["name"], "mine", "its mount leaves the server")
+            self.assertEqual(calls[-1], ["builds", "~/.simab-mnt/mine", "server"])
+            self.assertNotIn("localOnly", self.store.data["projects"].get("mine") or {})
+        self.assertTrue(os.path.isdir(self.folder), "the files stay on the computer")
+
+    def test_run_commands_follow_where_the_project_builds(self):
+        cmd = {"id": "c1", "name": "api", "cmd": "go run .", "where": "server", "url": "", "cwd": ""}
+        proj = {"name": "p", "remote": "/srv/p", "local": self.folder, "localExists": True, "source": "manual", "endpoint": {}}
+        spec = {"kind": "run", "project": "p", "_cmd": cmd}
+        built = sw.build_spec(dict(spec), sw.ServerConf("esi", "h"), self.store, [dict(proj, buildsOn="server")])
+        self.assertEqual(built["spec"]["where"], "server")
+        for on in ("computers", "local"):
+            built = sw.build_spec(dict(spec), sw.ServerConf("esi", "h"), self.store, [dict(proj, buildsOn=on)])
+            self.assertEqual(built["spec"]["where"], "local", on)

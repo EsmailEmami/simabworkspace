@@ -2076,7 +2076,7 @@
 
   function hasRemote(p) { return !!p.remote && serverReady(); }
   function openFiles(p) { return openSession({ kind: 'files', project: p.name }); }
-  function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) ? 'server' : 'local', project: p.name }); }
+  function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) && !p.localOnly ? 'server' : 'local', project: p.name }); }
   function openCode(p) { openEditor(p, hasRemote(p) ? 'server' : 'local'); }
 
   // In the web version the things that need your own computer stay visible but disabled,
@@ -2109,12 +2109,12 @@
       { label: 'Sessions — running and past…', disabled: !r, k: runningOf(p.name).length ? runningOf(p.name).length + ' running' : '', action: function () { claudeSessionsDialog(p); } },
       { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
       { label: 'Builds run on…', disabled: !r, k: window.SWComputers ? window.SWComputers.menuLabel(p.name) : '', action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
-      { label: 'Claude text terminal (TUI)', disabled: !r, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
+      { label: 'Claude text terminal (TUI)', disabled: !r || !!p.localOnly, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
       { label: 'Changes — review, commit', disabled: !r && !p.localExists, action: function () { openSession({ kind: 'changes', project: p.name }); } },
       { label: 'Tasks', k: taskCount(p.name), action: function () { openTasks(p.name); } },
-      { label: 'Server terminal', disabled: !r, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
+      { label: 'Server terminal', disabled: !r || !!p.localOnly, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
       { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
@@ -3197,7 +3197,9 @@
       h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name)),
       h('button', { class: 'act more', title: 'Terminal, VS Code, Docker, ports, history…', onclick: function (e) { e.stopPropagation(); projectMenu(p, e.currentTarget); } }, '⋯')));
-    p.commands.forEach(function (c) {
+    var onPc = (p.buildsOn === 'computers' || p.buildsOn === 'local') && (p.localExists || S.web);   // builds on the user's computer
+    p.commands.forEach(function (c0) {
+      var c = onPc ? Object.assign({}, c0, { where: 'local' }) : c0;      // its run commands run there too
       if (S.web && c.where !== 'server') {
         body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — ' + APP_ONLY },
           h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'loc')));
@@ -3439,6 +3441,15 @@
           h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'More at once = faster with many files. Then the sync takes over.'))];
     };
     var forms = {
+      localonly: function () {
+        var on = S.pc && S.pc.on;
+        return [h('div', { class: 'pc-note', style: 'margin:0 0 10px' },
+          'Nothing goes to the server: it sees this folder live (a mount) while this computer is connected. Claude uses all its own tools; '
+          + 'every command it runs (build, npm, git, tests…) runs here, on this computer.'),
+          on ? null : h('div', { class: 'pc-note err', style: 'margin:0 0 10px' }, 'Connect this computer first: ⚙ → Computers → Connect this computer.'),
+          localFolderField('Folder on this computer', local),
+          h('div', { class: 'field' }, h('label', null, 'Name'), name)];
+      },
       download: function () {
         loadFolders();
         var deeper = h('button', { class: 'btn', type: 'button', style: 'flex:none', title: 'Any folder on the server, not only the ones in your home', onclick: function () {
@@ -3484,8 +3495,9 @@
     var area = h('div');
     var go = h('button', { class: 'btn primary', onclick: submit });
     var modes = S.web ? [['list', 'Server folder', 'Work on it on the server'], ['download', 'Sync to my computer', 'installed app only', true], ['upload', 'Upload from my computer', 'installed app only', true]]
-      : [['download', 'From the server', 'Download, then keep in sync'], ['upload', 'From this machine', 'Upload, then keep in sync'], ['list', 'Server only', 'No sync, work on the server']];
-    var seg = h('div', { class: 'seg' });
+      : [['download', 'From the server', 'Download, then keep in sync'], ['upload', 'From this machine', 'Upload, then keep in sync'], ['list', 'Server only', 'No sync, work on the server'],
+        ['localonly', 'Local only', 'Files stay on this computer; Claude on the server works on them']];
+    var seg = h('div', { class: 'seg' + (modes.length > 3 ? ' seg4' : '') });
     function show(m) {
       mode = m;
       errBox.classList.add('hidden');
@@ -3493,11 +3505,26 @@
         return h('button', { class: 'segb' + (x[0] === m ? ' on' : ''), disabled: !!x[3], title: x[3] ? APP_ONLY : null, onclick: function () { show(x[0]); } }, h('b', null, x[1]), h('small', null, x[2]));
       }));
       area.replaceChildren.apply(area, forms[m]().filter(Boolean));
-      go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add' }[m];
+      go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add', localonly: 'Add' }[m];
     }
-    function fail2(e) { go.disabled = false; go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add' }[mode]; errBox.textContent = e.message; errBox.classList.remove('hidden'); }
+    function fail2(e) { go.disabled = false; go.textContent = { download: 'Download & sync', upload: 'Upload & sync', list: 'Add', localonly: 'Add' }[mode]; errBox.textContent = e.message; errBox.classList.remove('hidden'); }
     function submit() {
       errBox.classList.add('hidden');
+      if (mode === 'localonly') {
+        if (!local.value.trim()) { local.focus(); errBox.textContent = 'Which folder on this computer?'; errBox.classList.remove('hidden'); return; }
+        go.disabled = true;
+        go.textContent = 'Adding…';
+        api('POST', 'pc/local', { name: name.value.trim(), local: local.value.trim() }).then(function (d) {
+          md.close();
+          var n = d.project.name;
+          S.open.add(n); localStorage.setItem('sw-open', JSON.stringify(Array.from(S.open)));
+          if (d.mount && d.mount !== 'ok') toast(n + ': the server could not open it yet — ' + d.mount, 'warn', { timeout: 12000 });
+          else toast(n + ': added — Claude works on it while this computer is connected', 'ok');
+          refreshProjects();
+          if (window.SWComputers) window.SWComputers.refresh();
+        }).catch(fail2);
+        return;
+      }
       if (mode === 'list') {
         var rp = picker ? picker.value() : remote.value.trim();
         if (!rp) { errBox.textContent = 'Pick a folder on the server.'; errBox.classList.remove('hidden'); return; }

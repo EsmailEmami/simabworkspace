@@ -161,6 +161,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/devices') res = fakePc.devs;
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
+  else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
   else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
   else if (url.startsWith('/api/pc/run/')) res = { id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', out: 'building…', start: 1, code: null };
   else if (url === '/api/tabs' || url === '/api/tabs?vis=1') res = fakeTabs;
@@ -633,7 +634,7 @@ const tests = {
     q('.add-link').find((b) => b.textContent === '+ add project').click();
     await settle();
     const modal = q('.modal').pop();
-    assert.deepStrictEqual(q('.segb', modal).map((b) => b.querySelector('b').textContent), ['From the server', 'From this machine', 'Server only']);
+    assert.deepStrictEqual(q('.segb', modal).map((b) => b.querySelector('b').textContent), ['From the server', 'From this machine', 'Server only', 'Local only']);
     const rows = q('.frow', modal);
     assert.deepStrictEqual(rows.map((r) => r.querySelector('.fname').textContent), ['shop', 'cheshmeh']);
     assert.ok(rows[1].disabled, 'already synced folder cannot be picked');
@@ -1595,6 +1596,21 @@ const tests = {
     q('button', ask).find((b) => b.textContent === 'Allow once').click(); await settle();
     assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q3', answer: 'once' });
     assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)), 'closed');
+    // the mode of this computer is right in the card; auto runs the waiting command at once
+    await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
+    const chat3 = S.active; chat3.busy = true;
+    fakePc.asks = { asks: [{ id: 'q6', project: 'cheshmeh', cmd: 'docker ps', until: Date.now() / 1000 + 100, chat: 'cccccccccccccccc', session: chat3.info.id }], runs: [], now: Date.now() / 1000, output: 'chat', mode: 'new' };
+    await global.SWComputers.poll(); await settle();
+    const card6 = q('.pc-perm', chat3.msgs).pop();
+    const msel = q('select', card6)[0];
+    assert.strictEqual(msel.value, 'new', 'the current mode is shown');
+    msel.value = 'all'; msel.dispatch('change'); await settle();
+    assert.deepStrictEqual(fakePc.posts.pop(), { mode: 'all' });
+    assert.deepStrictEqual(fakePc.answers.pop(), { id: 'q6', answer: 'once' }, 'auto: runs now');
+    assert.ok(card6.classList.contains('done'));
+    fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' };
+    await global.SWComputers.poll(); await settle();
+    SW.closeTab(chat3, true); await settle();
     // output "panel": a running command opens the live box
     fakePc.asks = { asks: [], runs: [{ id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', start: 1 }], now: Date.now() / 1000, output: 'panel' };
     await global.SWComputers.poll(); await settle();
@@ -1603,6 +1619,47 @@ const tests = {
     assert.match(box.textContent, /building…/);
     q('.icon-btn', box)[0].click();
     S.pc = { on: false };
+  },
+
+  async 'Local only project: added from Add project; its mark; run commands run on this computer'() {
+    const S = global.SW.S;
+    S.pc = { on: true };
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.add-link').find((b) => b.textContent === '+ add project').click(); await settle();
+    const modal = q('.modal').pop();
+    q('.segb', modal).find((b) => /Local only/.test(b.textContent)).click(); await settle();
+    assert.match(modal.textContent, /Nothing goes to the server/);
+    assert.ok(!/Connect this computer first/.test(modal.textContent));
+    const inp = q('input', modal).find((i) => i.getAttribute('placeholder') === '~/projects/my-project');
+    inp.value = '~/work/mine';
+    q('.btn.primary', modal).pop().click(); await settle();
+    assert.deepStrictEqual(fakePc.local, { name: '', local: '~/work/mine' });
+    // where it lives: green while its computer is connected, red when not
+    const pr = S.projects.find((x) => x.name === 'cheshmeh');
+    pr.localOnly = 'a1b2c3d4e5f6';
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { builds: { cheshmeh: 'local', shop: 'server' } }));
+    const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
+    assert.ok(q('.pcb', head())[0].classList.contains('ok'));
+    assert.match(q('.pcb', head())[0].getAttribute('title'), /Lives on laptop/);
+    assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only');
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [], builds: { cheshmeh: 'local', shop: 'server' } }));
+    assert.ok(q('.pcb', head())[0].classList.contains('bad'));
+    assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only · off');
+    delete pr.localOnly;
+    // a project built on the computers: its run commands run here, even one saved as "server"
+    pr.buildsOn = 'computers';
+    pr.commands = [{ id: 'c9', name: 'api', cmd: 'go run .', where: 'server', cwd: '', url: '' }];
+    SW.renderProjects();
+    const cmd = q('.cmd').find((x) => /api/.test(x.textContent));
+    assert.match(cmd.textContent, /loc/);
+    assert.match(cmd.getAttribute('title'), /runs on this computer/);
+    pr.buildsOn = 'server';
+    SW.renderProjects();
+    assert.match(q('.cmd').find((x) => /api/.test(x.textContent)).textContent, /srv/);
+    pr.commands = [{ id: 'c1', name: 'web', cmd: 'npm start', where: 'local', cwd: 'web', url: '' }];
+    delete pr.buildsOn;
+    S.pc = { on: false };
+    SW.renderProjects();
   },
 
   async 'Ctrl+P: go to a file of the project you are in'() {

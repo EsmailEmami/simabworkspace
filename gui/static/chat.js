@@ -942,6 +942,7 @@
           var box = this.system('Claude stopped (exit ' + e.code + '). Your next message starts it again and continues the conversation.', 'err');
           if (this.stderr.length) box.append(h('details', null, h('summary', null, 'details'), preBox(this.stderr.slice(-40).join('\n'))));
           if (e.code === 97) box.append(h('div', null, 'The project folder was not found on the server.'));
+          if (e.code === 98) box.append(h('div', null, 'This project lives on your computer and it is not connected: open Simab Workspace there (⚙ → Computers → Connect this computer).'));
         }
         break;
       default: break;
@@ -1367,9 +1368,16 @@
 
   // a command Claude wants to run on this computer (onpc, computers.js): asked in the chat that runs it,
   // like Claude's own permission cards. answer(v): once | always | hour | deny.
-  P.pcAskCard = function (a, answer) {
+  P.pcAskCard = function (a, answer, modes) {
     var self = this, key = 'pc:' + a.id;
     var left = h('span', { class: 'pc-left' });
+    var modeSel = null;
+    if (modes && modes.list) {         // the mode of this computer, right here (like the chat's mode chip)
+      modeSel = h('select', { class: 'mini-sel pc-mode', title: 'What Claude may run on this computer without asking' },
+        modes.list.map(function (m) { return h('option', { value: m[0], title: m[2] }, m[1]); }));
+      modeSel.value = modes.value;
+      modeSel.addEventListener('change', function () { modes.set(modeSel.value); });
+    }
     function b(label, v, cls, tip) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: tip || '', onclick: function () { answer(v); } }, label); }
     var card = h('div', { class: 'perm-card pc-perm' },
       h('div', { class: 'perm-title' }, h('span', { class: 'pc-perm-ic' }, '⌂'), 'Run on ', h('b', null, 'this computer'),
@@ -1379,7 +1387,7 @@
         b('Allow once', 'once', 'primary'),
         b('Always allow this', 'always', '', 'Never ask again for this exact command in ' + a.project),
         b('Allow all 1 hour', 'hour', '', 'Everything in ' + a.project + ' runs without asking for 1 hour'),
-        b('Deny', 'deny', 'danger'), left));
+        b('Deny', 'deny', 'danger'), modeSel ? h('span', { class: 'pc-mode-l' }, 'mode', modeSel) : null, left));
     this.perms[key] = card;
     this.add(card);
     this.alertUser('Claude wants to run a command on this computer', 'permission');

@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.49.3"
+VERSION = "1.50.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -862,6 +862,9 @@ def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
         p["color"] = (store_projects.get(p["name"]) or {}).get("color") or ""
         p["starter"] = (store_projects.get(p["name"]) or {}).get("starter") or ""
         p["title"] = (store_projects.get(p["name"]) or {}).get("title") or ""
+        lo = (store_projects.get(p["name"]) or {}).get("localOnly") or ""
+        if lo and p.get("source") == "manual":
+            p["localOnly"] = lo                 # id of the computer it lives on (files never on the server)
     out.sort(key=lambda p: (p["title"] or p["name"]).lower())
     return out
 
@@ -1034,6 +1037,8 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         if not cmd:
             raise ApiError(404, "this command no longer exists")
         where = cmd["where"]
+        if project.get("buildsOn") in ("computers", "local") and project.get("localExists"):
+            where = "local"           # the project is built / run on this computer, not on the server
     if kind == "claude":
         where = "server"          # Claude Code always runs on the server
     dk = spec.get("_docker") if kind == "docker" else None
@@ -1811,8 +1816,10 @@ def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "") 
     # a project built on the user's own computers: Claude is told to use onpc (see PC_HINT)
     inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "")
              + (f"SIMAB_CHAT={chat}; export SIMAB_CHAT; " if RELAY_KEY_RE.fullmatch(chat or "") else "")
-             + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); exec ' + cmd + " "
-             + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"}')
+             + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); L=$("$HOME/.local/bin/onpc" --local 2>/dev/null); '
+             + 'if [ $? = 3 ]; then echo "simabworkspace: this project lives on your computer and it is not connected'
+             + ' — open Simab Workspace there (Computers → Connect this computer)" >&2; exit 98; fi; exec ' + cmd + " "
+             + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"} ${L:+--settings "$L"}')
     # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
     return (f"cd {remote_path_expr(rpath)} || exit 97; "
             f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote("exec sh -c " + shlex.quote(inner))}')
@@ -5400,6 +5407,14 @@ PC_HINT = (
     "the user's computers. Long-running dev servers (ng serve, npm start) are not supported by onpc "
     "yet: ask the user to start them.")
 
+PC_LOCAL_HINT = (
+    "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
+    "stored on this server). Read, Edit, Write, Grep and Glob work here as usual. Every Bash command is "
+    "run on the user's computer automatically (in the same folder there) — so tools, node, git, docker "
+    "etc. are the ones installed there; if it is Windows the shell is Git Bash. `cd` does not carry over "
+    "to the next command: use `cd dir && command`. Give long builds a long Bash timeout (600000 ms). If a "
+    "command says the computer is not connected, stop and tell the user.")
+
 ONPC_PY = r'''#!/usr/bin/env python3
 # onpc — run a command on your own computer instead of this server (Simab Workspace).
 #   onpc npm run build        onpc "npm ci && npm test"        onpc --on laptop go test ./...
@@ -5407,6 +5422,7 @@ ONPC_PY = r'''#!/usr/bin/env python3
 import os, sys, json, socket, struct, signal, shlex
 D = os.path.expanduser("~/.cache/simabworkspace/pc")
 HINT = @@HINT@@
+LOCAL_HINT = @@LOCAL_HINT@@
 NOT_HERE = -404
 USAGE = ("usage: onpc COMMAND…   run it on your own computer, in the synced copy of this folder\n"
          "       onpc --on NAME COMMAND…   on that computer\n"
@@ -5452,11 +5468,12 @@ def devices():
 
 
 def project_on(cwd):
+    """→ ("computers" | "local" | "", its server folder)"""
     m = load("projects.json", {})
     for p, v in (m.items() if isinstance(m, dict) else []):
-        if v == "computers" and (cwd == p or cwd.startswith(p.rstrip("/") + "/")):
-            return p
-    return ""
+        if v in ("computers", "local") and (cwd == p or cwd.startswith(p.rstrip("/") + "/")):
+            return v, p
+    return "", ""
 
 
 def send(d, cwd, cmd):
@@ -5517,10 +5534,84 @@ def run(cmd, on):
     return 255
 
 
+def sftp(dev_id, project):
+    """sshfs runs this as its "ssh": SFTP over the Computers link to that computer's project folder."""
+    d = load(dev_id + ".json", None) if dev_id.isalnum() else None
+    s = reach(d) if isinstance(d, dict) else None
+    if s is None:
+        sys.stderr.write("onpc: the computer of this project is not connected\n")
+        return 255
+    s.settimeout(None)
+    body = json.dumps({"project": project, "uid": os.getuid(), "gid": os.getgid()}).encode()
+    s.sendall((("POST /pc/sftp HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                "Content-Length: %d\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))).encode() + body)
+    f = s.makefile("rb", buffering=0)
+    head = b""
+    while not head.endswith(b"\r\n\r\n"):
+        c = f.read(1)
+        if not c:
+            return 255
+        head += c
+    if b" 200 " not in head.split(b"\r\n")[0] + b" ":
+        sys.stderr.write("onpc: " + head.split(b"\r\n")[0].decode("latin-1") + "\n")
+        return 255
+    import threading
+
+    def down():
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            os.write(1, b)
+        os._exit(0)
+    threading.Thread(target=down, daemon=True).start()
+    while True:
+        b = os.read(0, 65536)
+        if not b:
+            break
+        s.sendall(b)
+    try:
+        s.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    return 0
+
+
+def hook():
+    """PreToolUse hook of a Local only project: every Bash command runs on the user's computer."""
+    try:
+        i = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    ti = dict(i.get("tool_input") or {})
+    cmd = ti.get("command")
+    me = os.path.realpath(os.path.abspath(sys.argv[0]))
+    if not isinstance(cmd, str) or not cmd.strip() or cmd.lstrip().startswith((me, "onpc ")):
+        return 0
+    ti["command"] = shlex.quote(me) + " " + shlex.quote(cmd)
+    sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": ti}}))
+    return 0
+
+
 def main(a):
+    if a[:1] == ["--sftp"] and len(a) >= 3:
+        return sftp(a[1], a[2])
+    if a[:1] == ["--hook"]:
+        return hook()
     if a[:1] == ["--hint"]:
-        if project_on(os.path.realpath(os.getcwd())):
-            sys.stdout.write(HINT)
+        on = project_on(os.path.realpath(os.getcwd()))[0]
+        if on:
+            sys.stdout.write(LOCAL_HINT if on == "local" else HINT)
+        return 0
+    if a[:1] == ["--local"]:          # a Local only project: Claude's settings (the Bash hook); 3 = not mounted
+        on, root = project_on(os.path.realpath(os.getcwd()))
+        if on != "local":
+            return 0
+        if not os.path.ismount(root):
+            return 3
+        me = shlex.quote(sys.executable) + " " + shlex.quote(os.path.realpath(os.path.abspath(sys.argv[0])))
+        sys.stdout.write(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": me + " --hook"}]}]}}))
         return 0
     if a[:1] == ["--list"]:
         ds = devices()
@@ -5545,7 +5636,7 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv[1:]))
     except KeyboardInterrupt:
         sys.exit(130)
-'''.replace("@@HINT@@", json.dumps(PC_HINT))
+'''.replace("@@HINT@@", json.dumps(PC_HINT)).replace("@@LOCAL_HINT@@", json.dumps(PC_LOCAL_HINT))
 
 # Installs onpc and this computer's card on the server. stdin: {"onpc", "device", "paths": {project: server path}}
 PC_SETUP_PY = r'''
@@ -5594,7 +5685,7 @@ def builds_of(paths):
     out = {}
     for name, p in paths.items():
         r = os.path.realpath(os.path.expanduser(p)) if isinstance(p, str) and p else ""
-        out[name] = "computers" if r and m.get(r) == "computers" else "server"
+        out[name] = m.get(r) if r and m.get(r) in ("computers", "local") else "server"
     return out
 if op == "list":
     cfg = json.loads(sys.stdin.read() or "{}")
@@ -5630,8 +5721,8 @@ elif op == "builds":
     os.chmod(D, 0o700)
     m = load("projects.json", {})
     m = m if isinstance(m, dict) else {}
-    if sys.argv[3] == "computers":
-        m[r] = "computers"
+    if sys.argv[3] in ("computers", "local"):
+        m[r] = sys.argv[3]
     else:
         m.pop(r, None)
     fd = os.open(os.path.join(D, "projects.json.tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -5639,6 +5730,90 @@ elif op == "builds":
         json.dump(m, f)
     os.replace(os.path.join(D, "projects.json.tmp"), os.path.join(D, "projects.json"))
     print(json.dumps({"path": r, "on": sys.argv[3]}))
+'''
+
+# mount | umount; stdin {"dev": computer id, "mounts": [{"name", "path"}]} → {name: "ok" | why not}
+# sshfs: the system one, else our own copy unpacked from the distribution's package (no root needed).
+PC_MOUNT_PY = r'''
+import os, sys, json, shutil, subprocess, tempfile, glob, errno
+cfg = json.loads(sys.stdin.read() or "{}")
+op = sys.argv[1]
+LIB = os.path.expanduser("~/.local/lib/simabworkspace/sshfs")
+ONPC = os.path.expanduser("~/.local/bin/onpc")
+def sshfs():
+    p = shutil.which("sshfs")
+    if p:
+        return p, ""
+    own = os.path.join(LIB, "usr", "bin", "sshfs")
+    if not os.path.isfile(own) and shutil.which("apt-get") and shutil.which("dpkg-deb"):
+        t = tempfile.mkdtemp()
+        try:
+            subprocess.run(["apt-get", "download", "sshfs"], cwd=t, capture_output=True, timeout=180)
+            debs = glob.glob(os.path.join(t, "sshfs_*.deb"))
+            if debs:
+                os.makedirs(LIB, exist_ok=True)
+                subprocess.run(["dpkg-deb", "-x", debs[0], LIB], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            shutil.rmtree(t, ignore_errors=True)
+    if os.path.isfile(own):
+        return own, ""
+    return "", "sshfs is not on the server — ask its admin to run: sudo apt install sshfs"
+def fm():
+    return shutil.which("fusermount3") or shutil.which("fusermount") or "fusermount"
+def unmount(path):
+    subprocess.run([fm(), "-u", "-z", path], capture_output=True, timeout=30)
+def state(path):
+    try:
+        os.listdir(path)
+    except OSError as e:
+        if e.errno in (errno.ENOTCONN, errno.EIO):
+            return "dead"
+        if e.errno == errno.ENOENT:
+            return "none"
+        raise
+    return "mounted" if os.path.ismount(path) else "dir"
+out = {}
+if op == "mount":
+    exe, err = sshfs()
+    for m in cfg.get("mounts") or []:
+        name, path = m["name"], os.path.expanduser(m["path"])
+        try:
+            st = state(path)
+            if st == "mounted":
+                out[name] = "ok"
+                continue
+            if st == "dead":
+                unmount(path)
+            if err:
+                out[name] = err
+                continue
+            os.makedirs(path, exist_ok=True)
+            if os.listdir(path):
+                out[name] = "the server folder " + path + " is not empty — it must stay empty"
+                continue
+            with tempfile.TemporaryFile() as ef:
+                r = subprocess.run([exe, "pc:", path, "-o", "ssh_command=" + sys.executable + " " + ONPC + " --sftp " + cfg["dev"] + " " + name,
+                                    "-o", "reconnect,ServerAliveInterval=15,dir_cache=yes,dcache_timeout=3,max_conns=1"],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=ef, timeout=60)
+                ef.seek(0)
+                msg = ef.read().decode("utf-8", "replace").strip()
+            out[name] = "ok" if r.returncode == 0 and os.path.ismount(path) else (msg.splitlines() or ["mounting failed"])[-1][:300]
+        except (OSError, subprocess.SubprocessError) as e:
+            out[name] = str(e)[:300]
+elif op == "umount":
+    for m in cfg.get("mounts") or []:
+        path = os.path.expanduser(m["path"])
+        try:
+            if state(path) in ("mounted", "dead"):
+                unmount(path)
+            if os.path.isdir(path) and not os.listdir(path):
+                os.rmdir(path)
+            out[m["name"]] = "ok"
+        except (OSError, subprocess.SubprocessError) as e:
+            out[m["name"]] = str(e)[:300]
+print(json.dumps(out))
 '''
 
 
@@ -5727,6 +5902,7 @@ class PcHub:
         self.asks = {}                 # id -> waiting permission question
         self.hour = {}                 # project -> everything allowed until (time)
         self.runs = collections.deque(maxlen=20)
+        self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
 
     # settings ---------------------------------------------------------------
     def cfg(self) -> dict:
@@ -5745,7 +5921,8 @@ class PcHub:
     def public(self) -> dict:
         c = self.cfg()
         c.pop("secret", None)
-        return {"config": c, "state": self.state, "error": self.error, "since": self.since, "os": pc_os()}
+        return {"config": c, "state": self.state, "error": self.error, "since": self.since, "os": pc_os(),
+                "mounts": dict(self.mounts)}
 
     def update(self, patch: dict) -> dict:
         if not isinstance(patch, dict):
@@ -5778,6 +5955,8 @@ class PcHub:
                 c["always"] = {k: [y for y in x if y.strip()][:200] for k, x in v.items() if x}
             self.app.store.db.put("pc", c)
         if (c["on"], c["name"]) != old:
+            if old[0] and not c["on"]:
+                threading.Thread(target=self.unmount, daemon=True).start()     # turned off: the folders leave the server
             self.stop()
             if c["on"]:
                 self.start()
@@ -5843,6 +6022,7 @@ class PcHub:
                         break
                     self.state, self.error, self.since = "connected", "", time.time()
                     pause = 2
+                    threading.Thread(target=self.mount, daemon=True).start()
                 self.wake.wait(0.5)
             if self.state == "error" and self.wanted:
                 if self.wake.wait(pause):
@@ -5862,6 +6042,53 @@ class PcHub:
             if self.wake.wait(pause):
                 return
             pause = min(pause * 2, 60)
+
+    # Local only projects: their folders mounted on the server --------------------
+    def local_projects(self) -> list:
+        me = self.cfg()["id"]
+        return [p for p in self.app.projects() if p.get("localOnly") == me and p.get("localExists") and p.get("remote")]
+
+    def mount(self, names=None) -> dict:
+        ps = [p for p in self.local_projects() if names is None or p["name"] in names]
+        if not ps or self.app.web:
+            return {}
+        try:
+            r = self.remote(self.app.conf, PC_MOUNT_PY, ["mount"], multiplex=False, timeout=300,
+                            stdin=json.dumps({"dev": self.cfg()["id"], "mounts": [{"name": p["name"], "path": p["remote"]} for p in ps]}).encode())
+        except ApiError as e:
+            r = {p["name"]: e.message for p in ps}
+        self.mounts.update(r if isinstance(r, dict) else {})
+        return r if isinstance(r, dict) else {}
+
+    def unmount(self, projects=None):
+        ps = projects if projects is not None else self.local_projects()
+        if not ps:
+            return
+        try:
+            self.remote(self.app.conf, PC_MOUNT_PY, ["umount"], multiplex=False, timeout=60,
+                        stdin=json.dumps({"mounts": [{"name": p["name"], "path": p["remote"]} for p in ps]}).encode())
+        except ApiError:
+            pass
+        for p in ps:
+            self.mounts.pop(p["name"], None)
+
+    def serve_sftp(self, h):
+        """POST /pc/sftp from onpc --sftp (sshfs on the server): the files of one Local only project."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        p = next((x for x in self.local_projects() if x["name"] == b.get("project")), None)
+        if not p:
+            return h._json(404, {"error": "no such Local only project on this computer"})
+        h.send_response(200)
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+        SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid")).serve()
 
     def _verify(self) -> str:
         """"" when the server reaches this computer through its socket, else why not."""
@@ -5896,7 +6123,7 @@ class PcHub:
         rest = [x for x in cwd[len(best[1]):].split("/") if x]
         if any(x == ".." for x in rest):
             return None
-        return best[0], os.path.join(best[0]["local"], *rest) if rest else best[0]["local"]
+        return best[0], os.path.join(best[0]["local"], *rest) if rest else best[0]["local"], best[1]
 
     def serve_run(self, h):
         """POST /pc/run from onpc (through the ssh link). h = the HTTP handler."""
@@ -5912,10 +6139,20 @@ class PcHub:
         hit = self.map_path(cwd)
         if not hit:
             return h._json(404, {"error": f"{cwd} is not synced to {c['name']}"})
-        project, local = hit
+        project, local, root = hit
         if not os.path.isdir(local):
             return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
-        verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
+        paths = []
+        if project.get("localOnly"):
+            # Claude's own permission modes already decided (the hook runs every Bash command here);
+            # the server's paths of the mount mean this computer's folder, and back in the output
+            lroot = project["local"].replace("\\", "/") if IS_WIN else project["local"]
+            for sv in {root, (self.home + project["remote"][1:]) if self.home and project["remote"].startswith("~/") else ""} - {""}:
+                cmd = cmd.replace(sv, lroot)
+            paths = [(project["local"].encode(), root.encode()), (lroot.encode(), root.encode())]
+            verdict, why = "allow", ""
+        else:
+            verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
         chat = b.get("chat") if isinstance(b.get("chat"), str) and RELAY_KEY_RE.fullmatch(b.get("chat") or "") else ""
         run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local, "chat": chat,
                "start": time.time(), "end": 0, "code": None, "state": "asking" if verdict == "ask" else "running", "out": ""}
@@ -5952,7 +6189,7 @@ class PcHub:
             run["state"] = "running"
             if project.get("source") == "mutagen":
                 mutagen_flush(project["name"])      # Claude's last edits are here before the build
-            code = self._exec(cmd, local, frame, run, h.connection)
+            code = self._exec(cmd, local, frame, run, h.connection, paths)
             if project.get("source") == "mutagen":
                 mutagen_flush(project["name"])
             run.update(state="done", end=time.time(), code=code)
@@ -5961,7 +6198,7 @@ class PcHub:
             if run["state"] != "done":
                 run.update(state="stopped", end=time.time())
 
-    def _exec(self, cmd: str, cwd: str, frame, run: dict, conn) -> int:
+    def _exec(self, cmd: str, cwd: str, frame, run: dict, conn, paths=()) -> int:
         import select
         kw = {"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True}
         p = subprocess.Popen(pc_shell_argv(cmd), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -5970,6 +6207,8 @@ class PcHub:
 
         def pump(stream, kind):
             for chunk in iter(lambda: stream.read1(65536) if hasattr(stream, "read1") else stream.read(4096), b""):
+                for a, b in paths:
+                    chunk = chunk.replace(a, b)
                 run["out"] = (run["out"] + chunk.decode("utf-8", "replace"))[-65536:]
                 if not gone.is_set():
                     try:
@@ -6072,6 +6311,315 @@ def pc_kill(p):
     except (OSError, subprocess.SubprocessError):
         pass
 
+
+
+# ----------------------------------------------------------------------------- Local only projects (sftp)
+# A "Local only" project stays on the user's computer: the server mounts it (sshfs) through the
+# Computers link and Claude works on it with all its own tools; every Bash command goes to the
+# computer (a PreToolUse hook turns it into onpc). The files come from this small SFTP v3 server,
+# which serves ONLY that project's folder (nothing else of the computer).
+SFTP_EXT = {"posix-rename@openssh.com": "1", "fsync@openssh.com": "1", "hardlink@openssh.com": "1"}
+SFTP_OK, SFTP_EOF, SFTP_NOFILE, SFTP_PERM, SFTP_FAIL, SFTP_UNSUP = 0, 1, 2, 3, 4, 8
+
+
+class SftpServer:
+    """SFTP version 3 on a pair of binary streams, confined to `root`. Paths are /-separated,
+    "/" = root. Symlinks may not lead out of root."""
+
+    def __init__(self, root: str, rfile, wfile, uid=None, gid=None):
+        self.root = os.path.realpath(root)
+        self.ids = (uid, gid) if isinstance(uid, int) and isinstance(gid, int) else None   # the server user's
+        self.r, self.w = rfile, wfile
+        self.handles = {}
+        self.next = 1
+
+    # wire ---------------------------------------------------------------------
+    def _read(self, n):
+        b = b""
+        while len(b) < n:
+            c = self.r.read(n - len(b))
+            if not c:
+                raise EOFError
+            b += c
+        return b
+
+    def _send(self, kind: int, rid, payload: bytes):
+        body = bytes([kind]) + (struct.pack(">I", rid) if rid is not None else b"") + payload
+        self.w.write(struct.pack(">I", len(body)) + body)
+        self.w.flush()
+
+    @staticmethod
+    def _s(b: bytes) -> bytes:
+        return struct.pack(">I", len(b)) + b
+
+    def status(self, rid, code, msg=""):
+        self._send(101, rid, struct.pack(">I", code) + self._s(msg.encode()) + self._s(b""))
+
+    def attrs(self, st) -> bytes:
+        ids = struct.pack(">II", *self.ids) if self.ids else b""
+        return (struct.pack(">I", 1 | (2 if self.ids else 0) | 4 | 8) + struct.pack(">Q", st.st_size) + ids
+                + struct.pack(">I", st.st_mode & 0xFFFFFFFF)
+                + struct.pack(">II", int(st.st_atime) & 0xFFFFFFFF, int(st.st_mtime) & 0xFFFFFFFF))
+
+    # paths --------------------------------------------------------------------
+    def local(self, p: str, follow=True) -> str:
+        rel = [x for x in p.replace("\\", "/").split("/") if x and x != "."]
+        out = []
+        for x in rel:
+            if x == "..":
+                if out:
+                    out.pop()
+            else:
+                out.append(x)
+        full = os.path.join(self.root, *out) if out else self.root
+        check = os.path.realpath(full) if follow else os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full)) if out else self.root
+        if check != self.root and not check.startswith(self.root.rstrip(os.sep) + os.sep):
+            raise PermissionError("outside the project folder")
+        return full
+
+    def virt(self, local: str) -> str:
+        rel = os.path.relpath(os.path.realpath(local), self.root)
+        return "/" if rel == "." else "/" + rel.replace(os.sep, "/")
+
+    # loop ---------------------------------------------------------------------
+    def serve(self):
+        try:
+            while True:
+                n = struct.unpack(">I", self._read(4))[0]
+                if n > 1 << 20:
+                    return
+                pkt = self._read(n)
+                self.handle(pkt[0], pkt[1:])
+        except (EOFError, OSError):
+            pass
+        finally:
+            for h in self.handles.values():
+                if not isinstance(h, list):
+                    try:
+                        os.close(h)
+                    except OSError:
+                        pass
+
+    def handle(self, kind, data):
+        if kind == 1:                                       # INIT
+            ext = b"".join(self._s(k.encode()) + self._s(v.encode()) for k, v in SFTP_EXT.items())
+            self._send(2, None, struct.pack(">I", 3) + ext)
+            return
+        rid = struct.unpack(">I", data[:4])[0]
+        self.p, self.data = 4, data
+        try:
+            fn = SFTP_OPS.get(kind)
+            if not fn:
+                return self.status(rid, SFTP_UNSUP, "unsupported")
+            fn(self, rid)
+        except FileNotFoundError as e:
+            self.status(rid, SFTP_NOFILE, str(e))
+        except PermissionError as e:
+            self.status(rid, SFTP_PERM, str(e))
+        except (OSError, ValueError, KeyError, struct.error) as e:
+            self.status(rid, SFTP_FAIL, str(e))
+
+    def u32(self):
+        v = struct.unpack(">I", self.data[self.p:self.p + 4])[0]
+        self.p += 4
+        return v
+
+    def u64(self):
+        v = struct.unpack(">Q", self.data[self.p:self.p + 8])[0]
+        self.p += 8
+        return v
+
+    def string(self) -> bytes:
+        n = self.u32()
+        v = self.data[self.p:self.p + n]
+        self.p += n
+        return v
+
+    def path(self) -> str:
+        return self.string().decode("utf-8", "replace")
+
+    def read_attrs(self) -> dict:
+        f = self.u32()
+        a = {}
+        if f & 1:
+            a["size"] = self.u64()
+        if f & 2:
+            self.u32(), self.u32()
+        if f & 4:
+            a["mode"] = self.u32()
+        if f & 8:
+            a["atime"], a["mtime"] = self.u32(), self.u32()
+        if f & 0x80000000:
+            for _ in range(self.u32()):
+                self.string(), self.string()
+        return a
+
+    def apply(self, target, a: dict):
+        """target: a path or an open fd."""
+        if "size" in a:
+            os.truncate(target, a["size"])
+        if "mode" in a:
+            if isinstance(target, int):
+                if hasattr(os, "fchmod"):
+                    os.fchmod(target, a["mode"] & 0o7777)
+            else:
+                os.chmod(target, a["mode"] & 0o7777)
+        if "mtime" in a:
+            os.utime(target, (a["atime"], a["mtime"]))
+
+    def new_handle(self, obj) -> bytes:
+        h = str(self.next).encode()
+        self.next += 1
+        self.handles[h] = obj
+        return h
+
+    # operations ---------------------------------------------------------------
+    def op_open(self, rid):
+        p = self.local(self.path())
+        pf = self.u32()
+        self.read_attrs()
+        fl = getattr(os, "O_BINARY", 0)
+        fl |= os.O_RDWR if pf & 1 and pf & 2 else os.O_WRONLY if pf & 2 else os.O_RDONLY
+        if pf & 4:
+            fl |= os.O_APPEND
+        if pf & 8:
+            fl |= os.O_CREAT
+        if pf & 16:
+            fl |= os.O_TRUNC
+        if pf & 32:
+            fl |= os.O_EXCL
+        self._send(102, rid, self._s(self.new_handle(os.open(p, fl, 0o666))))
+
+    def op_close(self, rid):
+        h = self.handles.pop(self.string())
+        if not isinstance(h, list):
+            os.close(h)
+        self.status(rid, SFTP_OK)
+
+    def op_read(self, rid):
+        fd, off, n = self.handles[self.string()], self.u64(), self.u32()
+        os.lseek(fd, off, 0)
+        b = os.read(fd, min(n, 256 * 1024))
+        if not b:
+            return self.status(rid, SFTP_EOF, "end of file")
+        self._send(103, rid, self._s(b))
+
+    def op_write(self, rid):
+        fd, off, b = self.handles[self.string()], self.u64(), self.string()
+        os.lseek(fd, off, 0)
+        while b:
+            b = b[os.write(fd, b):]
+        self.status(rid, SFTP_OK)
+
+    def op_lstat(self, rid):
+        self._send(105, rid, self.attrs(os.lstat(self.local(self.path(), follow=False))))
+
+    def op_stat(self, rid):
+        self._send(105, rid, self.attrs(os.stat(self.local(self.path()))))
+
+    def op_fstat(self, rid):
+        self._send(105, rid, self.attrs(os.fstat(self.handles[self.string()])))
+
+    def op_setstat(self, rid):
+        p = self.local(self.path())
+        self.apply(p, self.read_attrs())
+        self.status(rid, SFTP_OK)
+
+    def op_fsetstat(self, rid):
+        fd = self.handles[self.string()]
+        a = self.read_attrs()
+        if "mtime" in a and not getattr(os, "supports_fd", set()) & {os.utime}:
+            a.pop("mtime")
+        self.apply(fd, a)
+        self.status(rid, SFTP_OK)
+
+    def op_opendir(self, rid):
+        p = self.local(self.path())
+        names = [".", ".."] + os.listdir(p)
+        self._send(102, rid, self._s(self.new_handle([p, names])))
+
+    def op_readdir(self, rid):
+        d = self.handles[self.string()]
+        base, names = d
+        if not names:
+            return self.status(rid, SFTP_EOF, "end")
+        batch, d[1] = names[:100], names[100:]
+        out = b""
+        n = 0
+        for name in batch:
+            try:
+                st = os.lstat(os.path.join(base, name))
+            except OSError:
+                continue
+            nb = name.encode("utf-8", "surrogateescape")
+            out += self._s(nb) + self._s(nb) + self.attrs(st)
+            n += 1
+        self._send(104, rid, struct.pack(">I", n) + out)
+
+    def op_remove(self, rid):
+        os.remove(self.local(self.path(), follow=False))
+        self.status(rid, SFTP_OK)
+
+    def op_mkdir(self, rid):
+        p = self.local(self.path())
+        self.read_attrs()
+        os.mkdir(p)
+        self.status(rid, SFTP_OK)
+
+    def op_rmdir(self, rid):
+        os.rmdir(self.local(self.path()))
+        self.status(rid, SFTP_OK)
+
+    def op_realpath(self, rid):
+        p = self.path()
+        loc = self.local(p or "/")
+        v = self.virt(loc) if os.path.exists(loc) else "/" + "/".join(x for x in p.split("/") if x and x != ".")
+        st = b"\0\0\0\0"
+        self._send(104, rid, struct.pack(">I", 1) + self._s(v.encode()) + self._s(v.encode()) + st)
+
+    def op_rename(self, rid):
+        a, b = self.local(self.path(), follow=False), self.local(self.path(), follow=False)
+        if os.path.exists(b):
+            raise FileExistsError("target exists")
+        os.rename(a, b)
+        self.status(rid, SFTP_OK)
+
+    def op_readlink(self, rid):
+        p = self.local(self.path(), follow=False)
+        t = os.readlink(p)
+        tl = os.path.realpath(os.path.join(os.path.dirname(p), t))
+        if tl != self.root and not tl.startswith(self.root.rstrip(os.sep) + os.sep):
+            raise PermissionError("the link leads out of the project folder")
+        v = t.replace(os.sep, "/") if not os.path.isabs(t) else self.virt(tl)
+        self._send(104, rid, struct.pack(">I", 1) + self._s(v.encode()) + self._s(v.encode()) + b"\0\0\0\0")
+
+    def op_symlink(self, rid):
+        target, link = self.path(), self.path()         # OpenSSH order: target first
+        lp = self.local(link, follow=False)
+        tl = os.path.realpath(os.path.join(os.path.dirname(lp), target)) if not target.startswith("/") else self.local(target)
+        if tl != self.root and not tl.startswith(self.root.rstrip(os.sep) + os.sep):
+            raise PermissionError("the link would lead out of the project folder")
+        os.symlink(target if not target.startswith("/") else os.path.relpath(tl, os.path.dirname(lp)), lp)
+        self.status(rid, SFTP_OK)
+
+    def op_extended(self, rid):
+        name = self.string().decode()
+        if name == "posix-rename@openssh.com":
+            os.replace(self.local(self.path(), follow=False), self.local(self.path(), follow=False))
+        elif name == "hardlink@openssh.com":
+            os.link(self.local(self.path()), self.local(self.path(), follow=False))
+        elif name == "fsync@openssh.com":
+            os.fsync(self.handles[self.string()])
+        else:
+            return self.status(rid, SFTP_UNSUP, "unsupported")
+        self.status(rid, SFTP_OK)
+
+
+SFTP_OPS = {3: SftpServer.op_open, 4: SftpServer.op_close, 5: SftpServer.op_read, 6: SftpServer.op_write,
+            7: SftpServer.op_lstat, 8: SftpServer.op_fstat, 9: SftpServer.op_setstat, 10: SftpServer.op_fsetstat,
+            11: SftpServer.op_opendir, 12: SftpServer.op_readdir, 13: SftpServer.op_remove, 14: SftpServer.op_mkdir,
+            15: SftpServer.op_rmdir, 16: SftpServer.op_realpath, 17: SftpServer.op_stat, 18: SftpServer.op_rename,
+            19: SftpServer.op_readlink, 20: SftpServer.op_symlink, 200: SftpServer.op_extended}
 
 
 # ----------------------------------------------------------------------------- Claude usage (limits, cost)
@@ -6571,6 +7119,9 @@ class App:
         if order:
             idx = {name: i for i, name in enumerate(order)}
             p.sort(key=lambda x: idx.get(x["name"], len(order)))
+        builds = ((getattr(self, "_pc_cache", None) or (0, {}))[1] or {}).get("builds") or {}
+        for x in p:                   # where its builds run (Computers): run commands follow it
+            x["buildsOn"] = "local" if x.get("localOnly") else builds.get(x["name"], "server")
         self._projects_cache = (time.time(), p)
         return p
 
@@ -8229,6 +8780,10 @@ class App:
             return self.pc_devices()
         if self.web:
             raise ApiError(403, "not available in the web version")
+        if key == ("POST", "local"):
+            return self.pc_add_local(body)
+        if key == ("POST", "mount"):
+            return {"mounts": self.pc.mount()}
         if key == ("GET", ""):
             return self.pc.public()
         if key == ("POST", ""):
@@ -8240,6 +8795,44 @@ class App:
         if key == ("GET", "run") and len(rest) == 2:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")
+
+    def pc_add_local(self, b: dict) -> dict:
+        """A Local only project: its files stay in `local` on this computer; the server mounts them
+        at ~/.simab-mnt/<name> and Claude works there (every Bash command runs here)."""
+        c = self.pc.cfg()
+        if not c["on"]:
+            raise ApiError(400, "connect this computer first: ⚙ → Computers → Connect this computer")
+        local = os.path.abspath(os.path.expanduser(clean_str(b.get("local"), 1000, "folder", required=True)))
+        if not os.path.isdir(local):
+            raise ApiError(400, f"no such folder on this computer: {local}")
+        name = clean_str(b.get("name"), 64, "name") or os.path.basename(local.rstrip("/\\"))
+        if any(p["name"] == name for p in self.projects(max_age=0)):
+            raise ApiError(409, f"there is already a project named {name}")
+        remote = "~/.simab-mnt/" + name
+        item = self.store.add_manual({"name": name, "local": local, "remote": remote})
+        with self.store.lock:
+            self.store.data["projects"].setdefault(name, {})["localOnly"] = c["id"]
+            self.store.save()
+        self.invalidate()
+        remote_python(self.conf, PC_ADMIN_PY, ["builds", remote, "local"])
+        self._pc_cache = None
+        mounts = self.pc.mount([name]) if self.pc.state == "connected" else {}
+        return {"project": item, "mount": mounts.get(name, "")}
+
+    def pc_forget_local(self, name: str):
+        """Removing a Local only project: its mount leaves the server (the files stay on the computer)."""
+        p = next((x for x in self.projects(max_age=0) if x["name"] == name and x.get("localOnly")), None)
+        if not p:
+            return
+        self.pc.unmount([p])
+        try:
+            remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], "server"])
+        except ApiError:
+            pass
+        with self.store.lock:
+            (self.store.data["projects"].get(name) or {}).pop("localOnly", None)
+            self.store.save()
+        self._pc_cache = None
 
     def pc_devices(self, cached=False) -> dict:
         """The computers of this server user (from the server) + which projects build on them.
@@ -9189,6 +9782,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if method == "POST" and path == "/pc/run":         # onpc on the server, through the ssh link
                 return self.app.pc.serve_run(self)
+            if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
+                return self.app.pc.serve_sftp(self)
             if method == "GET" and path == "/ws":
                 return self._websocket(query)
             if path.startswith("/api/"):
@@ -9283,6 +9878,7 @@ class Handler(BaseHTTPRequestHandler):
             app.invalidate()
             return {"project": item}
         if route == ("DELETE", "manual") and len(parts) == 2:
+            app.pc_forget_local(parts[1])
             app.store.remove_manual(parts[1])
             app.invalidate()
             return {"ok": True}

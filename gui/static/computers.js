@@ -36,6 +36,13 @@
   function buildState(name, d) {
     d = d || info;
     if (!d || !d.builds || !d.builds[name]) return null;
+    if (d.builds[name] === 'local') {               // Local only: the files live on one computer
+      var pr = (S.projects || []).filter(function (x) { return x.name === name; })[0] || {};
+      var dev = ((d.devices) || []).filter(function (x) { return x.id === pr.localOnly; })[0];
+      var who = dev ? dev.name : 'its computer';
+      return dev && dev.online ? { on: 'local', ok: true, text: 'Lives on ' + who + ' — Claude works on it there' }
+        : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
+    }
     if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Builds run on the server' };
     var on = online(d);
     return on.length ? { on: 'computers', ok: true, text: 'Builds run on ' + on.map(function (x) { return x.name; }).join(', ') }
@@ -56,13 +63,13 @@
   // the sidebar: only projects that build on the computers get a mark (green: works, red: it will stop)
   function badge(p) {
     var st = buildState(p.name);
-    if (!st || st.on !== 'computers') return null;
+    if (!st || st.on === 'server') return null;
     return h('span', { class: 'gb pcb ' + (st.ok ? 'ok' : 'bad'), title: st.text + ' — click for Computers',
       onclick: function (e) { e.stopPropagation(); open(p.name); } }, st.ok ? '⌂ PC' : '⌂ off');
   }
   function menuLabel(name) {
     var st = buildState(name);
-    return !st ? '' : st.on === 'server' ? 'Server' : st.ok ? 'My computers' : 'My computers · none on';
+    return !st ? '' : st.on === 'server' ? 'Server' : st.on === 'local' ? (st.ok ? 'Local only' : 'Local only · off') : st.ok ? 'My computers' : 'My computers · none on';
   }
 
   // ------------------------------------------------------------------ the dialog
@@ -152,10 +159,13 @@
             toast(n + ': builds run on ' + (v === 'server' ? 'the server' : 'your computers'), 'ok');
           }).catch(fail);
         }
+        var mountErr = st.on === 'local' && me && me.mounts && me.mounts[n] && me.mounts[n] !== 'ok' ? me.mounts[n] : '';
         var row = h('div', { class: 'pc-build' + (n === focusProject ? ' focus' : '') },
           h('div', { class: 'pc-build-main' }, h('b', null, n),
-            h('small', { class: st.on === 'server' ? 'muted' : st.ok ? 'ok' : 'err' }, (st.on === 'server' ? '' : st.ok ? '● ' : '⚠ ') + st.text)),
-          h('div', { class: 'pc-seg' },
+            h('small', { class: st.on === 'server' ? 'muted' : st.ok ? 'ok' : 'err' }, (st.on === 'server' ? '' : st.ok ? '● ' : '⚠ ') + st.text),
+            mountErr ? h('small', { class: 'err' }, '⚠ the server could not open it: ' + mountErr, ' ',
+              h('button', { class: 'btn sm', onclick: function () { api('POST', 'pc/mount').then(load).catch(fail); } }, 'Try again')) : null),
+          st.on === 'local' ? h('span', { class: 'pc-tag' }, 'Local only') : h('div', { class: 'pc-seg' },
             h('button', { class: b[n] === 'server' ? 'on' : '', onclick: function () { pick('server'); } }, 'Server'),
             h('button', { class: b[n] === 'computers' ? 'on' : '', onclick: function () { pick('computers'); } }, 'My computers')));
         if (n === focusProject) setTimeout(function () { if (row.scrollIntoView) row.scrollIntoView({ block: 'center' }); }, 50);
@@ -298,7 +308,14 @@
       views.forEach(function (x) { x.close(DONE[v]); });
       delete shown[a.id];
     }
-    views = tabs.map(function (t) { return t.pcAskCard(a, answer); });
+    var modes = { list: MODES, value: mode || 'new', set: function (v) {
+      api('POST', 'pc', { mode: v }).then(function () {
+        toast('This computer: ' + MODES.filter(function (m) { return m[0] === v; })[0][1], 'ok');
+        // the new mode lets this command run without a question → run it now
+        if (v === 'all' || (v === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; }))) answer('once');
+      }).catch(fail);
+    } };
+    views = tabs.map(function (t) { return t.pcAskCard(a, answer, modes); });
     shown[a.id] = { a: a, left: views.map(function (x) { return x.left; }), close: function (text) { views.forEach(function (x) { x.close(text); }); } };
   }
 

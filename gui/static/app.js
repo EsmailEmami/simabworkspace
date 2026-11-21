@@ -3225,8 +3225,16 @@
     p.commands.forEach(function (c0) {
       var c = onPc ? Object.assign({}, c0, { where: 'local' }) : c0;      // its run commands run there too
       if (S.web && c.where !== 'server') {
-        body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — ' + APP_ONLY },
-          h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'loc')));
+        // a command of your computer: from here through Computers while it is connected
+        var C = window.SWComputers, rx = C && C.remoteRunning(p, c);
+        if (!C || !S.remoteOnline) {
+          body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — it is not connected (open Simab Workspace there)' },
+            h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc off')));
+          return;
+        }
+        body.append(h('div', { class: 'cmd' + (rx ? ' running' : ''), title: c.cmd + '\nruns on your computer' + (rx ? ' (' + (rx.devName || '') + ') — click: output / stop' : ' — click to start it there'),
+          onclick: function () { C.remoteRun(p, c); } },
+          h('span', { class: 'ic' }, rx ? '■' : '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc')));
         return;
       }
       var t = runningCmd(p.name, c.id);

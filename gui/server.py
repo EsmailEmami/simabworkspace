@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.59.0"
+VERSION = "1.60.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6071,6 +6071,22 @@ if sys.argv[1] == "asks":
         for a in r.get("asks") or []:
             a.update(dev=d["id"], devName=d.get("name") or "")
             out["asks"].append(a)
+        for x in r.get("bg") or []:
+            x.update(dev=d["id"], devName=d.get("name") or "")
+            out.setdefault("bg", []).append(x)
+elif sys.argv[1] == "call":          # call DEV|"" JSON: that computer, or the first that knows it (not 404)
+    body = json.loads(sys.argv[3])
+    out = {"error": "none of your computers is connected"}
+    for d in devs:
+        if sys.argv[2] and d["id"] != sys.argv[2]:
+            continue
+        try:
+            r = call(d, body)
+        except (OSError, ValueError):
+            continue
+        out = r
+        if not (r.get("error") or "").startswith(("this project is not", "this run command is not", "not running here")):
+            break
 elif sys.argv[1] == "answer":
     d = next((x for x in devs if x["id"] == sys.argv[2]), None)
     out = call(d, {"op": "answer", "id": sys.argv[3], "answer": sys.argv[4]}) if d else {"error": "no such computer"}
@@ -6631,7 +6647,7 @@ class PcHub:
                 pc_kill(x["_p"])
 
     def bg_list(self) -> list:
-        return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in self.bg.values()]
+        return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in list(self.bg.values())]
 
     def serve_remote(self, h):
         """POST /pc/remote {op: asks | answer} from PC_BRIDGE_PY: the web version / the phone."""
@@ -6642,7 +6658,34 @@ class PcHub:
             return h._json(403, {"error": "this computer does not know this server user"})
         b = h._body()
         if b.get("op") == "asks":
-            return h._json(200, {"asks": self.pending()["asks"]})
+            return h._json(200, {"asks": self.pending()["asks"], "bg": self.bg_list()})
+        if b.get("op") == "run":                 # a run command of a project here, started from the phone / web
+            p = next((x for x in self.app.projects() if x["name"] == b.get("project") and x.get("localExists")), None)
+            if not p:
+                return h._json(404, {"error": "this project is not on " + c["name"]})
+            cmd = self.app.command(p["name"], b.get("id") or "")
+            if not cmd:
+                return h._json(404, {"error": "this run command is not on " + c["name"]})
+            cwd = os.path.join(p["local"], *[x for x in (cmd.get("cwd") or "").split("/") if x and x != ".."])
+            if not os.path.isdir(cwd):
+                return h._json(404, {"error": f"{cwd} is not on {c['name']}"})
+            name = "run-" + cmd["id"]
+            x = self.bg.get(name)
+            if x and x["state"] == "running":
+                return h._json(409, {"error": cmd["name"] + " is already running on " + c["name"]})
+            self.start_bg(name, p["name"], cmd["cmd"], cwd)
+            self.bg[name]["label"] = cmd["name"]
+            return h._json(200, {"name": name, "dev": c["id"]})
+        if b.get("op") == "log":
+            x = self.bg.get(b.get("name") or "")
+            if not x:
+                return h._json(404, {"error": "not running here"})
+            return h._json(200, {"name": x["name"], "state": x["state"], "code": x["code"], "url": x["url"], "out": x["out"][-60000:]})
+        if b.get("op") == "stop":
+            if b.get("name") not in self.bg:
+                return h._json(404, {"error": "not running here"})
+            self.stop_bg(b["name"])
+            return h._json(200, {"ok": True})
         if b.get("op") == "answer":
             try:
                 return h._json(200, self.answer(b.get("id"), b.get("answer")))
@@ -9378,6 +9421,16 @@ class App:
             return self.pc_devices()
         if key == ("GET", "remote-asks"):
             return self.pc_remote_asks()
+        if key in (("POST", "remote-run"), ("POST", "remote-log"), ("POST", "remote-stop")):
+            op = key[1].split("-")[1]
+            call = {"op": op, "project": str(body.get("project") or ""), "id": str(body.get("id") or ""), "name": str(body.get("name") or "")}
+            dev = body.get("dev") or ""
+            if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
+                raise ApiError(400, "invalid computer")
+            r = remote_python(self.conf, PC_BRIDGE_PY, ["call", dev, json.dumps(call)])
+            if not isinstance(r, dict) or r.get("error"):
+                raise ApiError(409 if "already running" in str((r or {}).get("error")) else 404, (r or {}).get("error") or "no answer")
+            return r
         if key == ("POST", "remote-answer"):
             dev, aid, ans = body.get("dev"), body.get("id"), body.get("answer")
             if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev) and isinstance(aid, str) and re.fullmatch(r"[0-9a-f]{12}", aid)
@@ -9483,7 +9536,7 @@ class App:
         tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.sessions.items()) if (x.spec or {}).get("relay")}
         for a in r.get("asks") or []:
             a["session"] = tabs.get(a.get("chat") or "", "")
-        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time()}
+        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time(), "bg": r.get("bg") or []}
 
     def pc_watch_loop(self):
         """Web version: a question on one of the user's computers → a phone notification (when nobody

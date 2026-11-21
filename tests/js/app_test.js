@@ -177,6 +177,9 @@ global.fetch = (url, opts) => {
     { id: 'login', ok: false, title: 'Claude signed in on the server', detail: 'not signed in yet', fix: 'login' },
     { id: 'sshfs', ok: false, optional: true, title: 'sshfs on the server (Local only projects)', detail: 'not yet', fix: 'sshfs' }] };
   else if (url === '/api/setup-check/sshfs') { fakePc.sshfsFetched = true; res = { ok: true }; }
+  else if (url === '/api/pc/remote-run') { fakePc.remoteRun = body; res = { name: 'run-' + body.id, dev: 'a1b2c3d4e5f6' }; }
+  else if (url === '/api/pc/remote-log') res = { name: body.name, state: 'running', code: null, url: 'http://localhost:4300', out: 'compiled ok' };
+  else if (url === '/api/pc/remote-stop') { fakePc.remoteStopped = body; res = { ok: true }; }
   else if (url === '/api/pc/pair') res = { code: 'C0de_' + 'x'.repeat(28), until: Date.now() / 1000 + 600 };
   else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
@@ -1800,6 +1803,31 @@ const tests = {
     q('button', card).find((b) => b.textContent === 'Allow once').click(); await settle();
     assert.deepStrictEqual(fakePc.remoteAnswers.pop(), { dev: 'a1b2c3d4e5f6', id: 'abcdefabcdef', answer: 'once' });
     SW.closeTab(chat, true); await settle();
+    // a run command of the computer: off while it is not connected, ▶ starts it there from the phone
+    const cmdRow = () => q('.cmd').find((x) => /web/.test(x.querySelector('.nm').textContent));
+    fakePc.remote = { asks: [], online: 0, now: Date.now() / 1000, bg: [] };
+    await global.SWComputers.webPoll(); await settle();
+    assert.ok(cmdRow().classList.contains('off'));
+    assert.match(cmdRow().textContent, /pc off/);
+    fakePc.remote = { asks: [], online: 1, now: Date.now() / 1000, bg: [] };
+    await global.SWComputers.webPoll(); await settle();
+    assert.ok(!cmdRow().classList.contains('off'));
+    cmdRow().click(); await settle();
+    assert.deepStrictEqual(fakePc.remoteRun, { project: 'cheshmeh', id: 'c1' });
+    const out = q('.modal').pop();
+    assert.match(out.textContent, /compiled ok/);
+    assert.match(out.textContent, /localhost:4300 \(on that computer\)/);
+    q('button', out).find((b) => /Stop/.test(b.textContent)).click(); await settle();
+    assert.deepStrictEqual(fakePc.remoteStopped, { dev: 'a1b2c3d4e5f6', name: 'run-c1' });
+    // running → the row shows ■ and opens the output instead of starting it again
+    fakePc.remote = { asks: [], online: 1, now: Date.now() / 1000, bg: [{ name: 'run-c1', project: 'cheshmeh', state: 'running', dev: 'a1b2c3d4e5f6', devName: 'laptop' }] };
+    await global.SWComputers.webPoll(); await settle();
+    assert.match(cmdRow().textContent, /■/);
+    fakePc.remoteRun = null;
+    cmdRow().click(); await settle();
+    assert.strictEqual(fakePc.remoteRun, null, 'not started twice');
+    document.body.querySelector('#modal-root').replaceChildren();
+    fakePc.remote = null;
     S.web = false;
   },
 

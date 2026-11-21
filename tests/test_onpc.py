@@ -309,6 +309,29 @@ class EndToEnd(unittest.TestCase):
         _, out, _ = self.onpc("--list")
         self.assertIn("offline", out)
 
+    def test_phone_runs_a_command_of_this_computer(self):
+        cmd = {"id": "c1", "name": "web", "cmd": "echo started-here; sleep 30", "where": "local", "cwd": "web", "url": ""}
+        env = dict(os.environ, HOME=self.home)
+
+        def bridge(*args):
+            r = subprocess.run([sys.executable, "-c", sw.PC_BRIDGE_PY] + list(args), env=env, capture_output=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+        with mock.patch.object(self.app, "command", side_effect=lambda p, cid: dict(cmd) if (p, cid) == ("proj", "c1") else None):
+            self.assertIn("not on", bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "nope"}))["error"])
+            r = bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "c1"}))
+            self.assertEqual((r["name"], r["dev"]), ("run-c1", self.hub.cfg()["id"]))
+            x = self.hub.bg["run-c1"]
+            self.assertTrue(wait_for(lambda: "started-here" in x["out"], 5))
+            self.assertEqual(x["_p"].args[-1], cmd["cmd"])
+            self.assertIn("already running", bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "c1"}))["error"])
+            listed = bridge("asks")["bg"]
+            self.assertEqual((listed[0]["name"], listed[0]["state"], listed[0]["devName"]), ("run-c1", "running", "laptop"))
+            log = bridge("call", r["dev"], json.dumps({"op": "log", "name": "run-c1"}))
+            self.assertIn("started-here", log["out"])
+            self.assertEqual(bridge("call", r["dev"], json.dumps({"op": "stop", "name": "run-c1"})), {"ok": True})
+            self.assertTrue(wait_for(lambda: x["_p"].poll() is not None, 8), "stopped on the computer")
+
     def test_a_project_can_be_tied_to_one_computer(self):
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "ffffffffffff"}))
         code, out, err = self.onpc("echo x")
@@ -475,7 +498,7 @@ class LocalOnly(EndToEnd):
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
     test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
     test_my_computers_project_runs_every_command_without_our_question = test_web_and_phone_see_and_answer_the_question = None
-    test_a_project_can_be_tied_to_one_computer = None
+    test_a_project_can_be_tied_to_one_computer = test_phone_runs_a_command_of_this_computer = None
 
     def setUp(self):
         super().setUp()

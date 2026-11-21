@@ -581,11 +581,52 @@
   }
   setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
 
+  // web version: run commands of a computer (its "loc" ones) from the phone, with live output and stop
+  var remoteKey = '';
+  function remoteRunning(p, c) {
+    return (S.remoteBg || []).filter(function (x) { return x.name === 'run-' + c.id && x.project === p.name && x.state === 'running'; })[0];
+  }
+  function remoteRun(p, c) {
+    var x = remoteRunning(p, c);
+    if (x) return remoteLog(x.dev, x.name, c.name, x.devName);
+    return api('POST', 'pc/remote-run', { project: p.name, id: c.id }).then(function (r) {
+      toast(c.name + ' started on your computer', 'ok');
+      webPoll();
+      return remoteLog(r.dev, r.name, c.name, '');
+    }).catch(fail);
+  }
+  function remoteLog(dev, name, label, devName) {
+    var pre = h('pre', { class: 'pc-out', style: 'min-height:200px' }, 'loading…');
+    var head = h('span', { class: 'muted' });
+    var stop = h('button', { class: 'btn danger', onclick: function () {
+      api('POST', 'pc/remote-stop', { dev: dev, name: name }).then(function () { toast(label + ' stopped', 'ok'); load(); webPoll(); }).catch(fail);
+    } }, '■ Stop');
+    var md = SW.openModal({ title: '▶ ' + label + (devName ? ' · on ' + devName : ' · on your computer'), size: 'wide', body: h('div', { class: 'rr' }, head, pre),
+      foot: [stop, h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+    function load() {
+      return api('POST', 'pc/remote-log', { dev: dev, name: name }).then(function (d) {
+        head.textContent = d.state === 'running' ? 'running' + (d.url ? ' · ' + d.url + ' (on that computer)' : '') : d.state + (d.code != null ? ' · exit ' + d.code : '');
+        stop.disabled = d.state !== 'running';
+        var bottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+        pre.textContent = d.out || '(no output yet)';
+        if (bottom) pre.scrollTop = pre.scrollHeight;
+      }).catch(function (e) { head.textContent = e.message || String(e); });
+    }
+    var t = setInterval(load, 1500);
+    md.onclose = function () { clearInterval(t); };
+    load();
+    return md;
+  }
+
   // web version: the questions of the user's computers, in the chat that asks (or one toast)
   function webPoll() {
     if (!S.web) return Promise.resolve();
     return api('GET', 'pc/remote-asks').then(function (x) {
       var now = x.now || Date.now() / 1000, openIds = {};
+      var key = JSON.stringify([x.online, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev]; })]);
+      S.remoteOnline = x.online || 0;
+      S.remoteBg = x.bg || [];
+      if (key !== remoteKey) { remoteKey = key; if (SW.renderProjects) SW.renderProjects(); }
       (x.asks || []).forEach(function (a) { openIds[a.id] = 1; if (!shown[a.id]) ask(a, ''); });
       Object.keys(shown).forEach(function (id) {
         var s = shown[id];
@@ -672,6 +713,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

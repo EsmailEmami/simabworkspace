@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.61.3"
+VERSION = "1.62.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1059,6 +1059,8 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     if kind == "pcterm":                    # a terminal of the user's computer (Computers), through the server
         c = conf.with_endpoint(None, None, None)
         script = 'exec python3 "$HOME/.local/bin/onpc" --term ' + shlex.quote(pname)
+        if spec.get("_ticket"):                         # one use, a minute: onpc hands it to the computer at once
+            script += " --ticket " + shlex.quote(spec["_ticket"])
         return {"argv": ssh_base(c, multiplex=bool(s.get("sshMultiplex"))) + ["-tt", c.target, posix_sh(script)],
                 "cwd": os.path.expanduser("~"), "title": (pname or "home") + " · your computer", "env": {},
                 "spec": {"kind": kind, "project": pname, "where": "server", "cmdId": "", "claudeMode": "new", "slot": 0}, "url": ""}
@@ -5431,7 +5433,12 @@ PC_OUTPUTS = ("chat", "panel")
 PC_ANSWERS = ("once", "always", "hour", "deny")
 PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "allow": [],
               "deny": ["sudo *", "git push*", "rm -rf /*", "rm -rf ~*"], "projects": [], "always": {},
-              "output": "chat", "autoOpen": False}
+              "output": "chat", "autoOpen": False,
+              "trusted": None,        # projects whose hooked commands follow the chat: set HERE only (None = not yet taken over)
+              "mfa": "", "mfaOn": False, "mfaStep": 0}   # this computer's own two-step key: the phone unlocks it
+PC_UNLOCK_TTL = 3600     # an MFA unlock from the phone / web: terminal, run commands, answers — no limits for 1 h
+PC_TICKET_TTL = 60       # one terminal of the web version per ticket
+PC_MFA_FAILS = 5         # wrong codes per 15 minutes before unlocking is refused
 PC_ID_RE = re.compile(r"[0-9a-f]{12}")
 PC_HINT = (
     "This project's commands run on the user's own computer, not on this server. The files here are "
@@ -5639,8 +5646,9 @@ def sftp(dev_id, project):
     return 0
 
 
-def term(project):
+def term(project, ticket=""):
     """A terminal of the user's computer, in this one (the web version's tab runs this over ssh -tt).
+    The computer opens it only with a one-time ticket of an MFA unlock (the web version gets one).
     To the computer: b"d"+len+keys, b"r"+cols+rows; back: what the terminal prints."""
     import select, termios, tty
     cols, rows = 80, 24
@@ -5648,8 +5656,8 @@ def term(project):
         cols, rows = os.get_terminal_size(0)
     except OSError:
         pass
-    body = json.dumps({"project": project, "cols": cols, "rows": rows}).encode()
-    s = None
+    body = json.dumps({"project": project, "cols": cols, "rows": rows, "ticket": ticket}).encode()
+    s, why = None, ""
     for d in [x for x in devices() if x["online"]]:
         s = reach(d)
         if s is None:
@@ -5665,10 +5673,16 @@ def term(project):
             head += c
         if b" 200 " in head.split(b"\r\n")[0] + b" ":
             break
+        if b" 403 " in head.split(b"\r\n")[0] + b" ":
+            try:
+                s.settimeout(3)
+                why = json.loads(s.recv(65536).decode("utf-8", "replace") or "{}").get("error") or why
+            except (OSError, ValueError):
+                pass
         s.close()
         s = None
     if s is None:
-        sys.stderr.write("onpc: none of your connected computers has %s\r\n" % (project or "a home folder"))
+        sys.stderr.write("onpc: %s\r\n" % (why or "none of your connected computers has %s" % (project or "a home folder")))
         return 255
     old = termios.tcgetattr(0) if os.isatty(0) else None
     if old:
@@ -5773,7 +5787,9 @@ def bg(body):
 
 def main(a):
     if a[:1] == ["--term"]:
-        return term(a[1] if len(a) > 1 else "")
+        t = a[a.index("--ticket") + 1] if "--ticket" in a[:-1] else ""
+        rest = [x for i, x in enumerate(a[1:], 1) if x != "--ticket" and a[i - 1] != "--ticket"]
+        return term(rest[0] if rest else "", t)
     if a[:1] == ["--bg"] and len(a) >= 3:
         return bg({"op": "start", "name": a[1], "cmd": a[2] if len(a) == 3 else " ".join(shlex.quote(x) for x in a[2:])})
     if a[:1] in (["--logs"], ["--stop"]) and len(a) >= 2:
@@ -6146,8 +6162,8 @@ if sys.argv[1] == "asks":
         for x in r.get("bg") or []:
             x.update(dev=d["id"], devName=d.get("name") or "")
             out.setdefault("bg", []).append(x)
-elif sys.argv[1] == "call":          # call DEV|"" JSON: that computer, or the first that knows it (not 404)
-    body = json.loads(sys.argv[3])
+elif sys.argv[1] == "call":          # call DEV|"" [JSON]: that computer, or the first that knows it (not 404)
+    body = json.loads(sys.argv[3]) if len(sys.argv) > 3 else json.load(sys.stdin)   # stdin: tokens stay out of ps
     out = {"error": "none of your computers is connected"}
     for d in devs:
         if sys.argv[2] and d["id"] != sys.argv[2]:
@@ -6325,14 +6341,20 @@ def pc_match(seg: str, patterns) -> bool:
     return any(isinstance(p, str) and p.strip() and fnmatch.fnmatchcase(seg, p.strip()) for p in patterns or [])
 
 
+def pc_guard(c: dict, project: str, cmd: str) -> str:
+    """Why the allowed projects / the deny list refuse it ("" = they do not). Applies to every command."""
+    if c.get("projects") and project not in c["projects"]:
+        return f"project {project} may not run commands on this computer (Settings → Computers)"
+    bad = [s for s in pc_segments(cmd) or [cmd.strip()] if pc_match(s, c.get("deny"))]
+    return f"“{bad[0]}” is on the deny list of this computer (Settings → Computers)" if bad else ""
+
+
 def pc_decide(c: dict, project: str, cmd: str, hour: dict, now: float):
     """→ ("allow" | "ask" | "deny", why). Deny list and allowed projects win over everything."""
-    if c.get("projects") and project not in c["projects"]:
-        return "deny", f"project {project} may not run commands on this computer (Settings → Computers)"
+    why = pc_guard(c, project, cmd)
+    if why:
+        return "deny", why
     segs = pc_segments(cmd) or [cmd.strip()]
-    bad = [s for s in segs if pc_match(s, c.get("deny"))]
-    if bad:
-        return "deny", f"“{bad[0]}” is on the deny list of this computer (Settings → Computers)"
     mode = c.get("mode")
     if mode == "all":
         return "allow", ""
@@ -6397,6 +6419,10 @@ class PcHub:
         self.bg = {}                   # dev servers here (onpc --bg): name -> info; kept when the link drops
         self.net = {"rtt": None, "down": 0.0, "up": 0.0}
         self._net_thread = None
+        self.unlocks = {}              # MFA unlocks from the phone / web: id -> {id, hash, by, at, until}
+        self.tickets = {}              # one-time terminal tickets: hash -> {unlock, project, until}
+        self.terms = {}                # terminals opened from the server: id -> {id, unlock, project, at, by, proc}
+        self.mfa_fails = collections.deque()
 
     # settings ---------------------------------------------------------------
     def cfg(self) -> dict:
@@ -6412,9 +6438,19 @@ class PcHub:
                 c["name"] = (socket.gethostname() or "computer").split(".")[0][:40]
             return c
 
+    def trust(self, names, on: bool):
+        """Projects whose hooked commands follow the chat ("same as chat"): only what was chosen on THIS computer."""
+        names = [names] if isinstance(names, str) else list(names)
+        with self.lock:
+            c = self.cfg()
+            t = [x for x in (c.get("trusted") or []) if x not in names] + (names if on else [])
+            c["trusted"] = t
+            self.app.store.db.put("pc", c)
+
     def public(self) -> dict:
         c = self.cfg()
-        c.pop("secret", None)
+        for k in ("secret", "mfa", "mfaStep"):
+            c.pop(k, None)
         return {"config": c, "state": self.state, "error": self.error, "since": self.since, "os": pc_os(),
                 "mounts": dict(self.mounts)}
 
@@ -6735,6 +6771,10 @@ class PcHub:
             if not p:
                 return h._json(404, {"error": "this project is not on " + c["name"]})
             cwd = p["local"]
+        u = self.take_ticket(b.get("ticket"), b.get("project") or "")
+        if not u:                       # only a terminal the phone / web unlocked with this computer's MFA code
+            self.audit("term-refused", "terminal without an unlock" + (" in " + b["project"] if b.get("project") else ""))
+            return h._json(403, {"error": f"unlock {c['name']} with your MFA code first (Computers in the web version)"})
         cols = max(20, min(int(b.get("cols") or 80), 500))
         rows = max(5, min(int(b.get("rows") or 24), 300))
         argv = local_shell_argv(local_shell(self.app.store.settings))
@@ -6751,6 +6791,10 @@ class PcHub:
             rd = lambda n=65536: os.read(master, n)
             wr = lambda d: os.write(master, d)
             rs = lambda c2, r2: set_winsize(master, r2, c2)
+        tid = secrets.token_hex(6)
+        with self.lock:
+            self.terms[tid] = {"id": tid, "unlock": u["id"], "project": b.get("project") or "", "at": time.time(), "by": u["by"], "proc": proc}
+        self.audit("term", "terminal opened in " + (b.get("project") or "home"), u["by"])
         h.send_response(200)
         h.send_header("Connection", "close")
         h.end_headers()
@@ -6795,6 +6839,9 @@ class PcHub:
         finally:
             if proc.poll() is None:
                 pc_kill(proc)
+            with self.lock:
+                self.terms.pop(tid, None)
+            self.audit("term-end", "terminal closed in " + (b.get("project") or "home"), u["by"])
             if not IS_WIN:
                 try:
                     os.close(master)
@@ -6809,8 +6856,25 @@ class PcHub:
         if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
             return h._json(403, {"error": "this computer does not know this server user"})
         b = h._body()
+        toks = b.get("toks") if isinstance(b.get("toks"), dict) else {}
+        u = self.unlocked(toks.get(c["id"]))          # this computer's MFA unlock from that web workspace
         if b.get("op") == "asks":
             return h._json(200, {"asks": self.pending()["asks"], "bg": self.bg_list()})
+        if b.get("op") == "unlock":
+            try:
+                return h._json(200, self.unlock(b.get("code"), str(b.get("by") or "web")))
+            except ApiError as e:
+                return h._json(e.status, {"error": e.message})
+        if b.get("op") == "lock":
+            if u:
+                self.lock_out(u["id"], "locked from " + u["by"])
+            return h._json(200, {"ok": True})
+        if b.get("op") == "ticket":                # one terminal (onpc --term) for this unlock
+            if b.get("project") and not any(x["name"] == b["project"] and x.get("localExists") for x in self.app.projects()):
+                return h._json(404, {"error": "this project is not on " + c["name"]})
+            if not u:
+                return h._json(403, {"error": f"unlock {c['name']} with your MFA code first", "locked": True})
+            return h._json(200, {"ticket": self.ticket(u, str(b.get("project") or "")), "dev": c["id"]})
         if b.get("op") == "run":                 # a run command of a project here, started from the phone / web
             p = next((x for x in self.app.projects() if x["name"] == b.get("project") and x.get("localExists")), None)
             if not p:
@@ -6825,8 +6889,11 @@ class PcHub:
             x = self.bg.get(name)
             if x and x["state"] == "running":
                 return h._json(409, {"error": cmd["name"] + " is already running on " + c["name"]})
+            if not u:
+                return h._json(403, {"error": f"unlock {c['name']} with your MFA code first", "locked": True})
             self.start_bg(name, p["name"], cmd["cmd"], cwd)
-            self.bg[name]["label"] = cmd["name"]
+            self.bg[name].update(label=cmd["name"], unlock=u["id"])
+            self.audit("run", f"{p['name']}: {cmd['name']} — {cmd['cmd']}", u["by"])
             return h._json(200, {"name": name, "dev": c["id"]})
         if b.get("op") == "log":
             x = self.bg.get(b.get("name") or "")
@@ -6839,6 +6906,11 @@ class PcHub:
             self.stop_bg(b["name"])
             return h._json(200, {"ok": True})
         if b.get("op") == "answer":
+            if b.get("answer") != "deny" and not u:    # deny is always fine; allowing needs the unlock
+                return h._json(403, {"error": f"unlock {c['name']} with your MFA code to allow it from here", "locked": True})
+            a = self.asks.get(b.get("id")) if isinstance(b.get("id"), str) else None
+            if a and u:
+                self.audit("answer", f"{b.get('answer')}: {a['project']}: {a['cmd']}", u["by"])
             try:
                 return h._json(200, self.answer(b.get("id"), b.get("answer")))
             except ApiError as e:
@@ -6898,16 +6970,20 @@ class PcHub:
         if not os.path.isdir(local):
             return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
         paths = []
+        verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
         if project.get("localOnly") or b.get("hooked") is True:
-            # Local only / My computers: the hook sends every Bash command here, so Claude's own permission
-            # modes already decided; the server's paths mean this computer's folder, and back in the output
+            # Local only / My computers: the hook sends every Bash command here; the server's paths mean
+            # this computer's folder, and back in the output. Claude's own modes decide ("same as chat")
+            # only for projects marked HERE — "hooked" comes from the server, anyone there can send it.
             lroot = project["local"].replace("\\", "/") if IS_WIN else project["local"]
             for sv in {root, (self.home + project["remote"][1:]) if self.home and project["remote"].startswith("~/") else ""} - {""}:
                 cmd = cmd.replace(sv, lroot)
             paths = [(project["local"].encode(), root.encode()), (lroot.encode(), root.encode())]
-            verdict, why = "allow", ""
-        else:
-            verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
+            if c.get("mode") == "chat" and (project.get("localOnly") or project["name"] in (c.get("trusted") or [])):
+                why = pc_guard(c, project["name"], cmd)
+                verdict = "deny" if why else "allow"
+            else:
+                verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
         chat = b.get("chat") if isinstance(b.get("chat"), str) and RELAY_KEY_RE.fullmatch(b.get("chat") or "") else ""
         run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local, "chat": chat,
                "start": time.time(), "end": 0, "code": None, "state": "asking" if verdict == "ask" else "running", "out": ""}
@@ -7015,6 +7091,140 @@ class PcHub:
         elif ans == "hour":
             self.hour[project] = time.time() + 3600
         return ans != "deny"
+
+    # phone / web access: unlocked with THIS computer's own MFA code ------------------
+    # The server only carries the code and the token; the key and the check stay here, so nothing
+    # on the server (Claude in a chat included) can open a terminal or answer for you on its own.
+    def mfa_setup(self) -> dict:
+        with self.lock:
+            c = self.cfg()
+            if c.get("mfaOn"):
+                raise ApiError(409, "phone access is already on")
+            c["mfa"], c["mfaStep"] = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="), 0
+            self.app.store.db.put("pc", c)
+        uri = ("otpauth://totp/" + urllib.parse.quote("Simab computer:" + c["name"]) + "?secret=" + c["mfa"]
+               + "&issuer=Simab%20Workspace")
+        return {"secret": c["mfa"], "uri": uri}
+
+    def mfa_check(self, code, at: float = None) -> bool:
+        code = str(code or "").replace(" ", "")
+        with self.lock:
+            c = self.cfg()
+            if not c.get("mfa") or not re.fullmatch(r"\d{6}", code):
+                return False
+            step = int((at or time.time()) // 30)
+            for st in (step, step - 1, step + 1):
+                if st > int(c.get("mfaStep") or 0) and hmac.compare_digest(totp_code(c["mfa"], st), code):
+                    c["mfaStep"] = st                            # a code works once
+                    self.app.store.db.put("pc", c)
+                    return True
+        return False
+
+    def mfa_enable(self, code, on: bool) -> dict:
+        if not self.mfa_check(code):
+            raise ApiError(400, "wrong code")
+        with self.lock:
+            c = self.cfg()
+            c["mfaOn"] = bool(on)
+            if not on:
+                c["mfa"], c["mfaStep"] = "", 0
+            self.app.store.db.put("pc", c)
+        if not on:
+            self.lock_out("all", "phone access turned off")
+        self.audit("mfa", "phone access " + ("on" if on else "off"))
+        return self.remote_access()
+
+    def unlock(self, code, by: str) -> dict:
+        now = time.time()
+        with self.lock:
+            while self.mfa_fails and now - self.mfa_fails[0] > 900:
+                self.mfa_fails.popleft()
+            if len(self.mfa_fails) >= PC_MFA_FAILS:
+                raise ApiError(429, "too many wrong codes — wait 15 minutes")
+        c = self.cfg()
+        if not c.get("mfaOn"):
+            raise ApiError(403, f"phone access is off on {c['name']} — turn it on there (Computers → Phone access)")
+        by = (by or "web")[:80]
+        if not self.mfa_check(code):
+            with self.lock:
+                self.mfa_fails.append(now)
+            self.audit("unlock-failed", "wrong code", by)
+            raise ApiError(403, "wrong code — check the time on your phone and try the newest code")
+        tok = secrets.token_urlsafe(32)
+        u = {"id": secrets.token_hex(6), "hash": hashlib.sha256(tok.encode()).hexdigest(), "by": by, "at": now,
+             "until": now + PC_UNLOCK_TTL}
+        with self.lock:
+            self.unlocks[u["id"]] = u
+        self.audit("unlock", "unlocked for 1 hour", by)
+        return {"token": tok, "until": u["until"], "id": u["id"]}
+
+    def unlocked(self, tok):
+        """The unlock this token belongs to (still valid) or None."""
+        if not isinstance(tok, str) or not tok:
+            return None
+        h, now = hashlib.sha256(tok.encode()).hexdigest(), time.time()
+        with self.lock:
+            for k in [k for k, u in self.unlocks.items() if u["until"] < now]:
+                del self.unlocks[k]
+            return next((u for u in self.unlocks.values() if hmac.compare_digest(u["hash"], h)), None)
+
+    def ticket(self, u: dict, project: str) -> str:
+        t = secrets.token_urlsafe(24)
+        with self.lock:
+            now = time.time()
+            for k in [k for k, x in self.tickets.items() if x["until"] < now]:
+                del self.tickets[k]
+            self.tickets[hashlib.sha256(t.encode()).hexdigest()] = {"unlock": u["id"], "project": project, "until": now + PC_TICKET_TTL}
+        return t
+
+    def take_ticket(self, t, project: str):
+        """The unlock of a valid one-time terminal ticket (used up now) or None."""
+        if not isinstance(t, str) or not t:
+            return None
+        with self.lock:
+            x = self.tickets.pop(hashlib.sha256(t.encode()).hexdigest(), None)
+            u = self.unlocks.get(x["unlock"]) if x else None
+        if not x or x["until"] < time.time() or x["project"] != project or not u or u["until"] < time.time():
+            return None
+        return u
+
+    def lock_out(self, uid: str, why: str = "disconnected here") -> dict:
+        """End an unlock (or "all"): its terminals close, its run commands stop."""
+        with self.lock:
+            gone = [u for k, u in self.unlocks.items() if uid == "all" or k == uid]
+            ids = {u["id"] for u in gone}
+            for u in gone:
+                self.unlocks.pop(u["id"], None)
+            for k in [k for k, x in self.tickets.items() if x["unlock"] in ids]:
+                del self.tickets[k]
+            terms = [t for t in self.terms.values() if uid == "all" or t["unlock"] in ids]
+            runs = [n for n, x in self.bg.items() if x.get("unlock") and (uid == "all" or x["unlock"] in ids) and x["state"] == "running"]
+        for t in terms:
+            pc_kill(t.get("proc"))
+        for n in runs:
+            self.stop_bg(n)
+        for u in gone:
+            self.audit("lock", why, u["by"])
+        return self.remote_access()
+
+    def audit(self, kind: str, text: str, by: str = ""):
+        """What was done here from the server / the phone (kept, newest last, 300)."""
+        with self.lock:
+            log = self.app.store.db.get("pcAudit", []) or []
+            log = (log if isinstance(log, list) else [])[-299:] + [{"t": time.time(), "kind": kind, "text": str(text)[:300], "by": by[:80]}]
+            self.app.store.db.put("pcAudit", log)
+
+    def remote_access(self) -> dict:
+        """Computers → Phone access: who is in now (unlocks, terminals, run commands) and the log."""
+        self.unlocked("-")                                   # drops the expired ones
+        with self.lock:
+            unl = [{k: u[k] for k in ("id", "by", "at", "until")} for u in self.unlocks.values()]
+            terms = [{k: t[k] for k in ("id", "unlock", "project", "at", "by")} for t in self.terms.values()]
+            runs = [{"name": n, "project": x["project"], "cmd": x["cmd"], "unlock": x["unlock"], "start": x.get("start", 0)}
+                    for n, x in self.bg.items() if x.get("unlock") and x["state"] == "running"]
+        log = self.app.store.db.get("pcAudit", []) or []
+        return {"mfa": bool(self.cfg().get("mfaOn")), "unlocks": unl, "terms": terms, "runs": runs,
+                "log": list(reversed(log if isinstance(log, list) else []))[:100], "now": time.time()}
 
     def answer(self, aid, ans) -> dict:
         if ans not in PC_ANSWERS:
@@ -7885,6 +8095,7 @@ class App:
         self._share_gone = {}                    # session id -> closed because another device closed it
         self._copies_checked = False
         self.pc = PcHub(self)                    # builds on this computer (onpc)
+        self._pc_unlock = {}                     # web: computer id -> (MFA unlock token, until) — memory only
 
     @property
     def conf(self) -> ServerConf:
@@ -8293,6 +8504,8 @@ class App:
                     raise ApiError(403, "only server commands run in the web version")
         if body.get("kind") == "docker":
             body["_docker"] = self.docker_tab(body.get("project") or "", body.get("container"), body.get("action"))
+        if body.get("kind") == "pcterm" and self.web:      # the computer opens it only with a ticket of its MFA unlock
+            body["_ticket"] = self.pc_ticket(str(body.get("project") or ""))
         built = build_spec(body, self.conf, self.store, self.projects(max_age=10))
         if self.web and built["spec"]["where"] != "server":
             raise ApiError(403, "only server commands run in the web version")
@@ -9579,19 +9792,39 @@ class App:
             dev = body.get("dev") or ""
             if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
                 raise ApiError(400, "invalid computer")
-            r = remote_python(self.conf, PC_BRIDGE_PY, ["call", dev, json.dumps(call)])
+            r = self.pc_call(dev, call)
             if not isinstance(r, dict) or r.get("error"):
-                raise ApiError(409 if "already running" in str((r or {}).get("error")) else 404, (r or {}).get("error") or "no answer")
+                e = str((r or {}).get("error") or "no answer")
+                raise ApiError(409 if "already running" in e else 403 if (r or {}).get("locked") else 404, e)
             return r
         if key == ("POST", "remote-answer"):
             dev, aid, ans = body.get("dev"), body.get("id"), body.get("answer")
             if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev) and isinstance(aid, str) and re.fullmatch(r"[0-9a-f]{12}", aid)
                     and ans in PC_ANSWERS):
                 raise ApiError(400, "bad request")
-            r = remote_python(self.conf, PC_BRIDGE_PY, ["answer", dev, aid, ans])
+            r = self.pc_call(dev, {"op": "answer", "id": aid, "answer": ans})
             if isinstance(r, dict) and r.get("error"):
-                raise ApiError(404, r["error"])
+                raise ApiError(403 if r.get("locked") else 404, r["error"])
             return {"ok": True}
+        if key == ("POST", "unlock"):           # the phone: this computer's own MFA code → no limits there for 1 h
+            dev, code = body.get("dev"), str(body.get("code") or "").replace(" ", "")
+            if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)) or not re.fullmatch(r"\d{6}", code):
+                raise ApiError(400, "enter the 6-digit code")
+            r = self.pc_call(dev, {"op": "unlock", "code": code, "by": ua_label(str(body.get("by") or ""))[:60] or "web"})
+            if not isinstance(r, dict) or not r.get("token"):
+                raise ApiError(403, (r or {}).get("error") or "no answer from that computer")
+            with self.lock:
+                self._pc_unlock[dev] = (r["token"], float(r.get("until") or 0))
+            return {"unlocked": self.pc_unlocked()}
+        if key == ("POST", "lock"):
+            dev = body.get("dev")
+            if not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
+                raise ApiError(400, "invalid computer")
+            if dev in self.pc_unlocked():
+                self.pc_call(dev, {"op": "lock"})
+            with self.lock:
+                self._pc_unlock.pop(dev, None)
+            return {"unlocked": self.pc_unlocked()}
         if key == ("POST", "pair"):
             if not self.web:
                 raise ApiError(400, "make the link in the web version (it is reachable from the new computer)")
@@ -9611,6 +9844,8 @@ class App:
             if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
                 raise ApiError(400, "invalid computer")
             remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], on] + ([dev] if dev and on == "computers" else []))
+            if not self.web:
+                self.pc.trust(p["name"], on == "computers")       # chosen here: its hooked commands follow the chat
             return self.pc_devices()
         if self.web:
             raise ApiError(403, "not available in the web version")
@@ -9638,6 +9873,17 @@ class App:
             return {"name": x["name"], "state": x["state"], "url": x["url"], "out": x["out"][-60000:]}
         if key == ("POST", "answer"):
             return self.pc.answer(body.get("id"), body.get("answer"))
+        if key == ("GET", "access"):           # Phone access: who is in now + the log
+            return self.pc.remote_access()
+        if key == ("POST", "disconnect"):
+            uid = body.get("id")
+            if not (uid == "all" or (isinstance(uid, str) and re.fullmatch(r"[0-9a-f]{12}", uid))):
+                raise ApiError(400, "bad request")
+            return self.pc.lock_out(uid)
+        if key == ("POST", "mfa"):
+            if body.get("op") == "setup":
+                return self.pc.mfa_setup()
+            return self.pc.mfa_enable(body.get("code"), body.get("op") == "on")
         if key == ("GET", "run") and len(rest) == 2:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")
@@ -9688,7 +9934,36 @@ class App:
         tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.sessions.items()) if (x.spec or {}).get("relay")}
         for a in r.get("asks") or []:
             a["session"] = tabs.get(a.get("chat") or "", "")
-        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time(), "bg": r.get("bg") or []}
+        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time(), "bg": r.get("bg") or [],
+                "unlocked": self.pc_unlocked()}
+
+    def pc_unlocked(self) -> dict:
+        """Web version: the computers this workspace unlocked with their MFA code → until when. The tokens
+        live only in this process's memory (never on disk, never in a command line)."""
+        now = time.time()
+        with self.lock:
+            d = self._pc_unlock
+            for k in [k for k, v in d.items() if v[1] < now]:
+                del d[k]
+            return {k: v[1] for k, v in d.items()}
+
+    def pc_call(self, dev: str, body: dict):
+        """PC_BRIDGE_PY call with this workspace's unlock tokens (over stdin)."""
+        self.pc_unlocked()
+        with self.lock:
+            body = dict(body, toks={k: v[0] for k, v in self._pc_unlock.items()})
+        return remote_python(self.conf, PC_BRIDGE_PY, ["call", dev or ""], stdin=json.dumps(body).encode())
+
+    def pc_ticket(self, project: str) -> str:
+        """A one-time terminal ticket from an unlocked computer that has the project, else "" (onpc says why)."""
+        for dev in self.pc_unlocked():
+            try:
+                r = self.pc_call(dev, {"op": "ticket", "project": project})
+            except ApiError:
+                continue
+            if isinstance(r, dict) and r.get("ticket"):
+                return r["ticket"]
+        return ""
 
     def pc_watch_loop(self):
         """Web version: a question on one of the user's computers → a phone notification (when nobody
@@ -9764,6 +10039,8 @@ class App:
         r = r if isinstance(r, dict) else {}
         out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {}, "pins": r.get("pins") or {},
                "self": "" if self.web else self.pc.cfg()["id"]}
+        if not self.web and self.pc.cfg().get("trusted") is None:     # once, from an older version: keep what was chosen
+            self.pc.trust([n for n, v in out["builds"].items() if v == "computers"], True)
         self._pc_cache = (time.time(), out)
         return out
 

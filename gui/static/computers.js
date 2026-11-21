@@ -111,26 +111,76 @@
       var b = api('GET', 'pc/devices/fresh').then(function (x) { devs = x; setInfo(x); }).catch(function (e) { devs = { error: e.message || String(e) }; })
         .then(function () { checking = false; });
       var c = S.web ? Promise.resolve() : api('GET', 'pc/asks').then(function (x) { if (me) me.recent = x; });
-      return Promise.all([a, b]).then(function () { return c; }).then(render).catch(fail);
+      var d = S.web ? webPoll() : api('GET', 'pc/access').then(function (x) { acc = x; });
+      return Promise.all([a, b, d]).then(function () { return c; }).then(render).catch(fail);
     }
     timer = setInterval(function () {
       if (S.web) return;
       Promise.all([api('GET', 'pc').then(function (x) { me = Object.assign(x, { recent: me && me.recent }); }),
-        api('GET', 'pc/asks').then(function (x) { if (me) me.recent = x; })]).then(function () { renderThis(); renderRecent(); }).catch(function () {});
+        api('GET', 'pc/asks').then(function (x) { if (me) me.recent = x; }),
+        api('GET', 'pc/access').then(function (x) { acc = x; })]).then(function () { renderThis(); renderRecent(); renderAccess(); }).catch(function () {});
     }, 3000);
 
     function card(title, sub, content) {
       return h('section', { class: 'pc-card' }, h('div', { class: 'pc-card-h' }, h('b', null, title), sub ? h('span', { class: 'muted' }, sub) : null), content);
     }
-    var thisBox = h('div'), devBox = h('div'), buildBox = h('div'), ruleBox = h('div'), recentBox = h('div');
+    var thisBox = h('div'), devBox = h('div'), buildBox = h('div'), ruleBox = h('div'), recentBox = h('div'), accBox = h('div'), acc = null;
     kids(body, [
       S.web ? null : card('This computer', '', thisBox),
       card('Your computers', 'connected to this server user', devBox),
       card('Commands run on', 'per project', buildBox),
       S.web ? null : card('Permission on this computer', 'what Claude may run here', ruleBox),
+      S.web ? null : card('Phone access', 'terminal and run commands from the web version, with this computer’s own MFA code', accBox),
       S.web ? null : card('Recent commands here', '', recentBox)]);
 
-    function render() { renderThis(); renderDevs(); renderBuilds(); renderRules(); renderRecent(); }
+    function render() { renderThis(); renderDevs(); renderBuilds(); renderRules(); renderRecent(); renderAccess(); }
+
+    // who is in from the phone / web now (each with Disconnect) and what was done from there
+    function renderAccess() {
+      if (S.web || !acc) return;
+      var off = function (id) { api('POST', 'pc/disconnect', { id: id }).then(function (x) { acc = x; renderAccess(); toast('Disconnected', 'ok'); }).catch(fail); };
+      var rows = acc.unlocks.map(function (u) {
+        var terms = acc.terms.filter(function (t) { return t.unlock === u.id; }), runs = acc.runs.filter(function (r) { return r.unlock === u.id; });
+        return h('div', { class: 'pc-dev' }, dot('on'),
+          h('div', { class: 'pc-dev-main' }, h('div', null, h('b', null, u.by || 'web')),
+            h('small', { class: 'muted' }, 'unlocked until ' + hm(u.until)
+              + terms.map(function (t) { return ' · terminal in ' + (t.project || 'home'); }).join('')
+              + runs.map(function (r) { return ' · running ' + r.project + ': ' + r.cmd; }).join(''))),
+          h('button', { class: 'btn sm danger', onclick: function () { off(u.id); } }, 'Disconnect'));
+      });
+      kids(accBox, [
+        h('div', { class: 'pc-note' }, acc.mfa
+          ? 'On — your phone unlocks this computer for 1 hour with a code of this computer: terminal, run commands, answers. Without it nothing from the server can do these (Claude in a chat included).'
+          : 'Off — nothing from the server or the web version can open a terminal here, start a run command, or allow a command from the phone.'),
+        h('div', { class: 'pc-actions', style: 'justify-content:flex-start' },
+          acc.mfa ? h('button', { class: 'btn sm', onclick: mfaOff }, 'Turn off…') : h('button', { class: 'btn sm primary', onclick: mfaSetup }, 'Turn on…'),
+          rows.length > 1 ? h('button', { class: 'btn sm danger', onclick: function () { off('all'); } }, 'Disconnect all') : null),
+        rows.length ? h('div', null, rows) : h('div', { class: 'muted' }, 'Nobody is connected from the phone / web now.'),
+        acc.log.length ? h('details', { class: 'pc-log' }, h('summary', null, 'Remote activity (' + acc.log.length + ')'),
+          acc.log.slice(0, 40).map(function (x) {
+            return h('div', { class: 'pc-run' }, h('small', { class: 'muted' }, ago(x.t, acc.now) + (x.by ? ' · ' + x.by : '')), ' ', x.text);
+          })) : null]);
+    }
+    function mfaSetup() {
+      api('POST', 'pc/mfa', { op: 'setup' }).then(function (d) {
+        var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
+        var m = SW.openModal({ title: 'Phone access', size: 'sm', body: [
+          h('p', null, '1. Add this key to the authenticator app on your phone (its own entry, not the sign-in one):'),
+          h('p', null, h('a', { class: 'btn', href: d.uri }, 'Open in authenticator app')),
+          h('p', { class: 'muted' }, 'or type the key:'),
+          h('div', { class: 'mono totp-key' }, d.secret.replace(/(.{4})/g, '$1 ').trim()),
+          h('p', null, '2. Enter the code it shows:'), code],
+          foot: [h('button', { class: 'btn', onclick: function () { m.close(); } }, 'Cancel'),
+            h('button', { class: 'btn primary', onclick: function () {
+              api('POST', 'pc/mfa', { op: 'on', code: code.value.trim() }).then(function (x) { acc = x; m.close(); renderAccess(); toast('Phone access is on', 'ok'); }).catch(fail);
+            } }, 'Turn on')] });
+      }).catch(fail);
+    }
+    function mfaOff() {
+      SW.promptDlg('Code of this computer from your authenticator app, to turn phone access off', '').then(function (c) {
+        if (c) api('POST', 'pc/mfa', { op: 'off', code: c.trim() }).then(function (x) { acc = x; renderAccess(); toast('Phone access is off', 'ok'); }).catch(fail);
+      });
+    }
 
     function renderThis() {
       if (S.web || !me) return;
@@ -161,6 +211,13 @@
             h('div', null, h('b', null, d.name || '?'), d.id === devs.self ? h('span', { class: 'pc-tag' }, 'this computer') : null),
             h('small', { class: 'muted' }, (OS[d.os] || d.os) + ' · ' + (checking ? 'checking…' : d.online ? 'connected' : 'offline')
               + (d.since && !checking ? ' · last connected ' + ago(d.since) : ''))),
+          S.web && d.online && !checking ? (unlockedUntil(d.id)
+            ? h('button', { class: 'btn sm', title: 'Unlocked until ' + hm(unlockedUntil(d.id)), onclick: function () {
+              api('POST', 'pc/lock', { dev: d.id }).then(function (r) { S.pcUnlocked = r.unlocked || {}; renderDevs(); }).catch(fail);
+            } }, 'Lock')
+            : h('button', { class: 'btn sm primary', title: 'Terminal, run commands and answers need its MFA code (1 hour)', onclick: function () {
+              unlockDlg(d.id, d.name).then(renderDevs);
+            } }, 'Unlock…')) : null,
           h('button', { class: 'btn sm danger', title: 'Forget this computer on the server', onclick: function () {
             SW.confirmDlg('Remove “' + (d.name || '?') + '”? Claude can no longer run commands there until it connects again.', 'Remove', true).then(function (ok) {
               if (ok) api('POST', 'pc/remove', { id: d.id }).then(function (x) { devs = x; setInfo(x); load(); }).catch(fail);
@@ -400,9 +457,34 @@
   }
 
   // the installed app answers its own questions; the web version through the server (PC_BRIDGE_PY)
+  // (allowing from the web needs that computer's MFA unlock; deny never does)
   function sendAnswer(a, v) {
-    return (S.web ? api('POST', 'pc/remote-answer', { dev: a.dev, id: a.id, answer: v }) : api('POST', 'pc/answer', { id: a.id, answer: v }))
-      .catch(function () { /* answered elsewhere / gone */ });
+    if (!S.web) return api('POST', 'pc/answer', { id: a.id, answer: v }).catch(function () { /* answered elsewhere / gone */ });
+    var go = function () { return api('POST', 'pc/remote-answer', { dev: a.dev, id: a.id, answer: v }).catch(function () { /* answered elsewhere / gone */ }); };
+    if (v === 'deny' || unlockedUntil(a.dev)) return go();
+    return unlockDlg(a.dev, a.devName).then(function (ok) { return ok ? go() : null; });
+  }
+
+  // web version: a computer opens its terminal, run commands and "allow" answers only after ITS OWN
+  // MFA code (Computers → Phone access on that computer); the unlock lasts 1 hour
+  function hm(t) { return new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  function unlockedUntil(dev) { var u = (S.pcUnlocked || {})[dev]; return u && u * 1000 > Date.now() ? u : 0; }
+  function unlockDlg(dev, name) {
+    return SW.promptDlg('Code of “' + (name || 'your computer') + '” from your authenticator app — unlocks it for 1 hour', '').then(function (c) {
+      if (!c) return false;
+      return api('POST', 'pc/unlock', { dev: dev, code: c.trim(), by: navigator.userAgent || '' }).then(function (r) {
+        S.pcUnlocked = r.unlocked || {};
+        toast('Unlocked for 1 hour', 'ok');
+        return true;
+      }).catch(function (e) { fail(e); return false; });
+    });
+  }
+  // → Promise<bool>: some connected computer is unlocked (asks the code of the first one if none is)
+  function ensureUnlock() {
+    if (Object.keys(S.pcUnlocked || {}).some(unlockedUntil)) return Promise.resolve(true);
+    var on = online(info).filter(function (d) { return d.id !== (info && info.self); });
+    if (!on.length) { toast('None of your computers is connected', 'warn'); return Promise.resolve(false); }
+    return unlockDlg(on[0].id, on[0].name);
   }
 
   // The question goes ONLY into the chat that ran onpc (a.session: its tab, found by the server from
@@ -607,7 +689,8 @@
   function remoteRun(p, c) {
     var x = remoteRunning(p, c);
     if (x) return remoteLog(x.dev, x.name, c.name, x.devName);
-    return api('POST', 'pc/remote-run', { project: p.name, id: c.id }).then(function (r) {
+    return ensureUnlock().then(function (ok) { return ok && api('POST', 'pc/remote-run', { project: p.name, id: c.id }); }).then(function (r) {
+      if (!r) return;
       toast(c.name + ' started on your computer', 'ok');
       webPoll();
       return remoteLog(r.dev, r.name, c.name, '');
@@ -644,6 +727,7 @@
       var key = JSON.stringify([x.online, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev]; })]);
       S.remoteOnline = x.online || 0;
       S.remoteBg = x.bg || [];
+      S.pcUnlocked = x.unlocked || {};
       if (key !== remoteKey) { remoteKey = key; if (SW.renderProjects) SW.renderProjects(); }
       (x.asks || []).forEach(function (a) { openIds[a.id] = 1; if (!shown[a.id]) ask(a, ''); });
       Object.keys(shown).forEach(function (id) {
@@ -732,6 +816,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

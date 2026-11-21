@@ -248,6 +248,22 @@ class EndToEnd(unittest.TestCase):
     def setcfg(self, **kw):
         self.store.db.put("pc", dict(self.hub.cfg(), **kw))
 
+    def bridge(self, *args, stdin=None):
+        r = subprocess.run([sys.executable, "-c", sw.PC_BRIDGE_PY] + list(args), env=dict(os.environ, HOME=self.home),
+                           input=stdin, capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def unlock(self):
+        """Phone access on (this computer's own MFA key) + an unlock through the bridge → {dev: token}."""
+        key = self.hub.mfa_setup()["secret"]
+        step = int(time.time() // 30)
+        self.hub.mfa_enable(sw.totp_code(key, step - 1), True)
+        dev = self.hub.cfg()["id"]
+        r = self.bridge("call", dev, json.dumps({"op": "unlock", "code": sw.totp_code(key, step), "by": "Chrome on Android"}))
+        self.assertIn("token", r, r)
+        return {dev: r["token"]}
+
     def test_runs_in_the_synced_copy_with_output_and_exit_code(self):
         code, out, err = self.onpc("pwd; echo out; echo err >&2; exit 3")
         self.assertEqual(code, 3)
@@ -311,20 +327,21 @@ class EndToEnd(unittest.TestCase):
 
     def test_phone_runs_a_command_of_this_computer(self):
         cmd = {"id": "c1", "name": "web", "cmd": "echo started-here; sleep 30", "where": "local", "cwd": "web", "url": ""}
-        env = dict(os.environ, HOME=self.home)
-
-        def bridge(*args):
-            r = subprocess.run([sys.executable, "-c", sw.PC_BRIDGE_PY] + list(args), env=env, capture_output=True, timeout=20)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            return json.loads(r.stdout)
+        bridge = self.bridge
         with mock.patch.object(self.app, "command", side_effect=lambda p, cid: dict(cmd) if (p, cid) == ("proj", "c1") else None):
             self.assertIn("not on", bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "nope"}))["error"])
             r = bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "c1"}))
+            self.assertTrue(r.get("locked"), "nothing runs from the phone before its MFA unlock")
+            self.assertNotIn("run-c1", self.hub.bg)
+            toks = self.unlock()
+            r = bridge("call", "", stdin=json.dumps({"op": "run", "project": "proj", "id": "c1", "toks": toks}).encode())
             self.assertEqual((r["name"], r["dev"]), ("run-c1", self.hub.cfg()["id"]))
+            self.assertEqual(self.hub.remote_access()["runs"][0]["name"], "run-c1")
+            self.assertIn("web — echo started-here", self.hub.remote_access()["log"][0]["text"])
             x = self.hub.bg["run-c1"]
             self.assertTrue(wait_for(lambda: "started-here" in x["out"], 5))
             self.assertEqual(x["_p"].args[-1], cmd["cmd"])
-            self.assertIn("already running", bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "c1"}))["error"])
+            self.assertIn("already running", bridge("call", "", json.dumps({"op": "run", "project": "proj", "id": "c1", "toks": toks}))["error"])
             listed = bridge("asks")["bg"]
             self.assertEqual((listed[0]["name"], listed[0]["state"], listed[0]["devName"]), ("run-c1", "running", "laptop"))
             log = bridge("call", r["dev"], json.dumps({"op": "log", "name": "run-c1"}))
@@ -336,9 +353,17 @@ class EndToEnd(unittest.TestCase):
         import pty as _pty
         import select as _sel
         self.store.update_settings({"localShell": "/bin/sh"})
+        env = dict(os.environ, HOME=self.home, SHELL="/bin/sh")
+        r = subprocess.run([sys.executable, self.onpc_file, "--term", "proj"], env=env, capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 255)
+        self.assertIn(b"with your MFA code first", r.stderr, "no terminal without the phone's MFA unlock")
+        dev = self.hub.cfg()["id"]
+        self.assertTrue(self.bridge("call", dev, json.dumps({"op": "ticket", "project": "proj"})).get("locked"))
+        toks = self.unlock()
+        ticket = self.bridge("call", dev, stdin=json.dumps({"op": "ticket", "project": "proj", "toks": toks}).encode())["ticket"]
         master, slave = _pty.openpty()
-        p = subprocess.Popen([sys.executable, self.onpc_file, "--term", "proj"], stdin=slave, stdout=slave, stderr=slave,
-                             env=dict(os.environ, HOME=self.home, SHELL="/bin/sh"), start_new_session=True)
+        p = subprocess.Popen([sys.executable, self.onpc_file, "--term", "proj", "--ticket", ticket], stdin=slave, stdout=slave, stderr=slave,
+                             env=env, start_new_session=True)
         os.close(slave)
 
         def until(text, t=10):
@@ -357,9 +382,28 @@ class EndToEnd(unittest.TestCase):
         out = until("DONE-42")
         self.assertIn("DONE-42", out, out)
         self.assertIn(os.path.realpath(self.local), out, "a shell in the project folder on the computer")
+        self.assertEqual([t["by"] for t in self.hub.remote_access()["terms"]], ["Chrome on Android"])
         os.write(master, b"exit\n")
         self.assertEqual(p.wait(15), 0)
         os.close(master)
+        r = subprocess.run([sys.executable, self.onpc_file, "--term", "proj", "--ticket", ticket], env=env, capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 255, "a ticket works once")
+        # Disconnect on the computer: the open terminal closes, the unlock is gone
+        ticket = self.bridge("call", dev, stdin=json.dumps({"op": "ticket", "project": "proj", "toks": toks}).encode())["ticket"]
+        master, slave = _pty.openpty()
+        p = subprocess.Popen([sys.executable, self.onpc_file, "--term", "proj", "--ticket", ticket], stdin=slave, stdout=slave, stderr=slave,
+                             env=env, start_new_session=True)
+        os.close(slave)
+        until("$ ")
+        uid = self.hub.remote_access()["unlocks"][0]["id"]
+        self.hub.lock_out(uid)
+        self.assertIsNotNone(wait_for(lambda: p.poll() is not None, 10) and p.poll())
+        os.close(master)
+        self.assertEqual(self.hub.remote_access()["unlocks"], [])
+        self.assertTrue(self.bridge("call", dev, stdin=json.dumps({"op": "ticket", "project": "proj", "toks": toks}).encode()).get("locked"))
+        kinds = [x["kind"] for x in self.hub.remote_access()["log"]]
+        for k in ("unlock", "term", "term-end", "lock", "term-refused"):
+            self.assertIn(k, kinds)
 
     def test_a_project_can_be_tied_to_one_computer(self):
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "ffffffffffff"}))
@@ -375,12 +419,7 @@ class EndToEnd(unittest.TestCase):
         self.setcfg(mode="every")
         p = self.onpc_proc("echo from-web", chat="00112233445566ff")
         self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]))
-        env = dict(os.environ, HOME=self.home)
-
-        def bridge(*args):
-            r = subprocess.run([sys.executable, "-c", sw.PC_BRIDGE_PY] + list(args), env=env, capture_output=True, timeout=20)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            return json.loads(r.stdout)
+        bridge = self.bridge
         r = bridge("asks")
         self.assertEqual(r["online"], 1)
         a = r["asks"][0]
@@ -391,7 +430,9 @@ class EndToEnd(unittest.TestCase):
         web.sessions["webtab"] = types.SimpleNamespace(spec={"relay": "00112233445566ff"})
         with mock.patch.object(sw, "remote_python", return_value=r):
             self.assertEqual(web.pc_remote_asks()["asks"][0]["session"], "webtab")
-        self.assertEqual(bridge("answer", a["dev"], a["id"], "once"), {"ok": True})
+        once = {"op": "answer", "id": a["id"], "answer": "once"}
+        self.assertTrue(bridge("call", a["dev"], json.dumps(once)).get("locked"), "allowing from the server needs the MFA unlock")
+        self.assertEqual(bridge("call", a["dev"], stdin=json.dumps(dict(once, toks=self.unlock())).encode()), {"ok": True})
         out, _ = p.communicate(timeout=20)
         self.assertEqual((p.returncode, out), (0, b"from-web\n"))
         self.assertEqual(bridge("asks")["asks"], [])
@@ -399,7 +440,22 @@ class EndToEnd(unittest.TestCase):
     def test_my_computers_project_runs_every_command_without_our_question(self):
         # the server marks the folder "computers" → onpc says it comes from the hook: Claude's modes decided
         Path(self.pcdir, "projects.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "computers"}))
+        # only marked on the server (anyone there can write it): "hooked" is not trusted → our question
+        self.setcfg(trusted=[], mode="chat")
+        p = self.onpc_proc("echo not-yet")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]))
+        self.hub.answer(self.hub.pending()["asks"][0]["id"], "deny")
+        p.communicate(timeout=20)
+        self.assertEqual(p.returncode, 126)
+        self.hub.trust("proj", True)                  # chosen on this computer ("Commands run on" here)
+        self.setcfg(deny=["echo nope*"])
+        self.assertEqual(self.onpc("echo nope")[0], 126, "the deny list holds for hooked commands too")
         self.setcfg(mode="every")
+        p = self.onpc_proc("echo asks")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]), "ask = asks, also for hooked commands")
+        self.hub.answer(self.hub.pending()["asks"][0]["id"], "deny")
+        p.communicate(timeout=20)
+        self.setcfg(mode="chat")
         code, out, err = self.onpc("pwd; echo " + os.path.join(os.path.realpath(self.srv_dir), "web", "x"))
         self.assertEqual(code, 0, err)
         self.assertEqual(out, os.path.realpath(os.path.join(self.srv_dir, "web")) + "\n"
@@ -946,3 +1002,115 @@ class SpeedTest(unittest.TestCase):
         self.assertTrue(0 < r["down"] < 1000 and 0 < r["up"] < 1000)
         with mock.patch.object(sw, "pc_rtt", return_value=None), self.assertRaises(sw.ApiError):
             sw.ssh_speed(sw.ServerConf("esi", "h"), run=lambda a, d=None: subprocess.CompletedProcess(a, 255, b"", b""))
+
+
+class PhoneAccess(unittest.TestCase):
+    """MFA unlock: the key and the check on the computer; the web keeps only a token in memory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.envp = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp.name})
+        self.envp.start()
+        self.store = sw.Store(Path(self.tmp.name) / "gui.json")
+        self.app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        self.hub = self.app.pc
+
+    def tearDown(self):
+        self.envp.stop()
+        self.tmp.cleanup()
+
+    def mfa_on(self):
+        key = self.hub.mfa_setup()["secret"]
+        self.hub.mfa_enable(sw.totp_code(key, int(time.time() // 30) - 1), True)
+        return key
+
+    def test_key_stays_here_and_a_code_works_once(self):
+        with self.assertRaises(sw.ApiError):
+            self.hub.unlock("123456", "web")                     # phone access off
+        key = self.mfa_on()
+        pub = self.hub.public()["config"]
+        self.assertNotIn("mfa", pub)
+        self.assertNotIn("secret", pub)
+        self.assertTrue(pub["mfaOn"])
+        code = sw.totp_code(key, int(time.time() // 30))
+        u = self.hub.unlock(code, "Chrome on Android")
+        self.assertIsNotNone(self.hub.unlocked(u["token"]))
+        self.assertIsNone(self.hub.unlocked("other"))
+        with self.assertRaises(sw.ApiError):
+            self.hub.unlock(code, "web")                         # the same code again
+        self.assertEqual(self.hub.remote_access()["unlocks"][0]["by"], "Chrome on Android")
+        self.hub.lock_out("all")
+        self.assertIsNone(self.hub.unlocked(u["token"]))
+
+    def test_wrong_codes_are_limited(self):
+        self.mfa_on()
+        for _ in range(sw.PC_MFA_FAILS):
+            with self.assertRaises(sw.ApiError):
+                self.hub.unlock("000000", "web")
+        with self.assertRaises(sw.ApiError) as e:
+            self.hub.unlock("000000", "web")
+        self.assertEqual(e.exception.status, 429)
+        self.assertEqual(self.hub.remote_access()["log"][0]["kind"], "unlock-failed")
+
+    def test_unlock_ends_after_an_hour_and_mfa_off_locks_all(self):
+        key = self.mfa_on()
+        u = self.hub.unlock(sw.totp_code(key, int(time.time() // 30)), "web")
+        self.hub.unlocks[u["id"]]["until"] = time.time() - 1
+        self.assertIsNone(self.hub.unlocked(u["token"]))
+        u = self.hub.unlock(sw.totp_code(key, int(time.time() // 30) + 1), "web")
+        with self.assertRaises(sw.ApiError):
+            self.hub.mfa_enable("000000", False)
+        self.assertEqual(self.app.pc_api("POST", ["disconnect"], {"id": u["id"]})["unlocks"], [])
+
+    def test_tickets_once_per_project(self):
+        key = self.mfa_on()
+        u = self.hub.unlocks[self.hub.unlock(sw.totp_code(key, int(time.time() // 30)), "web")["id"]]
+        t = self.hub.ticket(u, "proj")
+        self.assertIsNone(self.hub.take_ticket(t, "other"), "for that project only")
+        t = self.hub.ticket(u, "proj")
+        self.assertIs(self.hub.take_ticket(t, "proj"), u)
+        self.assertIsNone(self.hub.take_ticket(t, "proj"), "once")
+
+    def test_trust_comes_from_this_computer(self):
+        self.assertIsNone(self.hub.cfg()["trusted"])
+        with mock.patch.object(sw, "remote_python", return_value={"devices": [], "builds": {"a": "computers", "b": "server"}}):
+            self.app.pc_devices(cached=False)                  # an older version: what was chosen is kept once
+            self.assertEqual(self.hub.cfg()["trusted"], ["a"])
+            self.hub.trust("a", False)
+            self.app.pc_devices(cached=False)
+        self.assertEqual(self.hub.cfg()["trusted"], [], "later the server's list never adds to it")
+
+    def test_web_keeps_the_token_in_memory_and_sends_it_over_stdin(self):
+        web = sw.App(self.store, sw.ServerConf("esi", "h"), web=True)
+        calls = []
+
+        def remote(conf, code, args, **kw):
+            calls.append((args, json.loads(kw["stdin"]) if kw.get("stdin") else None))
+            body = calls[-1][1] or {}
+            if body.get("op") == "unlock":
+                return {"token": "tok-1", "until": time.time() + 3600, "id": "aaaaaaaaaaaa"}
+            if body.get("op") == "ticket":
+                return {"ticket": "tick-1"}
+            return {"asks": [], "online": 1}
+        dev = "0123456789ab"
+        with mock.patch.object(sw, "remote_python", side_effect=remote):
+            with self.assertRaises(sw.ApiError):
+                web.pc_api("POST", ["unlock"], {"dev": dev, "code": "12"})
+            r = web.pc_api("POST", ["unlock"], {"dev": dev, "code": "123 456", "by": "Mozilla/5.0 (Linux; Android 14) Chrome/130"})
+            self.assertIn(dev, r["unlocked"])
+            self.assertEqual(calls[-1][1]["by"], "Chrome on Android")
+            self.assertIn(dev, web.pc_remote_asks()["unlocked"])
+            web.pc_api("POST", ["remote-answer"], {"dev": dev, "id": "aaaaaaaaaaaa", "answer": "once"})
+            args, body = calls[-1]
+            self.assertEqual(args, ["call", dev])
+            self.assertEqual(body["toks"], {dev: "tok-1"})
+            self.assertNotIn("tok-1", json.dumps(args), "never in a command line (ps shows it)")
+            self.assertEqual(web.pc_ticket("proj"), "tick-1")
+            self.assertEqual(web.pc_api("POST", ["lock"], {"dev": dev})["unlocked"], {})
+            self.assertEqual(calls[-1][1]["op"], "lock")
+            self.assertEqual(web.pc_ticket("proj"), "", "locked: no ticket")
+
+    def test_terminal_tab_carries_the_ticket_not_the_spec(self):
+        built = sw.build_spec({"kind": "pcterm", "project": "", "_ticket": "tick-1"}, sw.ServerConf("esi", "h"), self.store, [])
+        self.assertIn("--ticket tick-1", built["argv"][-1])
+        self.assertNotIn("_ticket", json.dumps(built["spec"]))

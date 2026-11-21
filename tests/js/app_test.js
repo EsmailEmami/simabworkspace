@@ -177,6 +177,9 @@ global.fetch = (url, opts) => {
     { id: 'login', ok: false, title: 'Claude signed in on the server', detail: 'not signed in yet', fix: 'login' },
     { id: 'sshfs', ok: false, optional: true, title: 'sshfs on the server (Local only projects)', detail: 'not yet', fix: 'sshfs' }] };
   else if (url === '/api/setup-check/sshfs') { fakePc.sshfsFetched = true; res = { ok: true }; }
+  else if (url === '/api/pc/access') res = fakePc.access || { mfa: false, unlocks: [], terms: [], runs: [], log: [], now: Date.now() / 1000 };
+  else if (url === '/api/pc/disconnect') { fakePc.disconnected = body.id; res = Object.assign({}, fakePc.access, { unlocks: [], terms: [] }); }
+  else if (url === '/api/pc/unlock') { fakePc.unlocked = body; res = { unlocked: { [body.dev]: Date.now() / 1000 + 3600 } }; }
   else if (url === '/api/pc/remote-run') { fakePc.remoteRun = body; res = { name: 'run-' + body.id, dev: 'a1b2c3d4e5f6' }; }
   else if (url === '/api/pc/remote-log') res = { name: body.name, state: 'running', code: null, url: 'http://localhost:4300', out: 'compiled ok' };
   else if (url === '/api/pc/remote-stop') { fakePc.remoteStopped = body; res = { ok: true }; }
@@ -1803,6 +1806,14 @@ const tests = {
     assert.match(card.textContent, /on laptop/);
     assert.strictEqual(q('select', card).length, 0, 'the mode is set on the computer itself');
     q('button', card).find((b) => b.textContent === 'Allow once').click(); await settle();
+    // allowing from the web needs that computer's own MFA code first
+    const code = q('.modal').pop();
+    assert.match(code.textContent, /Code of “laptop”/);
+    assert.ok(!fakePc.remoteAnswers || !fakePc.remoteAnswers.length, 'nothing sent before the code');
+    q('input', code)[0].value = '123456';
+    q('button', code).find((b) => b.textContent === 'Save').click(); await settle();
+    assert.strictEqual(fakePc.unlocked.code, '123456');
+    assert.strictEqual(fakePc.unlocked.dev, 'a1b2c3d4e5f6');
     assert.deepStrictEqual(fakePc.remoteAnswers.pop(), { dev: 'a1b2c3d4e5f6', id: 'abcdefabcdef', answer: 'once' });
     SW.closeTab(chat, true); await settle();
     // a run command of the computer: off while it is not connected, ▶ starts it there from the phone
@@ -1811,7 +1822,7 @@ const tests = {
     await global.SWComputers.webPoll(); await settle();
     assert.ok(cmdRow().classList.contains('off'));
     assert.match(cmdRow().textContent, /pc off/);
-    fakePc.remote = { asks: [], online: 1, now: Date.now() / 1000, bg: [] };
+    fakePc.remote = { asks: [], online: 1, now: Date.now() / 1000, bg: [], unlocked: { a1b2c3d4e5f6: Date.now() / 1000 + 3600 } };
     await global.SWComputers.webPoll(); await settle();
     assert.ok(!cmdRow().classList.contains('off'));
     cmdRow().click(); await settle();
@@ -1955,6 +1966,28 @@ const tests = {
     fakePc.devs.builds = { cheshmeh: 'server', shop: 'server' };
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     S.pc = { on: false };
+  },
+
+  async 'Computers: Phone access shows who is in from the phone, with Disconnect and the log'() {
+    global.SW.S.web = false;
+    const now = Date.now() / 1000;
+    fakePc.access = { mfa: true, now: now, runs: [],
+      unlocks: [{ id: 'aaaaaaaaaaaa', by: 'Chrome on Android', at: now - 60, until: now + 3500 }],
+      terms: [{ id: 'bbbbbbbbbbbb', unlock: 'aaaaaaaaaaaa', project: 'cheshmeh', at: now - 30, by: 'Chrome on Android' }],
+      log: [{ t: now - 30, kind: 'term', text: 'terminal opened in cheshmeh', by: 'Chrome on Android' }] };
+    document.body.querySelector('#modal-root').replaceChildren();
+    global.SWComputers.open(); await settle();
+    const md = q('.modal').pop();
+    const sec = q('.pc-card', md).find((x) => /Phone access/.test(x.textContent));
+    assert.ok(sec, 'its own card on this computer');
+    assert.match(sec.textContent, /Chrome on Android/);
+    assert.match(sec.textContent, /terminal in cheshmeh/);
+    assert.match(sec.textContent, /Remote activity \(1\)/);
+    q('button', sec).find((b) => b.textContent === 'Disconnect').click(); await settle();
+    assert.strictEqual(fakePc.disconnected, 'aaaaaaaaaaaa');
+    assert.match(sec.textContent, /Nobody is connected/);
+    fakePc.access = null;
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'Computers: "checking…" until the fresh answer, never an old offline / connected first'() {

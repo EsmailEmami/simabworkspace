@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.62.0 2026-11-21  Computers: phone access with the computer's own MFA code (terminal, run commands, answers); rules no longer bypassed from the server; who is in + Disconnect + log
 #    1.61.3 2026-11-21  Sidebar marks: "…" until checked, asked again when this computer connects; this computer counts as on while its link is up
 #    1.61.2 2026-11-21  Computers: "checking…" until the fresh state, not an old offline first
 #    1.61.1 2026-11-21  Phone: the tools are a left column of the drawer, like on the laptop and tablet
@@ -373,7 +374,7 @@
 
 set -u -o pipefail
 
-VERSION="1.61.3"
+VERSION="1.62.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

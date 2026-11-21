@@ -713,3 +713,24 @@ class Pairing(unittest.TestCase):
         f = Path(self.home, ".ssh", "authorized_keys")
         self.assertEqual(f.read_text().count(key), 1, "added once")
         self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+
+
+class ClaudeFolderOfLocalOnly(unittest.TestCase):
+    def test_history_of_a_tilde_project(self):
+        """~/.simab-mnt/x: Claude names its folder after the FULL path (-home-u--simab-mnt-x)."""
+        with tempfile.TemporaryDirectory() as home:
+            conv = "406d87df-cd6a-4644-a57b-16d6052ae571"
+            name = __import__("re").sub(r"[^A-Za-z0-9]", "-", os.path.join(home, ".simab-mnt", "x"))
+            d = Path(home, ".claude", "projects", name)
+            d.mkdir(parents=True)
+            (d / (conv + ".jsonl")).write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}, "uuid": "u1"}) + "\n")
+            self.assertEqual(sw.claude_project_dir("~/.simab-mnt/x"), "~/.simab-mnt/x")
+            self.assertEqual(sw.claude_project_dir("/home/esi/shop"), "-home-esi-shop")
+            env = dict(os.environ, HOME=home)
+            for code, args in ((sw.REMOTE_HISTORY_PY, [conv, "", "50"]), (sw.REMOTE_TAIL_PY, [conv, "-1"]), (sw.REMOTE_LIST_PY, [])):
+                r = subprocess.run([sys.executable, "-c", code, sw.claude_project_dir("~/.simab-mnt/x")] + args, env=env,
+                                   capture_output=True, timeout=20)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn(b"No such file", r.stderr + r.stdout)
+            r = subprocess.run([sys.executable, "-c", sw.REMOTE_LIST_PY, "~/.simab-mnt/x"], env=env, capture_output=True, timeout=20)
+            self.assertIn(conv.encode(), r.stdout, "History lists the conversation")

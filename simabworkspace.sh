@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.53.1 2026-11-21  Local only chats reopen with their history (Claude folder name from the full path)
 #    1.53.0 2026-11-21  Connect a computer from the web version: one line with a one-time link (no password)
 #    1.52.0 2026-11-21  My computers = like Local only: every command of the project runs on your computer, files stay synced on the server
 #    1.51.0 2026-11-21  Dev servers on your computer (onpc --bg) with ↗ / ■ in the chat; the chat says at once when your computer drops off
@@ -358,7 +359,7 @@
 
 set -u -o pipefail
 
-VERSION="1.53.0"
+VERSION="1.53.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

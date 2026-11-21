@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.53.0"
+VERSION = "1.53.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1781,8 +1781,21 @@ CHAT_EVENT_LIMIT = 4000
 
 
 def claude_project_dir(remote_path: str) -> str:
-    """Folder name Claude uses under ~/.claude/projects for a working directory."""
+    """Folder name Claude uses under ~/.claude/projects for a working directory. A path with ~
+    (e.g. a Local only project: ~/.simab-mnt/x) is passed as it is: Claude names the folder after the
+    FULL path (-home-esi--simab-mnt-x), which only the server knows — the remote scripts turn it into
+    the name (PROJ_DIR_PY)."""
+    if (remote_path or "").startswith("~"):
+        return remote_path
     return re.sub(r"[^A-Za-z0-9]", "-", remote_path)
+
+
+# start of the remote scripts that get a project folder name (or a ~ path) in argv[1]
+PROJ_DIR_PY = r'''
+import re as _re
+if sys.argv[1].startswith("~"):
+    sys.argv[1] = _re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser(sys.argv[1]))
+'''
 
 
 DEFAULT_CHAT_MODEL = "opus"           # the latest Opus (Opus 5.5) — "default" told you nothing
@@ -2189,6 +2202,7 @@ def clean_title(t) -> str:
 # own transcripts: list past conversations of a folder / load one for display.
 REMOTE_LIST_PY = r'''
 import sys, os, json, glob
+''' + PROJ_DIR_PY + r'''
 d = os.path.expanduser("~/.claude/projects/" + sys.argv[1])
 out = []
 for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:40]:
@@ -2349,6 +2363,7 @@ print(json.dumps({'ok':True}))
 # {"total": all messages, "start": index of the first one returned, "entries": [...]}
 REMOTE_HISTORY_PY = r'''
 import sys, os, json
+''' + PROJ_DIR_PY + r'''
 f = os.path.expanduser("~/.claude/projects/%s/%s.jsonl" % (sys.argv[1], sys.argv[2]))
 before = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] != "" else None
 limit = int(sys.argv[4]) if len(sys.argv) > 4 else 40
@@ -2420,6 +2435,7 @@ print(json.dumps({"total": total, "start": start, "entries": out[start:end], "ti
 # (whole lines only): {"off": new offset, "size": file size, "entries": [...]} — for watching
 REMOTE_TAIL_PY = r'''
 import sys, os, json
+''' + PROJ_DIR_PY + r'''
 f = os.path.expanduser("~/.claude/projects/%s/%s.jsonl" % (sys.argv[1], sys.argv[2]))
 off = int(sys.argv[3])
 LIM = 8000

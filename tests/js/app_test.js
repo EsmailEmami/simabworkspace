@@ -162,6 +162,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
+  else if (url === '/api/pc/bgstop') { fakePc.stopped = body.name; res = { bg: [] }; }
   else if (url === '/api/pc/local') { fakePc.local = body; res = { project: { name: body.name || 'mine', local: body.local, remote: '~/.simab-mnt/mine' }, mount: 'ok' }; }
   else if (url === '/api/pc/answer') { fakePc.answers.push(body); fakePc.asks.asks = []; res = { ok: true }; }
   else if (url.startsWith('/api/pc/run/')) res = { id: 'r1', state: 'running', project: 'cheshmeh', cmd: 'npm run build', out: 'building…', start: 1, code: null };
@@ -1669,6 +1670,28 @@ const tests = {
     assert.strictEqual(q('.where-tag', chat.cards.tb2)[0].textContent, 'server', "Claude's own files: on the server");
     chat.onEvent({ type: 'assistant', message: { id: 'm11', content: [{ type: 'tool_use', id: 'tr1', name: 'Read', input: { file_path: '/x' } }] } });
     assert.strictEqual(q('.where-tag', chat.cards.tr1).length, 0, 'only Bash cards');
+    // its dev servers on the computer: above the message box, with ↗ and ■
+    const now = Date.now() / 1000;
+    fakePc.asks = { asks: [], runs: [], now, output: 'chat', link: 'connected',
+      bg: [{ name: 'web', project: 'cheshmeh', cmd: 'ng serve', url: 'http://localhost:8050', state: 'running', start: 1 },
+        { name: 'other', project: 'shop', cmd: 'x', url: '', state: 'running', start: 1 }] };
+    await global.SWComputers.poll(); await settle();
+    const chips = q('.pc-dev-chip', chat.devsEl);
+    assert.strictEqual(chips.length, 1, 'only this project\'s');
+    assert.match(chips[0].textContent, /web:8050/);
+    assert.strictEqual(q('a', chips[0])[0].getAttribute('href'), 'http://localhost:8050');
+    q('button', chips[0])[0].click(); await settle();
+    assert.strictEqual(fakePc.stopped, 'web');
+    // the computer's link drops while Claude works: said at once in the chat; back → Continue
+    chat.busy = true;
+    fakePc.asks = Object.assign({}, fakePc.asks, { bg: [], link: 'error' });
+    await global.SWComputers.poll(); await settle();
+    assert.match(chat.msgs.textContent, /lost its connection to the server/);
+    fakePc.asks = Object.assign({}, fakePc.asks, { link: 'connected' });
+    await global.SWComputers.poll(); await settle();
+    assert.match(chat.msgs.textContent, /connected again/);
+    assert.ok(q('button', chat.msgs).some((b) => b.textContent === 'Continue'));
+    chat.busy = false;
     fakePc.asks = { asks: [], runs: [], now: Date.now() / 1000, output: 'chat' };
     SW.closeTab(chat, true); await settle();
     // the link's quality next to "simab": 5 bars + what goes over it now

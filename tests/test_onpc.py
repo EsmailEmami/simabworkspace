@@ -300,6 +300,34 @@ class EndToEnd(unittest.TestCase):
         _, out, _ = self.onpc("--list")
         self.assertIn("offline", out)
 
+    def test_dev_server_in_the_background(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()
+        code, out, err = self.onpc("--bg", "web", sys.executable + " -u -m http.server " + str(port) + " --bind 127.0.0.1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("started web on " + self.hub.cfg()["name"], out)
+        self.assertIn("URL: http://127.0.0.1:%d" % port, out)
+        x = self.hub.bg["web"]
+        self.assertEqual((x["state"], x["project"]), ("running", "proj"))
+        self.assertEqual(self.hub.pending()["bg"][0]["name"], "web")
+        code, out, _ = self.onpc("--bg", "web", "sleep 1")
+        self.assertEqual(code, 255)
+        code, out, _ = self.onpc("--ps")
+        self.assertIn("web  running", out)
+        import urllib.request
+        urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=5).read()
+        self.assertTrue(wait_for(lambda: "GET / " in self.hub.bg["web"]["out"], 5))
+        code, out, _ = self.onpc("--logs", "web", "5")
+        self.assertIn("GET /", out)
+        code, out, _ = self.onpc("--stop", "web")
+        self.assertIn("stopped web", out)
+        self.assertTrue(wait_for(lambda: x["_p"].poll() is not None, 8), "the process is gone")
+        code, _, err = self.onpc("--bg", "bad", "exit 3")
+        self.assertEqual(code, 255)
+        self.assertIn("stopped at once (exit 3)", err)
+
     def test_stopping_onpc_stops_the_command(self):
         mark = os.path.join(self.local, "web", "done")
         p = self.onpc_proc("sleep 5; touch done")
@@ -387,7 +415,7 @@ class LocalOnly(EndToEnd):
     """A Local only project: the server mounts the computer's folder (real sshfs through the link)."""
     test_runs_in_the_synced_copy_with_output_and_exit_code = test_ask_then_always = None      # EndToEnd's own
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
-    test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = None
+    test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
 
     def setUp(self):
         super().setUp()

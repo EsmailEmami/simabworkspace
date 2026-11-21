@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.50.5"
+VERSION = "1.51.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5404,8 +5404,9 @@ PC_HINT = (
     "and gives back the output and exit code; the user may have to approve it there, so it can take a "
     "while: give the Bash call a long timeout (600000 ms). Never run those commands directly on this server. If onpc says no computer is connected or "
     "the user denied it, stop and tell the user; do not fall back to the server. `onpc --list` shows "
-    "the user's computers. Long-running dev servers (ng serve, npm start) are not supported by onpc "
-    "yet: ask the user to start them.")
+    "the user's computers. Long-running dev servers (ng serve, npm start, go run …): `onpc --bg NAME "
+    "COMMAND` starts it there and returns at once with its first output and URL; `onpc --logs NAME` shows its "
+    "output, `onpc --stop NAME`, `onpc --ps` lists them. Never run a dev server in the foreground.")
 
 PC_LOCAL_HINT = (
     "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
@@ -5416,7 +5417,9 @@ PC_LOCAL_HINT = (
     "and put temporary files for commands inside the project folder, not in /tmp. A Bash command that "
     "mentions ~/.claude runs on this server. `cd` does not carry over "
     "to the next command: use `cd dir && command`. Give long builds a long Bash timeout (600000 ms). If a "
-    "command says the computer is not connected, stop and tell the user.")
+    "command says the computer is not connected, stop and tell the user. Dev servers (ng serve, npm start "
+    "…): `onpc --bg NAME COMMAND` starts it on the computer and returns at once with its URL; "
+    "`onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never run a dev server in the foreground.")
 
 ONPC_PY = r'''#!/usr/bin/env python3
 # onpc — run a command on your own computer instead of this server (Simab Workspace).
@@ -5429,6 +5432,7 @@ LOCAL_HINT = @@LOCAL_HINT@@
 NOT_HERE = -404
 USAGE = ("usage: onpc COMMAND…   run it on your own computer, in the synced copy of this folder\n"
          "       onpc --on NAME COMMAND…   on that computer\n"
+         "       onpc --bg NAME COMMAND…   start a dev server there (keeps running); --logs NAME, --stop NAME, --ps\n"
          "       onpc --list   your computers")
 
 
@@ -5589,7 +5593,11 @@ def hook():
     ti = dict(i.get("tool_input") or {})
     cmd = ti.get("command")
     me = os.path.realpath(os.path.abspath(sys.argv[0]))
-    if not isinstance(cmd, str) or not cmd.strip() or cmd.lstrip().startswith((me, "onpc ")):
+    if not isinstance(cmd, str) or not cmd.strip() or cmd.lstrip().startswith(me):
+        return 0
+    if cmd.lstrip().startswith("onpc "):          # Claude calls onpc itself (--bg …): just make sure it is found
+        ti["command"] = shlex.quote(me) + cmd.lstrip()[4:]
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": ti}}))
         return 0
     # Claude's own files (memory, plans, settings, its task outputs) are on THIS server, not on the
     # computer: such a command stays here
@@ -5601,7 +5609,54 @@ def hook():
     return 0
 
 
+def bg(body):
+    """Dev servers on the computer, kept by the app there: --bg NAME CMD | --logs NAME | --stop NAME | --ps"""
+    devs = [d for d in devices() if d["online"]]
+    if not devs:
+        sys.stderr.write("onpc: none of your computers is connected — nothing was started or stopped.\n")
+        return 255
+    body["cwd"] = os.path.realpath(os.getcwd())
+    body["chat"] = os.environ.get("SIMAB_CHAT", "")[:64]
+    for d in devs:
+        s = reach(d)
+        if s is None:
+            continue
+        s.settimeout(None)
+        raw = json.dumps(body).encode()
+        s.sendall((("POST /pc/bg HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                    "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(raw))).encode() + raw)
+        data = b""
+        while True:
+            c = s.recv(65536)
+            if not c:
+                break
+            data += c
+        s.close()
+        head, _, rest = data.partition(b"\r\n\r\n")
+        code = head.split(b" ")[1] if b" " in head else b"0"
+        try:
+            r = json.loads(rest.decode("utf-8", "replace") or "{}")
+        except ValueError:
+            r = {}
+        if code == b"404" and body["op"] != "ps":
+            continue                      # not this computer's project / process: try the next one
+        if code != b"200":
+            sys.stderr.write("onpc: %s\n" % (r.get("error") or "refused (HTTP %s)" % code.decode()))
+            return 126 if code == b"403" else 255
+        if r.get("text"):
+            sys.stdout.write(r["text"] + ("" if r["text"].endswith("\n") else "\n"))
+        return 0
+    sys.stderr.write("onpc: not found on your connected computers\n")
+    return 255
+
+
 def main(a):
+    if a[:1] == ["--bg"] and len(a) >= 3:
+        return bg({"op": "start", "name": a[1], "cmd": a[2] if len(a) == 3 else " ".join(shlex.quote(x) for x in a[2:])})
+    if a[:1] in (["--logs"], ["--stop"]) and len(a) >= 2:
+        return bg({"op": a[0][2:], "name": a[1], "lines": int(a[2]) if len(a) > 2 and a[2].isdigit() else 80})
+    if a[:1] == ["--ps"]:
+        return bg({"op": "ps"})
     if a[:1] == ["--sftp"] and len(a) >= 3:
         return sftp(a[1], a[2])
     if a[:1] == ["--hook"]:
@@ -5912,6 +5967,7 @@ class PcHub:
         self.runs = collections.deque(maxlen=20)
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
         self.meter = [0, 0]            # bytes over the link: [from the server (down), to the server (up)]
+        self.bg = {}                   # dev servers here (onpc --bg): name -> info; kept when the link drops
         self.net = {"rtt": None, "down": 0.0, "up": 0.0}
         self._net_thread = None
 
@@ -6128,6 +6184,114 @@ class PcHub:
         h.close_connection = True
         SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid"), meter=self.meter).serve()
 
+    # dev servers (onpc --bg) -------------------------------------------------------
+    def serve_bg(self, h):
+        """POST /pc/bg {op: start|logs|stop|ps, name, cmd, cwd, chat} from onpc → JSON {text}."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "builds on this computer are turned off (Settings → Computers)"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        op, name = b.get("op"), b.get("name") or ""
+        if op == "ps":
+            rows = [f"{x['name']}  {x['state']}{' :' + str(x['code']) if x['state'] == 'exited' else ''}  {x['url'] or '-'}  {x['project']}: {x['cmd']}"
+                    for x in self.bg.values()]
+            return h._json(200, {"text": "\n".join(rows) or f"no dev servers on {c['name']}"})
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+            return h._json(400, {"error": "the name: letters, digits, . _ - (up to 40)"})
+        x = self.bg.get(name)
+        if op == "logs":
+            if not x:
+                return h._json(404, {"error": f"no dev server {name} on {c['name']}"})
+            n = max(1, min(int(b.get("lines") or 80), 2000))
+            head = f"[{name}: {x['state']}{' exit ' + str(x['code']) if x['state'] == 'exited' else ''}{' · ' + x['url'] if x['url'] else ''}]\n"
+            return h._json(200, {"text": head + "\n".join(x["out"].splitlines()[-n:])})
+        if op == "stop":
+            if not x:
+                return h._json(404, {"error": f"no dev server {name} on {c['name']}"})
+            self.stop_bg(name)
+            return h._json(200, {"text": f"stopped {name} on {c['name']}"})
+        if op != "start":
+            return h._json(400, {"error": "bad request"})
+        cmd, cwd = b.get("cmd"), b.get("cwd")
+        if not isinstance(cmd, str) or not cmd.strip() or not isinstance(cwd, str):
+            return h._json(400, {"error": "bad request"})
+        if x and x["state"] == "running":
+            return h._json(409, {"error": f"{name} is already running on {c['name']} ({x['url'] or 'no URL yet'}) — onpc --stop {name} first"})
+        hit = self.map_path(cwd)
+        if not hit or not os.path.isdir(hit[1]):
+            return h._json(404, {"error": f"{cwd} is not on {c['name']}"})
+        project, local, root = hit
+        chat = b.get("chat") if isinstance(b.get("chat"), str) and RELAY_KEY_RE.fullmatch(b.get("chat") or "") else ""
+        paths = []
+        if project.get("localOnly"):
+            lroot = project["local"].replace("\\", "/") if IS_WIN else project["local"]
+            cmd = cmd.replace(root, lroot)
+            paths = [(project["local"], root), (lroot, root)]
+        else:
+            verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
+            if verdict == "deny":
+                return h._json(403, {"error": why})
+            run = {"id": secrets.token_hex(6), "project": project["name"], "cmd": cmd.strip(), "cwd": local, "chat": chat,
+                   "start": time.time(), "end": 0, "code": None, "state": "asking", "out": ""}
+            if verdict == "ask":
+                self.runs.appendleft(run)
+                ok = self.ask(project["name"], "[dev server] " + cmd.strip(), run)
+                run.update(state="running" if ok else "denied", end=time.time())
+                if not ok:
+                    return h._json(403, {"error": f"the user did not allow it on {c['name']} — it was NOT started"})
+        if project.get("source") == "mutagen":
+            mutagen_flush(project["name"])
+        x = self.start_bg(name, project["name"], cmd.strip(), local, chat, paths)
+        end = time.time() + 15
+        while time.time() < end and x["state"] == "running" and not x["url"]:
+            time.sleep(0.2)
+        first = "\n".join(x["out"].splitlines()[-40:])
+        if x["state"] != "running":
+            return h._json(422, {"error": f"{name} stopped at once (exit {x['code']}) on {c['name']}:\n{first}"})
+        return h._json(200, {"text": f"started {name} on {c['name']} — keeps running (onpc --logs {name}, onpc --stop {name})\n"
+                                     + (f"URL: {x['url']}\n" if x["url"] else "no URL seen yet\n") + "--- output so far ---\n" + first})
+
+    def start_bg(self, name, project, cmd, cwd, chat="", paths=()) -> dict:
+        kw = {"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True}
+        p = subprocess.Popen(pc_shell_argv(cmd), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, env=dict(os.environ, PATH=tool_path()), **kw)
+        x = {"name": name, "project": project, "cmd": cmd, "pid": p.pid, "start": time.time(), "url": "",
+             "state": "running", "code": None, "out": "", "chat": chat, "_p": p}
+        self.bg[name] = x
+
+        def read():
+            ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+            for chunk in iter(lambda: p.stdout.read1(65536), b""):
+                t = ansi.sub("", chunk.decode("utf-8", "replace"))
+                for a, b in paths:
+                    t = t.replace(a, b)
+                x["out"] = (x["out"] + t)[-200000:]
+                if not x["url"]:
+                    m = PC_URL_RE.search(x["out"])
+                    if m:
+                        x["url"] = m.group(0).rstrip("/.,)").replace("0.0.0.0", "localhost").replace("[::]", "localhost")
+            code = p.wait()
+            if x["state"] == "running":
+                x["state"], x["code"] = "exited", code
+            try:
+                p.stdout.close()
+            except OSError:
+                pass
+        threading.Thread(target=read, daemon=True).start()
+        return x
+
+    def stop_bg(self, name=None):
+        for n in ([name] if name else list(self.bg)):
+            x = self.bg.get(n)
+            if x and x["state"] == "running":
+                x["state"] = "stopped"
+                pc_kill(x["_p"])
+
+    def bg_list(self) -> list:
+        return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in self.bg.values()]
+
     def _verify(self) -> str:
         """"" when the server reaches this computer through its socket, else why not."""
         try:
@@ -6321,13 +6485,17 @@ class PcHub:
         for r in runs:
             r["session"] = tabs.get(r.get("chat") or "", "") if r.get("chat") else ""   # its output shows in that chat
         c = self.cfg()
-        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"]}
+        return {"asks": asks, "runs": runs, "now": time.time(), "output": c["output"], "mode": c["mode"],
+                "bg": self.bg_list(), "link": self.state}
 
     def run_info(self, rid: str) -> dict:
         for r in list(self.runs):
             if r["id"] == rid:
                 return dict(r)
         raise ApiError(404, "no such command")
+
+
+PC_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::\d+)?[^\s'\"<>]*")
 
 
 def pc_rtt(host: str, port) -> float:
@@ -8539,6 +8707,7 @@ class App:
         for t in list(self.tunnels.values()):
             t.stop()
         self.pc.stop()
+        self.pc.stop_bg()                        # dev servers end with the app
 
     # A restart (update, the web service restarted) must not cost the open tabs: chats (Claude
     # keeps running on the server under its relay), watched chats and Files tabs come back with
@@ -8846,6 +9015,14 @@ class App:
             return self.pc.pending()
         if key == ("GET", "net"):
             return self.pc.net_info()
+        if key == ("POST", "bgstop"):
+            self.pc.stop_bg(str(body.get("name") or "") or "-")
+            return {"bg": self.pc.bg_list()}
+        if key == ("GET", "bglog") and len(rest) == 2:
+            x = self.pc.bg.get(rest[1])
+            if not x:
+                raise ApiError(404, "no such dev server")
+            return {"name": x["name"], "state": x["state"], "url": x["url"], "out": x["out"][-60000:]}
         if key == ("POST", "answer"):
             return self.pc.answer(body.get("id"), body.get("answer"))
         if key == ("GET", "run") and len(rest) == 2:
@@ -9840,6 +10017,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_run(self)
             if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
                 return self.app.pc.serve_sftp(self)
+            if method == "POST" and path == "/pc/bg":          # onpc --bg / --logs / --stop / --ps
+                return self.app.pc.serve_bg(self)
             if method == "GET" and path == "/ws":
                 return self._websocket(query)
             if path.startswith("/api/"):

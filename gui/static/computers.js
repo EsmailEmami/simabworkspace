@@ -399,6 +399,8 @@
       });
       if (live) refreshLive();
       decorate();
+      devServers(x.bg || []);
+      linkWatch(x.link);
     }).catch(function () {});
   }
   function startPoll() {
@@ -441,6 +443,56 @@
   }
   setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
 
+  // dev servers (onpc --bg) in the chats of their project
+  var DEV_ACT = {
+    stop: function (x) { api('POST', 'pc/bgstop', { name: x.name }).then(poll).catch(fail); },
+    logs: function (x) {
+      api('GET', 'pc/bglog/' + encodeURIComponent(x.name)).then(function (d) {
+        SW.openModal({ title: d.name + ' · ' + d.state + (d.url ? ' · ' + d.url : ''), size: 'wide', body: h('pre', { class: 'pc-out' }, d.out || '(no output yet)') });
+      }).catch(fail);
+    } };
+  var dismissed = {};
+  function devServers(list) {
+    DEV_ACT.stop = function (x) {
+      if (x.state !== 'running') { dismissed[x.name + x.start] = 1; devServers(list); return; }
+      api('POST', 'pc/bgstop', { name: x.name }).then(poll).catch(fail);
+    };
+    var live2 = list.filter(function (x) { return x.state === 'running' || (x.state === 'exited' && !dismissed[x.name + x.start]); });
+    (S.tabs || []).forEach(function (t) {
+      if (!t.setDevServers || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
+      t.setDevServers(live2.filter(function (x) { return x.project === t.info.spec.project; }), DEV_ACT);
+    });
+  }
+
+  // the computer's link dropped while Claude works on a project here: say it in that chat at once,
+  // and again when it is back (with Continue)
+  var lastLink = '', warned = {};
+  function linkWatch(state) {
+    if (!state) return;
+    var was = lastLink;
+    lastLink = state;
+    if (!was || (was === 'connected') === (state === 'connected')) return;
+    (S.tabs || []).forEach(function (t) {
+      if (!t.system || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
+      var st = buildState(t.info.spec.project);
+      if (!st || st.on === 'server') return;
+      var id = t.info.id;
+      if (state !== 'connected' && t.busy) {
+        warned[id] = 1;
+        t.system('⚠ Your computer lost its connection to the server — Claude cannot reach '
+          + (st.on === 'local' ? 'the project files' : 'it for builds') + ' until it is back.', 'err');
+        toast('Your computer is offline — Claude in ' + t.info.spec.project + ' is stuck', 'warn');
+      } else if (state === 'connected' && warned[id]) {
+        delete warned[id];
+        var box = t.system('✓ Your computer is connected again.', 'mark');
+        if (box && box.append && t.ta && t.submit) box.append(' ', h('button', { class: 'btn sm', onclick: function () {
+          t.ta.value = 'My computer is connected again — continue where you stopped (redo the step that failed).';
+          t.submit();
+        } }, 'Continue'));
+      }
+    });
+  }
+
   // where a Bash command of this chat ran: "pc" / "server" / "" (a server project: no tag).
   // Same rules as onpc's hook: Local only → the computer, except commands about Claude's own files.
   var CLAUDE_FILES = /~\/\.claude|\$\{?HOME\}?\/\.claude|\/\.claude\/|\/tmp\/claude-/;
@@ -453,6 +505,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { open: open, poll: poll, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

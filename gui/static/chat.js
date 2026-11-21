@@ -353,8 +353,9 @@
       if (self.agentsEl && Object.keys(self.agents || {}).length) self.renderAgents();
     }, 1000);
     this.agentsEl = h('div', { class: 'agents hidden' });
+    this.devsEl = h('div', { class: 'pc-devs hidden' });      // dev servers of this project on the user's computer
     this.watchBar = h('div', { class: 'watchbar hidden' });
-    var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.agentsEl, this.statusEl, this.watchBar, this.attachEl,
+    var composer = this.composerEl = h('div', { class: 'chat-composer' }, this.slashEl, this.devsEl, this.agentsEl, this.statusEl, this.watchBar, this.attachEl,
       h('div', { class: 'cbox' }, this.ta,
         h('div', { class: 'cbar' },
           this.modeSel, this.modelSel, this.effortSel, this.optsBtn,
@@ -1400,6 +1401,25 @@
     this.alertUser('Claude wants to run a command on this computer', 'permission');
     if (this.inView() && SW.sound) SW.sound('permission', this);     // in view too: the user asked to hear it
     return { left: left, close: function (text) { self.closePerm(key, text); } };
+  };
+
+  // dev servers on the user's computer (onpc --bg, computers.js): ● name :port ↗ ■ above the message box
+  P.setDevServers = function (list, act) {
+    var key = JSON.stringify((list || []).map(function (x) { return [x.name, x.state, x.url, x.code]; }));
+    if (key === this.devsKey) return;
+    this.devsKey = key;
+    var els = (list || []).map(function (x) {
+      var port = (/:(\d+)/.exec(x.url || '') || [])[1];
+      var run = x.state === 'running';
+      return h('span', { class: 'pc-dev-chip ' + (run ? 'on' : 'off'), title: x.cmd + (x.url ? '\n' + x.url : '') + '\nclick: output' },
+        h('i', { class: 'pc-dot ' + (run ? 'on' : 'err') }),
+        h('b', { onclick: function () { act.logs(x); } }, x.name), port ? h('span', { class: 'muted' }, ':' + port) : null,
+        run ? null : h('span', { class: 'err' }, ' exited ' + (x.code == null ? '' : x.code)),
+        run && x.url ? h('a', { href: x.url, target: '_blank', rel: 'noopener', title: 'Open ' + x.url }, '↗') : null,
+        h('button', { class: 'icon-btn', title: run ? 'Stop it' : 'Remove', onclick: function () { act.stop(x); } }, run ? '■' : '✕'));
+    });
+    this.devsEl.classList.toggle('hidden', !els.length);
+    this.devsEl.replaceChildren.apply(this.devsEl, els.length ? [h('span', { class: 'muted' }, 'on your computer')].concat(els) : []);
   };
 
   // Computers (computers.js): where this chat's work runs, shown next to the status

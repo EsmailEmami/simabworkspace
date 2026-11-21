@@ -332,6 +332,35 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(bridge("call", r["dev"], json.dumps({"op": "stop", "name": "run-c1"})), {"ok": True})
             self.assertTrue(wait_for(lambda: x["_p"].poll() is not None, 8), "stopped on the computer")
 
+    def test_terminal_of_this_computer(self):
+        import pty as _pty
+        import select as _sel
+        self.store.update_settings({"localShell": "/bin/sh"})
+        master, slave = _pty.openpty()
+        p = subprocess.Popen([sys.executable, self.onpc_file, "--term", "proj"], stdin=slave, stdout=slave, stderr=slave,
+                             env=dict(os.environ, HOME=self.home, SHELL="/bin/sh"), start_new_session=True)
+        os.close(slave)
+
+        def until(text, t=10):
+            buf, end = b"", time.time() + t
+            while time.time() < end and text.encode() not in buf:
+                r, _, _ = _sel.select([master], [], [], 0.3)
+                if r:
+                    try:
+                        buf += os.read(master, 4096)
+                    except OSError:
+                        break
+            return buf.decode("utf-8", "replace")
+        self.store.update_settings({"localShell": "/bin/sh"})
+        until("$ ")                                   # the prompt: the shell is there
+        os.write(master, b"pwd; echo DONE-$((40+2))\n")
+        out = until("DONE-42")
+        self.assertIn("DONE-42", out, out)
+        self.assertIn(os.path.realpath(self.local), out, "a shell in the project folder on the computer")
+        os.write(master, b"exit\n")
+        self.assertEqual(p.wait(15), 0)
+        os.close(master)
+
     def test_a_project_can_be_tied_to_one_computer(self):
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "ffffffffffff"}))
         code, out, err = self.onpc("echo x")
@@ -498,7 +527,7 @@ class LocalOnly(EndToEnd):
     test_denied_by_the_user_or_the_list = test_wrong_secret_or_turned_off = None
     test_not_synced_folder_and_no_computer = test_stopping_onpc_stops_the_command = test_dev_server_in_the_background = None
     test_my_computers_project_runs_every_command_without_our_question = test_web_and_phone_see_and_answer_the_question = None
-    test_a_project_can_be_tied_to_one_computer = test_phone_runs_a_command_of_this_computer = None
+    test_a_project_can_be_tied_to_one_computer = test_phone_runs_a_command_of_this_computer = test_terminal_of_this_computer = None
 
     def setUp(self):
         super().setUp()
@@ -653,6 +682,13 @@ class LocalOnlyApp(unittest.TestCase):
             self.assertEqual(calls[-1], ["builds", "~/.simab-mnt/mine", "server"])
             self.assertNotIn("localOnly", self.store.data["projects"].get("mine") or {})
         self.assertTrue(os.path.isdir(self.folder), "the files stay on the computer")
+
+    def test_terminal_tab_of_the_computer(self):
+        proj = {"name": "p", "remote": "/srv/p", "local": "", "localExists": False, "source": "shared", "endpoint": {}}
+        b = sw.build_spec({"kind": "pcterm", "project": "p"}, sw.ServerConf("esi", "h", "22"), self.store, [proj])
+        self.assertIn("-tt", b["argv"])
+        self.assertIn("--term p", b["argv"][-1])
+        self.assertEqual((b["spec"]["kind"], b["title"]), ("pcterm", "p · your computer"))
 
     def test_run_commands_follow_where_the_project_builds(self):
         cmd = {"id": "c1", "name": "api", "cmd": "go run .", "where": "server", "url": "", "cwd": ""}

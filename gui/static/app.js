@@ -2115,7 +2115,8 @@
       { label: 'Changes — review, commit', disabled: !r && !p.localExists, action: function () { openSession({ kind: 'changes', project: p.name }); } },
       { label: 'Tasks', k: taskCount(p.name), action: function () { openTasks(p.name); } },
       { label: 'Server terminal', disabled: !r || !!p.localOnly, action: function () { openSession({ kind: 'shell', where: 'server', project: p.name }); } },
-      { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
+      S.web ? { label: 'Terminal on your computer', disabled: !S.remoteOnline, k: S.remoteOnline ? '' : 'not connected', action: function () { openSession({ kind: 'pcterm', project: p.name }); } }
+        : { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
       { label: 'Open folder', k: p.localExists ? '' : 'not synced', disabled: !p.localExists, action: function () { openFolder(p); } },

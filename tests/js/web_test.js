@@ -160,7 +160,7 @@ const tests = {
     q('.proj-head')[0].querySelector('.icon-btn').click();
     const items = q('button').map((b) => b.textContent.trim());
     assert.ok(items.includes('Server terminal'));
-    for (const name of ['Local terminal', 'VS Code on server', 'Port forwarding…']) {
+    for (const name of ['Terminal on your computer', 'VS Code on server', 'Port forwarding…']) {   // no computer connected
       const b = q('button').find((x) => x.textContent.trim().indexOf(name) === 0);
       assert.ok(b && b.disabled, name + ' shown, disabled');
     }

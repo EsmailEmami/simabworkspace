@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.61.0 2026-11-21  Web / phone: a terminal of your computer (project ⋯ → Terminal on your computer)
 #    1.60.0 2026-11-21  Web / phone: start, watch and stop the run commands of your computer
 #    1.59.0 2026-11-21  Speed test: real down / up / round trip between this computer and the server
 #    1.58.0 2026-11-21  Health: server, computers, link, sync, containers and Claude at a glance
@@ -369,7 +370,7 @@
 
 set -u -o pipefail
 
-VERSION="1.60.0"
+VERSION="1.61.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

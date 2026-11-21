@@ -55,7 +55,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.60.0"
+VERSION = "1.61.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1010,7 +1010,7 @@ def claude_inner(claude_cmd: str, mode: str, resume: str = "") -> str:
     """resume: a conversation id → open exactly that conversation."""
     flags = (" --resume " + resume) if resume else CLAUDE_MODES.get(mode, "")
     return "sh -c " + shlex.quote(CLAUDE_FIND + (claude_cmd or "claude") + flags + CLAUDE_FAIL)
-KINDS = ("shell", "claude", "run", "sync-info", "sync-monitor", "git-sync-on", "add-local", "add-server", "docker")
+KINDS = ("shell", "pcterm", "claude", "run", "sync-info", "sync-monitor", "git-sync-on", "add-local", "add-server", "docker")
 KIND_TITLES = {"shell": "", "claude": "Claude", "sync-info": "sync details", "sync-monitor": "sync monitor", "git-sync-on": "sync .git"}
 
 
@@ -1056,6 +1056,12 @@ def build_spec(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
             raise ApiError(400, "this project is not synced by simabworkspace")
     if where not in WHERE:
         raise ApiError(400, "where must be local or server")
+    if kind == "pcterm":                    # a terminal of the user's computer (Computers), through the server
+        c = conf.with_endpoint(None, None, None)
+        script = 'exec python3 "$HOME/.local/bin/onpc" --term ' + shlex.quote(pname)
+        return {"argv": ssh_base(c, multiplex=bool(s.get("sshMultiplex"))) + ["-tt", c.target, posix_sh(script)],
+                "cwd": os.path.expanduser("~"), "title": (pname or "home") + " · your computer", "env": {},
+                "spec": {"kind": kind, "project": pname, "where": "server", "cmdId": "", "claudeMode": "new", "slot": 0}, "url": ""}
 
     mode = spec.get("claudeMode") or "new"
     if mode not in CLAUDE_MODES:
@@ -5633,6 +5639,70 @@ def sftp(dev_id, project):
     return 0
 
 
+def term(project):
+    """A terminal of the user's computer, in this one (the web version's tab runs this over ssh -tt).
+    To the computer: b"d"+len+keys, b"r"+cols+rows; back: what the terminal prints."""
+    import select, termios, tty
+    cols, rows = 80, 24
+    try:
+        cols, rows = os.get_terminal_size(0)
+    except OSError:
+        pass
+    body = json.dumps({"project": project, "cols": cols, "rows": rows}).encode()
+    s = None
+    for d in [x for x in devices() if x["online"]]:
+        s = reach(d)
+        if s is None:
+            continue
+        s.settimeout(None)
+        s.sendall((("POST /pc/term HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                    "Content-Length: %d\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))).encode() + body)
+        head = b""
+        while not head.endswith(b"\r\n\r\n"):
+            c = s.recv(1)
+            if not c:
+                break
+            head += c
+        if b" 200 " in head.split(b"\r\n")[0] + b" ":
+            break
+        s.close()
+        s = None
+    if s is None:
+        sys.stderr.write("onpc: none of your connected computers has %s\r\n" % (project or "a home folder"))
+        return 255
+    old = termios.tcgetattr(0) if os.isatty(0) else None
+    if old:
+        tty.setraw(0)
+
+    def winch(*_):
+        try:
+            c, r = os.get_terminal_size(0)
+            s.sendall(b"r" + struct.pack(">HH", c, r))
+        except OSError:
+            pass
+    signal.signal(signal.SIGWINCH, winch)
+    try:
+        while True:
+            try:
+                r, _, _ = select.select([0, s], [], [])
+            except InterruptedError:
+                continue
+            if s in r:
+                b = s.recv(65536)
+                if not b:
+                    break
+                os.write(1, b)
+            if 0 in r:
+                b = os.read(0, 65536)
+                if not b:
+                    break
+                s.sendall(b"d" + struct.pack(">I", len(b)) + b)
+    finally:
+        if old:
+            termios.tcsetattr(0, termios.TCSADRAIN, old)
+    return 0
+
+
 def hook():
     """PreToolUse hook of a Local only project: every Bash command runs on the user's computer."""
     try:
@@ -5702,6 +5772,8 @@ def bg(body):
 
 
 def main(a):
+    if a[:1] == ["--term"]:
+        return term(a[1] if len(a) > 1 else "")
     if a[:1] == ["--bg"] and len(a) >= 3:
         return bg({"op": "start", "name": a[1], "cmd": a[2] if len(a) == 3 else " ".join(shlex.quote(x) for x in a[2:])})
     if a[:1] in (["--logs"], ["--stop"]) and len(a) >= 2:
@@ -6648,6 +6720,86 @@ class PcHub:
 
     def bg_list(self) -> list:
         return [{k: v for k, v in x.items() if k not in ("_p", "out")} for x in list(self.bg.values())]
+
+    def serve_term(self, h):
+        """POST /pc/term {project, cols, rows} from onpc --term: a shell here in that project's folder."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        cwd = os.path.expanduser("~")
+        if b.get("project"):
+            p = next((x for x in self.app.projects() if x["name"] == b.get("project") and x.get("localExists")), None)
+            if not p:
+                return h._json(404, {"error": "this project is not on " + c["name"]})
+            cwd = p["local"]
+        cols = max(20, min(int(b.get("cols") or 80), 500))
+        rows = max(5, min(int(b.get("rows") or 24), 300))
+        argv = local_shell_argv(local_shell(self.app.store.settings))
+        env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor", PATH=tool_path())
+        if IS_WIN:
+            pt = ConPty(argv, cwd, env, cols, rows)
+            proc, rd, wr, rs = pt.proc, pt.read, pt.write, pt.resize
+        else:
+            master, slave = os.openpty()
+            set_winsize(master, rows, cols)
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=slave, stdout=slave, stderr=slave,
+                                    start_new_session=True, preexec_fn=_child_setup, close_fds=True)
+            os.close(slave)
+            rd = lambda n=65536: os.read(master, n)
+            wr = lambda d: os.write(master, d)
+            rs = lambda c2, r2: set_winsize(master, r2, c2)
+        h.send_response(200)
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+
+        def out():
+            while True:
+                try:
+                    d = rd(65536)
+                except OSError:
+                    d = b""
+                if not d:
+                    break
+                try:
+                    h.wfile.write(d)
+                    h.wfile.flush()
+                    self.meter[1] += len(d)
+                except OSError:
+                    break
+            try:
+                h.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        threading.Thread(target=out, daemon=True).start()
+        r = h.rfile
+        try:
+            while proc.poll() is None:
+                k = r.read(1)
+                if not k:
+                    break
+                if k == b"d":
+                    n = struct.unpack(">I", r.read(4))[0]
+                    d = r.read(n)
+                    self.meter[0] += n
+                    wr(d)
+                elif k == b"r":
+                    c2, r2 = struct.unpack(">HH", r.read(4))
+                    rs(max(20, c2), max(5, r2))
+        except (OSError, struct.error):
+            pass
+        finally:
+            if proc.poll() is None:
+                pc_kill(proc)
+            if not IS_WIN:
+                try:
+                    os.close(master)
+                except OSError:
+                    pass
 
     def serve_remote(self, h):
         """POST /pc/remote {op: asks | answer} from PC_BRIDGE_PY: the web version / the phone."""
@@ -10570,6 +10722,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_run(self)
             if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
                 return self.app.pc.serve_sftp(self)
+            if method == "POST" and path == "/pc/term":        # a terminal of this computer in the web version
+                return self.app.pc.serve_term(self)
             if method == "POST" and path == "/pc/remote":      # the web version / phone: questions and answers
                 return self.app.pc.serve_remote(self)
             if method == "POST" and path == "/pc/bg":          # onpc --bg / --logs / --stop / --ps

@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.5 2026-11-22  macOS: a user name with a space ("simab co") no longer breaks ~/.ssh/config (key path quoted; an old bad line is repaired on start)
 #    1.65.4 2026-11-22  A Local only project opened on another of your computers: its owner is known everywhere (no false "off"), @ lists the owner's files, nothing comes from this disk; work goes only to the owner
 #    1.65.3 2026-11-22  Chat top right: the line badge and the computer chip sit side by side (they overlapped)
 #    1.65.2 2026-11-22  Each Local only chat shows its line to your computer at the top right: connections, round trip, green / yellow / red
@@ -389,7 +390,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.4"
+VERSION="1.65.5"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -816,7 +817,9 @@ write_ssh_config() {
   {
     printf '\n%s\n' "$RC_MARK_BEGIN"
     printf 'Host %s\n' "$SSH_HOST"
-    printf '    IdentityFile %s\n' "$(winpath "$SSH_KEY")"
+    # quoted when the path has a space (/Users/simab co/…): unquoted, ssh refuses the whole file
+    _k=$(winpath "$SSH_KEY"); case "$_k" in *" "*) _k="\"$_k\"" ;; esac
+    printf '    IdentityFile %s\n' "$_k"
     printf '%s\n' "$RC_MARK_END"
   } >> "$SSH_CONFIG"
   ok "Added your key for $SSH_HOST to ~/.ssh/config (marked block, so sync uses it too)"

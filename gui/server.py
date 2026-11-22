@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.4"
+VERSION = "1.65.5"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -9013,6 +9013,31 @@ def home_path(*parts) -> Path:
     return Path(os.path.expanduser("~"), *parts)
 
 
+def ssh_cfg_value(v: str) -> str:
+    """A path in ~/.ssh/config: quoted when it has a space ("/Users/simab co/.ssh/key") — unquoted, ssh
+    reads "extra arguments at end of line" and refuses the WHOLE file (every ssh of the app stops)."""
+    return f'"{v}"' if " " in v and not v.startswith('"') else v
+
+
+def heal_ssh_config(path: Path = None) -> bool:
+    """Older versions wrote IdentityFile unquoted in our own blocks: quote it there (only our blocks)."""
+    f = path or home_path(".ssh", "config")
+    try:
+        old = f.read_text()
+    except OSError:
+        return False
+    def fix(m):
+        return re.sub(r"(?mi)^([ \t]*IdentityFile[ \t]+)([^\"\n][^\n]*?[ \t][^\n]*?)[ \t]*$",
+                      lambda x: x.group(1) + '"' + x.group(2) + '"', m.group(0))
+    new = old
+    for b, e in ((RC_MARK_BEGIN, RC_MARK_END), (GUI_MARK_BEGIN, GUI_MARK_END)):
+        new = re.sub(re.escape(b) + r".*?" + re.escape(e), fix, new, flags=re.S)
+    if new == old:
+        return False
+    f.write_text(new)
+    return True
+
+
 def strip_block(text: str) -> str:
     return re.sub(re.escape(RC_MARK_BEGIN) + r".*?" + re.escape(RC_MARK_END) + r"\n?", "", text, flags=re.S)
 
@@ -9031,7 +9056,7 @@ def write_server_conf(conf: ServerConf):
     old = cfg.read_text() if cfg.is_file() else ""
     new = strip_block(old)
     if conf.key and os.path.basename(conf.key) not in DEFAULT_KEY_NAMES:
-        new = new.rstrip("\n") + ("\n" if new.strip() else "") + f"\n{RC_MARK_BEGIN}\nHost {conf.host}\n    IdentityFile {conf.key}\n{RC_MARK_END}\n"
+        new = new.rstrip("\n") + ("\n" if new.strip() else "") + f"\n{RC_MARK_BEGIN}\nHost {conf.host}\n    IdentityFile {ssh_cfg_value(conf.key)}\n{RC_MARK_END}\n"
     if new != old:
         cfg.write_text(new)
         os.chmod(cfg, 0o600)
@@ -11751,8 +11776,7 @@ def write_vscode_ssh_alias(conf: ServerConf, ssh_config: Path = None, chmod=True
     lines = [GUI_MARK_BEGIN, f"Host {VSCODE_HOST_ALIAS}", f"    HostName {conf.host}",
              f"    User {conf.user}", f"    Port {conf.port}"]
     if conf.key:
-        key = f'"{conf.key}"' if " " in conf.key else conf.key
-        lines.append(f"    IdentityFile {key}")
+        lines.append(f"    IdentityFile {ssh_cfg_value(conf.key)}")
     lines.append(GUI_MARK_END)
     # Put our Host block first: ssh uses the first value it finds per option.
     new = "\n".join(lines) + "\n" + ("\n" + old.lstrip("\n") if old.strip() else "")
@@ -14298,6 +14322,11 @@ def start_wsl_keepalive():
 
 def serve(foreground_msg=True):
     install_crash_logging()
+    try:                          # an IdentityFile with a space written unquoted by an older version
+        if heal_ssh_config():
+            log_line("~/.ssh/config: quoted a key path with a space in our block (ssh refused the file)")
+    except OSError as e:
+        log_line(f"~/.ssh/config not healed: {e}")
     store = Store()
     app = App(store)
     httpd = make_server(app, int(store.settings.get("port") or 0), wait=15 if os.environ.get("SIMAB_RESTART") else 0)

@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.5"
+VERSION = "1.65.6"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -920,20 +920,36 @@ def posix_sh(cmd: str) -> str:
     return "sh -c " + shlex.quote(cmd)
 
 
+# A path with a space after IdentityFile / CertificateFile ("/Users/simab co/.ssh/key"), unquoted: ssh says
+# "extra arguments at end of line … terminating" and refuses the WHOLE file — every ssh stops. Such a line
+# is never valid, so quoting it can only fix it.
+SSH_PATH_LINE = re.compile(r"(?mi)^([ \t]*(?:IdentityFile|CertificateFile)(?:[ \t]*=[ \t]*|[ \t]+))"
+                           r"([^\"\n][^\n]*?[ \t][^\n]*?)[ \t]*$")
+
+
+def quote_ssh_paths(text: str) -> str:
+    return SSH_PATH_LINE.sub(lambda m: m.group(1) + '"' + m.group(2) + '"', text)
+
+
 def win_ssh_config() -> list:
-    """Windows: ssh refuses ~/.ssh/config when its owner/ACL is "wrong" ("Bad owner or
-    permissions on C:\\Users\\…/.ssh/config") and then connects to nothing. A file given with
-    -F is not checked, so ssh gets a copy of the user's config (Host aliases, Include, proxies
-    still work) from our own folder; no config → an empty one. [] off Windows / on errors."""
-    if not IS_WIN:
-        return []
+    """The -F file every ssh of the app gets (all three call sites), or [] = the user's own config.
+    - Windows: ssh refuses ~/.ssh/config when its owner/ACL is "wrong" ("Bad owner or permissions on
+      C:\\Users\\…/.ssh/config"); a file given with -F is not checked → always a copy.
+    - any OS: a copy with unquoted space-paths quoted (quote_ssh_paths) when the user's file has one
+      (the macOS user "simab co"), so our ssh works even before / without healing the file itself.
+    The copy keeps Host aliases, Include, proxies. No config → an empty one (Windows)."""
     try:
         src = Path(home_path(".ssh", "config"))
-        dst = config_dir() / "ssh_config"
         data = src.read_bytes() if src.is_file() else b""
-        if not dst.is_file() or dst.read_bytes() != data:
+        text = data.decode("utf-8", "surrogateescape")
+        fixed = quote_ssh_paths(text).encode("utf-8", "surrogateescape")
+        if not IS_WIN and fixed == data:
+            return []
+        dst = config_dir() / "ssh_config"
+        if not dst.is_file() or dst.read_bytes() != fixed:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(data)
+            dst.write_bytes(fixed)
+            os.chmod(dst, 0o600)
         return ["-F", str(dst)]
     except OSError:
         return []
@@ -9020,21 +9036,20 @@ def ssh_cfg_value(v: str) -> str:
 
 
 def heal_ssh_config(path: Path = None) -> bool:
-    """Older versions wrote IdentityFile unquoted in our own blocks: quote it there (only our blocks)."""
+    """~/.ssh/config with an unquoted space-path (an older version of ours wrote one; or anyone): quote it
+    in place — such a line is never valid, ssh refuses the whole file. A backup is kept next to it.
+    Mutagen and the user's own ssh read this file directly, so the copy of win_ssh_config is not enough."""
     f = path or home_path(".ssh", "config")
     try:
-        old = f.read_text()
+        old = f.read_text(encoding="utf-8", errors="surrogateescape")
     except OSError:
         return False
-    def fix(m):
-        return re.sub(r"(?mi)^([ \t]*IdentityFile[ \t]+)([^\"\n][^\n]*?[ \t][^\n]*?)[ \t]*$",
-                      lambda x: x.group(1) + '"' + x.group(2) + '"', m.group(0))
-    new = old
-    for b, e in ((RC_MARK_BEGIN, RC_MARK_END), (GUI_MARK_BEGIN, GUI_MARK_END)):
-        new = re.sub(re.escape(b) + r".*?" + re.escape(e), fix, new, flags=re.S)
+    new = quote_ssh_paths(old)
     if new == old:
         return False
-    f.write_text(new)
+    bak = f.with_name(f.name + ".simab-backup")
+    bak.write_text(old, encoding="utf-8", errors="surrogateescape")
+    f.write_text(new, encoding="utf-8", errors="surrogateescape")
     return True
 
 

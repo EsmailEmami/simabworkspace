@@ -187,6 +187,10 @@ const tests = {
       assert.strictEqual(tab.linkEl.className, 'chat-link q-slow');
       tab.paintLink({ state: 'off', rtt: null, chats: {} });
       assert.match(tab.linkEl.textContent, /offline/);
+      global.SW.S.web = true;                                               // web / phone: shown too
+      tab.paintLink({ state: 'connected', web: true, rtt: null, chats: { aaaaaaaaaaaaaaaa: { n: 1, rtt: 300 } } });
+      assert.match(tab.linkEl.textContent, /1 conn · 300 ms · slow/);
+      delete global.SW.S.web;
       global.SW.project = () => ({ remote: '/home/esi/p' });              // a server project: no badge
       tab.paintLink({ state: 'connected', rtt: 50, chats: {} });
       assert.ok(tab.linkEl.classList.contains('hidden'));

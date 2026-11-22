@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.7"
+VERSION = "1.65.8"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2562,13 +2562,74 @@ print(json.dumps({"off": off + end, "size": size, "entries": out}))
 '''
 
 
+# The commands one chat ran on my computers (RunNote of onpc): the last 5 of the last 10 minutes, each
+# with the end of its output (64 KB); older ones removed after a day.
+PC_RUNS_PY = r'''
+import os, sys, json, time
+d = os.path.expanduser("~/.cache/simabworkspace/pc/runs/" + sys.argv[1])
+runs, now = [], time.time()
+for f in sorted(os.listdir(d) if os.path.isdir(d) else []):
+    p = os.path.join(d, f)
+    if f.endswith((".json", ".log")) and now - os.path.getmtime(p) > 86400:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        continue
+    if not f.endswith(".json"):
+        continue
+    try:
+        m = json.load(open(p))
+    except (OSError, ValueError):
+        continue
+    if now - os.path.getmtime(p) > 600 and m.get("state") == "done":
+        continue
+    try:
+        with open(p[:-5] + ".log", "rb") as lf:
+            lf.seek(0, 2)
+            lf.seek(max(0, lf.tell() - 65536))
+            m["out"] = lf.read().decode("utf-8", "replace")
+    except OSError:
+        m["out"] = ""
+    runs.append(m)
+print(json.dumps({"runs": runs[-5:]}))
+'''
+
+
+# Each Local only chat's line (Mux.note of onpc): {"chats": {key: {n, rtt}}}; a minute old → no rtt,
+# 10 minutes → gone (and removed).
+PC_LINKS_PY = r'''
+import os, json, time
+d = os.path.expanduser("~/.cache/simabworkspace/pc/links")
+out, now = {}, time.time()
+for f in (os.listdir(d) if os.path.isdir(d) else []):
+    if not f.endswith(".json"):
+        continue
+    p = os.path.join(d, f)
+    try:
+        j = json.load(open(p))
+    except (OSError, ValueError):
+        continue
+    age = now - (j.get("at") or 0)
+    if age > 600:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        continue
+    out[f[:-5]] = {"n": j.get("n") or 0, "rtt": j.get("rtt") if age < 60 else None}
+print(json.dumps({"chats": out}))
+'''
+
+
 # The @ list of a Local only project opened on another of my computers: onpc on the server asks the
 # computer it lives on (cd into its mount so onpc knows the project). → {"files"} or {"error"}
 PC_FILES_PY = r'''
 import os, sys, json, subprocess
 try:
     os.chdir(os.path.expanduser(sys.argv[1]))
-    r = subprocess.run([sys.executable, os.path.expanduser("~/.local/bin/onpc"), "--fs", "files", "{}"],
+    r = subprocess.run([sys.executable, os.path.expanduser("~/.local/bin/onpc"), "--fs",
+                        sys.argv[2] if len(sys.argv) > 2 else "files", "{}"],
                        capture_output=True, timeout=80)
     out = r.stdout.decode("utf-8", "replace").strip()
     print(out if out.startswith("{") else json.dumps({"error": (r.stderr.decode("utf-8", "replace").strip()
@@ -3536,6 +3597,12 @@ def git_repos(app, project: dict) -> dict:
         local = real_repos([(r, ok) for r, ok in checked if ok is not None])
     if local:
         return {"where": "local", "repos": local}
+    if project.get("remote") and project.get("localOnly") and app.conf.configured:     # found on its computer
+        try:
+            r = remote_python(app.conf, PC_FILES_PY, [project["remote"], "repos"], timeout=60) or {}
+        except ApiError:
+            r = {}
+        return {"where": "server", "repos": [x for x in r.get("repos") or [] if isinstance(x, str)]}
     if project.get("remote") and app.conf.configured:
         conf = app.conf
         ep = project.get("endpoint") or {}
@@ -3592,6 +3659,9 @@ class GitRepo:
             envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in GIT_ENV.items())
             rpath = self.p["remote"].rstrip("/") + ("/" + self.repo if self.repo else "")
             cmd = f"cd {remote_path_expr(rpath)} && {envs} {prog} " + " ".join(shlex.quote(a) for a in args)
+            if self.p.get("localOnly"):     # lives on one of my computers: git runs there (the mount's .git is empty)
+                cmd = (f"cd {remote_path_expr(self.p['remote'])} && \"$HOME/.local/bin/onpc\" --git {shlex.quote(prog)} "
+                       f"{shlex.quote(json.dumps(args))} {shlex.quote(self.repo)}")
             argv = ssh_base(conf, multiplex=bool(self.app.store.settings.get("sshMultiplex"))) + ["-T", "-o", "BatchMode=yes", conf.target, posix_sh(cmd)]
             cwd = os.path.expanduser("~")
         try:
@@ -5719,6 +5789,47 @@ def pinned(cwd, why=False):
 CHOSEN = {"chat": "chosen for this chat", "project": "chosen for this project", "default": "your default computer"}
 
 
+class RunNote:
+    """A copy of a command's output on the server, for the web version / phone: it cannot reach the
+    computer's app to see it live. D/runs/<chat key>/<id>.json {id, cmd, dev, start, state, code} + .log
+    (first 2 MB). Only for a chat's commands (SIMAB_CHAT)."""
+    def __init__(self, cmd, dev):
+        import time
+        self.time = time
+        key = re.sub(r"[^0-9a-f]", "", os.environ.get("SIMAB_CHAT", ""))[:16]
+        self.dir = os.path.join(D, "runs", key) if len(key) == 16 else ""
+        self.meta = {"id": "%d%04d" % (time.time() * 1000, os.getpid() % 10000), "cmd": cmd[:2000],
+                     "dev": dev.get("name") or "", "start": int(time.time()), "state": "running", "code": None}
+        self.size = 0
+        self._meta()
+
+    def _meta(self):
+        if not self.dir:
+            return
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            tmp = os.path.join(self.dir, self.meta["id"] + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump(self.meta, f)
+            os.replace(tmp, os.path.join(self.dir, self.meta["id"] + ".json"))
+        except OSError:
+            self.dir = ""
+
+    def add(self, b):
+        if not self.dir or self.size > 2_000_000:
+            return
+        try:
+            with open(os.path.join(self.dir, self.meta["id"] + ".log"), "ab") as f:
+                f.write(b)
+            self.size += len(b)
+        except OSError:
+            pass
+
+    def done(self, code):
+        self.meta.update(state="done", code=code)
+        self._meta()
+
+
 def send(d, cwd, cmd):
     s = reach(d)
     if s is None:
@@ -5748,17 +5859,22 @@ def send(d, cwd, cmd):
             return NOT_HERE
         sys.stderr.write("onpc: %s: %s\n" % (d.get("name") or "your computer", msg or "refused (HTTP %d)" % code))
         return 126 if code == 403 else 255
+    note = RunNote(cmd, d)
     while True:
         k = f.read(1)
         if not k:
             sys.stderr.write("onpc: the connection to %s was lost — the command may not have finished.\n" % (d.get("name") or "your computer"))
+            note.done(255)
             return 255
         n = struct.unpack(">i", f.read(4))[0]
         if k == b"x":
+            note.done(n)
             return n
         out = sys.stdout if k == b"o" else sys.stderr
-        out.buffer.write(f.read(n))
+        chunk = f.read(n)
+        out.buffer.write(chunk)
         out.flush()
+        note.add(chunk)
 
 
 def run(cmd, on):
@@ -6034,11 +6150,28 @@ class Mux:
                 continue
             if b" 200 " in head.split(b"\r\n")[0] + b" ":
                 s.settimeout(None)
+                self.dev = d.get("id") or ""
                 return s
             if b" 404 " in head.split(b"\r\n")[0] + b" ":
                 self.old = True
             s.close()
         return None
+
+    def note(self, n, rtt=None):
+        """This chat's line, for the web version / phone (they cannot ask the computer's app):
+        D/links/<chat key>.json {n: open connections, rtt: ms of the last ping, at, dev}."""
+        key = re.sub(r"[^0-9a-f]", "", os.environ.get("SIMAB_CHAT", ""))[:16]
+        if len(key) != 16:
+            return
+        try:
+            d = os.path.join(D, "links")
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, key + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump({"n": n, "rtt": rtt, "at": int(self.time.time()), "dev": getattr(self, "dev", "")}, f)
+            os.replace(tmp, os.path.join(d, key + ".json"))
+        except OSError:
+            pass
 
     def _kill(self, s):
         with self.lock:
@@ -6066,6 +6199,7 @@ class Mux:
                 if j.get("pong"):
                     if st.get("sent"):
                         st["rtt"] = int((st["rx"] - st["sent"]) * 1000)     # this chat's real round trip
+                        self.note(1, st["rtt"])
                     continue
                 with self.lock:
                     w = self.waiting.pop(j.pop("id", None), None)
@@ -6075,6 +6209,7 @@ class Mux:
         except (OSError, ValueError):
             pass
         st["gone"] = True
+        self.note(0, None)
         with self.lock:                                # the line dropped: whoever still waits is told now
             if self.sock is s:
                 self.sock = None
@@ -6114,6 +6249,7 @@ class Mux:
                     with self.lock:
                         self.sock = s
                     st = {"rx": self.time.time()}
+                    self.note(1, None)
                     self.T.Thread(target=self._reader, args=(s, st), daemon=True).start()
                     self.T.Thread(target=self._heart, args=(s, st), daemon=True).start()
             return s
@@ -6358,6 +6494,20 @@ def main(a):
         return 0
     if a[:1] == ["--mcp-serve"]:
         return mcp_serve()
+    if a[:1] == ["--git"] and len(a) == 4:         # --git PROG ARGV-JSON REPO: git on the computer, its output as git's
+        try:
+            argv = json.loads(a[2])
+        except ValueError:
+            argv = None
+        import base64
+        j, err = fs_call("git", {"prog": a[1], "argv": argv, "repo": a[3],
+                                 "stdin": base64.b64encode(sys.stdin.buffer.read()).decode()})
+        if err:
+            sys.stderr.write(err + "\n")
+            return 255
+        sys.stdout.buffer.write(base64.b64decode(j.get("out") or ""))
+        sys.stderr.write(j.get("err") or "")
+        return int(j.get("code") or 0)
     if a[:1] == ["--fs"] and len(a) == 3:          # one file request of this Local only folder → JSON
         try:
             args = json.loads(a[2])
@@ -8617,9 +8767,57 @@ def pc_write(local_root: str, server_root: str, a: dict) -> dict:
     return {"text": f"The file {sp} has been updated successfully." if had else f"File created successfully at: {sp}"}
 
 
+# git of a Local only project opened elsewhere (web version, phone, another computer): run on the computer it
+# lives on. The server is not trusted: only the Changes panel's own subcommands, config only to read, no
+# option that runs a program (--upload-pack, --receive-pack, --exec…).
+PCGIT_SUBS = {"add", "rm", "rev-parse", "diff", "commit", "push", "pull", "fetch", "ls-files", "log", "config",
+              "checkout", "switch", "restore", "reset", "update-index", "status", "stash", "show", "rev-list",
+              "rebase", "merge", "hash-object", "for-each-ref", "clean", "checkout-index", "check-ref-format",
+              "check-ignore", "branch", "apply", "cherry-pick", "revert", "tag", "mv", "ls-tree", "cat-file",
+              "symbolic-ref", "merge-base", "remote", "describe", "blame", "ls-remote"}
+PCGIT_BAD = ("--upload-pack", "--receive-pack", "--exec", "--config", "--git-dir", "--work-tree", "--ext-diff",
+             "--textconv")
+
+
+def pc_git(local_root: str, server_root: str, a: dict) -> dict:
+    """{prog: git|cat, argv, repo, stdin (base64)} → {code, out (base64), err}."""
+    argv, prog, repo = a.get("argv"), a.get("prog") or "git", str(a.get("repo") or "")
+    if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv) or not argv:
+        raise ValueError("bad git arguments")
+    base, _ = pcfs_base(local_root, server_root, repo, heavy_ok=True)
+    if prog == "cat":                                  # a file's text for the diff view (cat -- path)
+        fp, _ = pcfs_base(local_root, server_root, (repo + "/" if repo else "") + argv[-1], heavy_ok=True)
+        with open(fp, "rb") as f:
+            return {"code": 0, "out": base64.b64encode(f.read(30_000_000)).decode(), "err": ""}
+    if prog != "git" or argv[0] not in PCGIT_SUBS:
+        raise PermissionError(f"git {argv[0]} is not run on the computer from the server")
+    if argv[0] == "config" and "--get" not in argv:
+        raise PermissionError("git config only reads here")
+    if any(x.startswith(PCGIT_BAD) for x in argv):
+        raise PermissionError("that git option runs a program — not from the server")
+    git = shutil.which("git")
+    if not git:
+        raise FileNotFoundError("git is not installed on this computer")
+    try:
+        r = subprocess.run([git] + argv, cwd=base, input=base64.b64decode(a.get("stdin") or ""), capture_output=True,
+                           timeout=300, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C", GIT_OPTIONAL_LOCKS="0"),
+                           **NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise OSError("git took over 5 minutes")
+    return {"code": r.returncode, "out": base64.b64encode(r.stdout).decode(), "err": r.stderr.decode("utf-8", "replace")[-20000:]}
+
+
+def pc_repos(local_root: str, server_root: str, a: dict) -> dict:
+    """The repositories of a Local only project, found on its computer (the mount's .git is empty)."""
+    found = find_local_repos(local_root)
+    checked = [(r, local_repo_ok(local_root, r)) for r in found]
+    return {"repos": real_repos([(r, ok) for r, ok in checked if ok is not None])}
+
+
 PCFS_OPS = {"grep": lambda *x: {"text": pc_grep(*x)}, "glob": lambda *x: {"text": pc_glob(*x)},
             "read": pc_read, "edit": pc_edit, "write": pc_write,
-            "files": lambda lr, sr, a: {"files": pc_files(lr)[:FILE_LIMIT]}}       # the @ list of another computer
+            "files": lambda lr, sr, a: {"files": pc_files(lr)[:FILE_LIMIT]},      # the @ list of another computer
+            "git": pc_git, "repos": pc_repos}
 
 
 def sftp_stats() -> dict:
@@ -11333,6 +11531,10 @@ class App:
                 raise ApiError(400, "the server is not configured")
             remote_python(self.conf, PC_ADMIN_PY, ["default", dev])
             return self.pc_devices()
+        if key == ("GET", "net") and self.web:           # each Local only chat's line, as the server saw it
+            return self.web_net()
+        if key == ("GET", "webruns") and len(rest) == 2 and self.web:     # a chat's commands, live
+            return self.web_runs(rest[1])
         if self.web:
             raise ApiError(403, "not available in the web version")
         if key == ("POST", "local"):
@@ -11347,7 +11549,7 @@ class App:
             return self.pc.pending()
         if key == ("POST", "guest") and not self.web:         # this computer's user answers a visitor of a shared link
             return self.pc.guest_answer(body.get("id"), body.get("answer"))
-        if key == ("GET", "net"):
+        if key == ("GET", "net") and not self.web:
             return self.pc.net_info()
         if key == ("POST", "speed"):
             return ssh_speed(self.conf)
@@ -11517,6 +11719,26 @@ class App:
             (self.store.data["projects"].get(name) or {}).pop("localOnly", None)
             self.store.save()
         self._pc_cache = None
+
+    def web_runs(self, chat: str) -> dict:
+        """The web version / phone: the commands a chat ran on my computers, with their output so far
+        (RunNote of onpc) — the Bash card shows them live, like in the app."""
+        if not RELAY_KEY_RE.fullmatch(chat or ""):
+            raise ApiError(400, "bad chat")
+        r = remote_python(self.conf, PC_RUNS_PY, [chat], timeout=15) or {}
+        return {"runs": [x for x in r.get("runs") or [] if isinstance(x, dict)]}
+
+    def web_net(self) -> dict:
+        """The web version / phone: each Local only chat's line, as onpc on the server measured it
+        (Mux.note → links/<chat>.json). The computer's own app is not reachable from here."""
+        c = getattr(self, "_web_net", None)
+        if c and time.time() - c[0] < 2.5:
+            return c[1]
+        r = remote_python(self.conf, PC_LINKS_PY, [], timeout=15) or {}
+        out = {"state": "connected", "web": True, "rtt": None, "bars": 0, "down": 0, "up": 0,
+               "chats": r.get("chats") if isinstance(r.get("chats"), dict) else {}}
+        self._web_net = (time.time(), out)
+        return out
 
     def pc_devices(self, cached=False) -> dict:
         """The computers of this server user (from the server) + which projects build on them.

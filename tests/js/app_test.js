@@ -109,6 +109,7 @@ global.fetch = (url, opts) => {
   else if (/^\/api\/git\/cheshmeh\/(resolve|merge-abort)$/.test(url)) res = { status: Object.assign({}, gitStatus, { conflicts: 0, merging: true,
     files: gitStatus.files.map((f) => Object.assign({}, f, f.conflict ? { x: 'M', y: ' ', conflict: false } : {})) }) };
   else if (url.startsWith('/api/git/cheshmeh/status')) res = gitStatus;
+  else if (url.startsWith('/api/pc/webruns/')) res = global.fakeWebRuns || { runs: [] };
   else if (url.startsWith('/api/color/')) res = { color: body.color };
   else if (url.startsWith('/api/title/')) res = { title: body.title };
   else if (url.startsWith('/api/starter/')) res = { starter: (body.text || '').trim() };
@@ -1939,6 +1940,26 @@ const tests = {
     delete pr.buildsOn;
     S.pc = { on: false };
     SW.renderProjects();
+  },
+
+  async 'web: a chat\'s command on my computer shows live in its Bash card, old finished ones do not'() {
+    const S = global.SW.S;
+    const views = [];
+    const tab = { pcRunView: (r, out, who) => views.push([r.id, r.state, out, who]), busy: true, closed: false,
+      info: { spec: { project: 'lo', relay: 'aaaaaaaaaaaaaaaa' } } };
+    const oldTabs = S.tabs, oldProjects = S.projects;
+    S.web = true;
+    S.tabs = [tab];
+    S.projects = [{ name: 'lo', remote: '~/.simab-mnt/lo', localOnly: 'a1b2c3d4e5f6', buildsOn: 'local' }];
+    try {
+      global.fakeWebRuns = { runs: [{ id: 'old', state: 'done', code: 0, out: 'x', dev: 'ESIPC' },
+        { id: 'r1', state: 'running', out: 'building…', dev: 'ESIPC' }] };
+      global.SWComputers._webRuns(); await settle();
+      global.fakeWebRuns = { runs: [{ id: 'r1', state: 'done', code: 0, out: 'building… done', dev: 'ESIPC' }] };
+      global.SWComputers._webRuns(); await settle();
+      global.SWComputers._webRuns(); await settle();
+      assert.deepStrictEqual(views, [['r1', 'running', 'building…', 'ESIPC'], ['r1', 'done', 'building… done', 'ESIPC']]);
+    } finally { S.tabs = oldTabs; S.projects = oldProjects; delete global.fakeWebRuns; S.web = false; }
   },
 
   async 'web: Connect a computer gives one line with a one-time link'() {

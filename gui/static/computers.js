@@ -784,8 +784,15 @@
   var netEl = document.getElementById('pc-net');
   if (netEl) { netEl.style.cursor = 'pointer'; netEl.addEventListener('click', function () { speedTest(); }); }
 
+  var webNetAt = 0;
   function pollNet() {
-    if (S.web || !S.pc || !S.pc.on || !(S.projects || []).some(function (p) { return p.localOnly; })) { netBox(null); return Promise.resolve(); }
+    var lo = (S.projects || []).some(function (p) { return p.localOnly; });
+    if (S.web) {                     // web / phone: the chats' lines as the server measured them (every 3 s)
+      if (!lo || Date.now() - webNetAt < 2900) return Promise.resolve();
+      webNetAt = Date.now();
+      return api('GET', 'pc/net').then(netBox).catch(function () { /* next time */ });
+    }
+    if (!S.pc || !S.pc.on || !lo) { netBox(null); return Promise.resolve(); }
     return api('GET', 'pc/net').then(netBox).catch(function () { netBox({ state: 'off', bars: 0, down: 0, up: 0 }); });
   }
   setInterval(function () { if (!document.hidden) pollNet(); }, 1000);
@@ -847,6 +854,26 @@
     }).catch(function () {});
   }
   setInterval(function () { if (S.web && !document.hidden) webPoll(); }, 3000);
+  // web / phone: a chat's commands on my computers, live in their Bash card (onpc keeps a copy on the server)
+  var webRunsDone = {}, webRunsSeen = {};
+  function webRuns() {
+    (S.tabs || []).forEach(function (t) {
+      if (!t.pcRunView || t.closed || !t.busy || !t.info || !t.info.spec || !t.info.spec.relay) return;
+      var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
+      if (!p || (p.buildsOn !== 'local' && p.buildsOn !== 'computers' && !p.localOnly)) return;
+      api('GET', 'pc/webruns/' + t.info.spec.relay).then(function (d) {
+        (d.runs || []).forEach(function (r) {
+          if (webRunsDone[r.id]) return;
+          if (r.state === 'done') {
+            webRunsDone[r.id] = 1;
+            if (!webRunsSeen[r.id]) return;          // finished before we saw it run: not this card's
+          } else webRunsSeen[r.id] = 1;
+          t.pcRunView(r, r.out || '', r.dev || 'your computer');
+        });
+      }).catch(function () { /* next time */ });
+    });
+  }
+  setInterval(function () { if (S.web && !document.hidden) webRuns(); }, 2000);
 
   // dev servers (onpc --bg) in the chats of their project
   var DEV_ACT = {
@@ -981,6 +1008,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, fresh: function () { return infoFresh; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, devLines: devLines, devLog: devLog, portOf: portOf, devBadge: devBadge, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, fresh: function () { return infoFresh; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, devLines: devLines, devLog: devLog, portOf: portOf, devBadge: devBadge, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _webRuns: webRuns, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

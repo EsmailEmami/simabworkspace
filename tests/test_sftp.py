@@ -592,5 +592,132 @@ class MountRecordsTheOwner(unittest.TestCase):
                          r.stderr.decode()[-500:])
 
 
+class WebSeesTheLine(unittest.TestCase):
+    """The web version / phone cannot ask the computer's app: onpc writes each chat's line on the server."""
+    def test_note_then_links_script(self):
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"HOME": home, "SIMAB_CHAT": "a" * 16}):
+            ns = {"__name__": "onpc_test"}
+            exec(compile(sw.ONPC_PY, "onpc", "exec"), ns)
+            m = ns["Mux"]()
+            m.dev = "dev1"
+            m.note(1, 88)
+        d = os.path.join(home, ".cache/simabworkspace/pc/links")
+        self.assertEqual(json.loads(Path(d, "a" * 16 + ".json").read_text())["rtt"], 88)
+        Path(d, "b" * 16 + ".json").write_text(json.dumps({"n": 1, "rtt": 50, "at": 1}))      # long gone
+        r = subprocess.run([sys.executable, "-c", sw.PC_LINKS_PY], env=dict(os.environ, HOME=home),
+                           capture_output=True, timeout=20)
+        self.assertEqual(json.loads(r.stdout), {"chats": {"a" * 16: {"n": 1, "rtt": 88}}})
+        self.assertFalse(Path(d, "b" * 16 + ".json").exists())
+
+    def test_web_route_uses_the_server_files(self):
+        t = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": t}):
+            app = sw.App(sw.Store(Path(t) / "gui.json"), sw.ServerConf("esi", "h"), web=True)
+            with mock.patch.object(sw, "remote_python", return_value={"chats": {"c" * 16: {"n": 1, "rtt": 120}}}) as rp:
+                out = app.pc_api("GET", ["net"], {})          # the route itself (not blocked in the web version)
+                app.web_net()                                   # cached: one ssh call
+            self.assertEqual(rp.call_count, 1)
+            self.assertIs(rp.call_args[0][1], sw.PC_LINKS_PY)
+            self.assertEqual((out["state"], out["chats"]["c" * 16]["rtt"]), ("connected", 120))
+
+
+@unittest.skipUnless(shutil.which("git"), "no git")
+class GitOnTheOwner(unittest.TestCase):
+    """Changes panel of a Local only project opened elsewhere: git runs on the computer it lives on."""
+    SR = "/home/u/.simab-mnt/p"
+
+    def setUp(self):
+        import base64
+        self.b64 = base64
+        self.d = tempfile.mkdtemp()
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        for c in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "first"]):
+            subprocess.run(["git"] + c, cwd=self.d, env=env, check=True, capture_output=True)
+        Path(self.d, "new.txt").write_text("hello\n")
+
+    def git(self, *argv, prog="git", stdin=b""):
+        return sw.pc_git(self.d, self.SR, {"prog": prog, "argv": list(argv), "repo": "",
+                                            "stdin": self.b64.b64encode(stdin).decode()})
+
+    def test_status_and_cat(self):
+        r = self.git("status", "--porcelain")
+        self.assertEqual((r["code"], self.b64.b64decode(r["out"])), (0, b"?? new.txt\n"))
+        self.assertEqual(self.b64.b64decode(self.git("--", "new.txt", prog="cat")["out"]), b"hello\n")
+
+    def test_server_cannot_make_it_run_a_program(self):
+        for bad in (["config", "core.sshCommand", "evil"], ["push", "--receive-pack=evil"], ["-c", "x=y", "status"],
+                    ["daemon"], ["fetch", "--upload-pack", "evil"]):
+            with self.assertRaises(PermissionError, msg=bad):
+                self.git(*bad)
+        self.assertEqual(self.git("config", "--get", "nothing.here")["code"], 1)      # reading is fine
+        with self.assertRaises(PermissionError):
+            self.git("--", "/etc/passwd", prog="cat")
+
+    def test_repos_found_on_the_computer(self):
+        self.assertEqual(sw.pc_repos(self.d, self.SR, {}), {"repos": [""]})
+
+    def test_panel_goes_through_onpc(self):
+        p = {"name": "p", "remote": "~/.simab-mnt/p", "local": "", "localExists": False, "localOnly": "ffffffffffff"}
+        app = mock.Mock()
+        app.conf = sw.ServerConf("u", "h")
+        app.store.settings = {}
+        g = sw.GitRepo(app, p, "sub")
+        with mock.patch.object(sw.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=b"ok", stderr=b"")) as run:
+            self.assertEqual(g.run(["status", "--porcelain"]), (0, "ok", ""))
+        cmd = run.call_args[0][0][-1]
+        self.assertIn('"$HOME/.local/bin/onpc" --git git', cmd)
+        self.assertIn("status", cmd)
+        self.assertIn("sub", cmd)
+
+    def test_repos_route(self):
+        p = {"name": "p", "remote": "~/.simab-mnt/p", "local": "", "localExists": False, "localOnly": "ffffffffffff"}
+        app = mock.Mock()
+        app.conf = mock.Mock(configured=True)
+        with mock.patch.object(sw, "remote_python", return_value={"repos": ["", "web"]}) as rp:
+            self.assertEqual(sw.git_repos(app, p), {"where": "server", "repos": ["", "web"]})
+        self.assertEqual(rp.call_args[0][2], ["~/.simab-mnt/p", "repos"])
+
+
+class WebSeesLiveOutput(unittest.TestCase):
+    """A command a chat runs on my computer: onpc keeps a copy on the server; the web reads it live."""
+    def test_runnote_then_runs_script(self):
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"HOME": home, "SIMAB_CHAT": "a" * 16}):
+            ns = {"__name__": "onpc_test"}
+            exec(compile(sw.ONPC_PY, "onpc", "exec"), ns)
+            n = ns["RunNote"]("npm run build", {"name": "ESIPC"})
+            n.add(b"compiling...\n")
+            r = subprocess.run([sys.executable, "-c", sw.PC_RUNS_PY, "a" * 16], env=dict(os.environ, HOME=home),
+                               capture_output=True, timeout=20)
+            run = json.loads(r.stdout)["runs"][0]
+            self.assertEqual((run["state"], run["dev"], run["cmd"], run["out"]), ("running", "ESIPC", "npm run build", "compiling...\n"))
+            n.add(b"done\n")
+            n.done(0)
+            r = subprocess.run([sys.executable, "-c", sw.PC_RUNS_PY, "a" * 16], env=dict(os.environ, HOME=home),
+                               capture_output=True, timeout=20)
+            run = json.loads(r.stdout)["runs"][0]
+            self.assertEqual((run["state"], run["code"], run["out"]), ("done", 0, "compiling...\ndone\n"))
+
+    def test_no_chat_no_copy(self):
+        home = tempfile.mkdtemp()
+        env = {k: v for k, v in os.environ.items() if k != "SIMAB_CHAT"}
+        with mock.patch.dict(os.environ, dict(env, HOME=home), clear=True):
+            ns = {"__name__": "onpc_test"}
+            exec(compile(sw.ONPC_PY, "onpc", "exec"), ns)
+            ns["RunNote"]("ls", {}).add(b"x")
+        self.assertFalse(os.path.exists(os.path.join(home, ".cache/simabworkspace/pc/runs")))
+
+    def test_web_route(self):
+        t = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": t}):
+            app = sw.App(sw.Store(Path(t) / "gui.json"), sw.ServerConf("esi", "h"), web=True)
+            with mock.patch.object(sw, "remote_python", return_value={"runs": [{"id": "1", "state": "running"}]}) as rp:
+                self.assertEqual(app.pc_api("GET", ["webruns", "c" * 16], {}), {"runs": [{"id": "1", "state": "running"}]})
+            self.assertEqual(rp.call_args[0][2], ["c" * 16])
+            with self.assertRaises(sw.ApiError):
+                app.pc_api("GET", ["webruns", "../x"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.8 2026-11-22  Web version / phone: Local only chats show their line (connections, round trip, colour) and the live output of commands on your computer; Changes / git of a Local only project work from anywhere (run on its computer)
 #    1.65.7 2026-11-22  Local only: the computer a project lives on is recorded on the server at every connect, so the web version and the phone no longer show "PC · off"
 #    1.65.6 2026-11-22  ~/.ssh/config with an unquoted key path with a space: every ssh of the app gets a repaired copy at once; the whole file is repaired on start (backup kept)
 #    1.65.5 2026-11-22  macOS: a user name with a space ("simab co") no longer breaks ~/.ssh/config (key path quoted; an old bad line is repaired on start)
@@ -392,7 +393,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.7"
+VERSION="1.65.8"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

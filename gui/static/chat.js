@@ -1268,12 +1268,15 @@
   P.paintLink = function (n) {
     var el = this.linkEl, p = SW.project((this.info.spec || {}).project);
     if (!el) return;
-    var show = !!(n && p && p.localOnly && !(SW.S && SW.S.web));
+    var show = !!(n && p && p.localOnly);
     el.classList.toggle('hidden', !show);
     if (!show) return;
+    // is the computer the project lives on connected? (the web version only knows it from the server)
+    var bs = window.SWComputers && SWComputers.buildState ? SWComputers.buildState(p.name) : null;
+    var up = n.state === 'connected' && !(bs && bs.on === 'local' && !bs.ok);
     var me = (n.chats || {})[(this.info.spec || {}).relay] || { n: 0, rtt: null };
-    var rtt = n.state !== 'connected' ? null : me.rtt != null ? me.rtt : n.rtt;
-    var q = n.state !== 'connected' ? 'off' : rtt == null ? 'wait' : rtt < 150 ? 'fast' : rtt < 400 ? 'slow' : 'bad';
+    var rtt = !up ? null : me.rtt != null ? me.rtt : n.rtt;
+    var q = !up ? 'off' : rtt == null ? 'wait' : rtt < 150 ? 'fast' : rtt < 400 ? 'slow' : 'bad';
     var word = { off: 'offline', wait: 'checking', fast: 'fast', slow: 'slow', bad: 'bad' }[q];
     el.className = 'chat-link q-' + q;
     el.replaceChildren(h('i', { class: 'dot' }), h('span', null,

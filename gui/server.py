@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.3"
+VERSION = "1.65.4"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2543,6 +2543,22 @@ for raw in data[:end].split(b"\n"):
     out.append({"type": e["type"], "message": {"id": m.get("id"), "role": m.get("role"), "content": c},
                 **{k: e[k] for k in ("isSynthetic", "origin") if k in e}})
 print(json.dumps({"off": off + end, "size": size, "entries": out}))
+'''
+
+
+# The @ list of a Local only project opened on another of my computers: onpc on the server asks the
+# computer it lives on (cd into its mount so onpc knows the project). → {"files"} or {"error"}
+PC_FILES_PY = r'''
+import os, sys, json, subprocess
+try:
+    os.chdir(os.path.expanduser(sys.argv[1]))
+    r = subprocess.run([sys.executable, os.path.expanduser("~/.local/bin/onpc"), "--fs", "files", "{}"],
+                       capture_output=True, timeout=80)
+    out = r.stdout.decode("utf-8", "replace").strip()
+    print(out if out.startswith("{") else json.dumps({"error": (r.stderr.decode("utf-8", "replace").strip()
+                                                                or "onpc gave no answer")[-300:]}))
+except (OSError, subprocess.SubprocessError) as e:
+    print(json.dumps({"error": "the computer of this project cannot be reached: " + str(e)[:200]}))
 '''
 
 
@@ -6326,6 +6342,14 @@ def main(a):
         return 0
     if a[:1] == ["--mcp-serve"]:
         return mcp_serve()
+    if a[:1] == ["--fs"] and len(a) == 3:          # one file request of this Local only folder → JSON
+        try:
+            args = json.loads(a[2])
+        except ValueError:
+            args = None
+        j, err = fs_call(a[1], args) if isinstance(args, dict) else ({}, "bad arguments")
+        sys.stdout.write(json.dumps({"error": err} if err else j))
+        return 0
     if a[:1] == ["--list"]:
         ds = devices()
         for d in ds:
@@ -6454,10 +6478,11 @@ elif op == "builds":
     with os.fdopen(fd, "w") as f:
         json.dump(m, f)
     os.replace(os.path.join(D, "projects.json.tmp"), os.path.join(D, "projects.json"))
-    # which computer (empty = any connected one)
+    # which computer (empty = any connected one); Local only: the computer it lives on, so every computer
+    # of this user knows the owner and onpc never sends its work to another one
     pins = load("pins.json", {})
     pins = pins if isinstance(pins, dict) else {}
-    dev = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] == "computers" else ""
+    dev = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] in ("computers", "local") else ""
     if dev:
         pins[r] = dev
     else:
@@ -8558,7 +8583,8 @@ def pc_write(local_root: str, server_root: str, a: dict) -> dict:
 
 
 PCFS_OPS = {"grep": lambda *x: {"text": pc_grep(*x)}, "glob": lambda *x: {"text": pc_glob(*x)},
-            "read": pc_read, "edit": pc_edit, "write": pc_write}
+            "read": pc_read, "edit": pc_edit, "write": pc_write,
+            "files": lambda lr, sr, a: {"files": pc_files(lr)[:FILE_LIMIT]}}       # the @ list of another computer
 
 
 def sftp_stats() -> dict:
@@ -9369,11 +9395,22 @@ class App:
                       "color": own.get("color") or str(sp.get("color") or "")[:20],
                       "starter": own.get("starter") or str(sp.get("starter") or "")[:2000],
                       "title": own.get("title") or str(sp.get("title") or "")[:80], "sharedFrom": sp.get("sharedFrom") or ""})
+        pci = (getattr(self, "_pc_cache", None) or (0, {}))[1]
+        for x in p:                   # the owner of a Local only project, as the server knows it (any computer)
+            own = (pci.get("pins") or {}).get(x["name"])
+            if (pci.get("builds") or {}).get(x["name"]) == "local" and own:
+                x["localOnly"] = own
         if self.web:                  # "local" would be the web server's own disk
             for x in p:
                 x["local"], x["localExists"] = "", False
         else:
             self._copies_leftover()
+            # a Local only project of ANOTHER of my computers: a folder with the same path here is not it —
+            # its files, @ list and Files tab come from that computer (through the server), never this disk
+            me = self.pc.cfg()["id"] if getattr(self, "pc", None) else ""
+            for x in p:
+                if x.get("localOnly") and x["localOnly"] != me:
+                    x["local"], x["localExists"], x["elsewhere"] = "", False, True
         for x in p:
             job = self.copies.get(x["name"])
             if job and not job.done and x.get("sync"):
@@ -10746,6 +10783,14 @@ class App:
             raise ApiError(404, "project not found")
         if p.get("localExists"):
             files = local_files(p["local"])
+        elif p.get("remote") and p.get("localOnly"):
+            # lives on one of my computers: that computer lists it (one request through the server) —
+            # not a walk of the server's mount, one round trip per folder
+            res = remote_python(self._project_conf(p), PC_FILES_PY, [p["remote"]],
+                                multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=90) or {}
+            if res.get("error"):
+                raise ApiError(400, str(res["error"]))
+            files = [x for x in res.get("files") or [] if isinstance(x, str)][:FILE_LIMIT]
         elif p.get("remote"):
             res = remote_python(self._project_conf(p), FS_PY, ["all", p["remote"]],
                                 multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=60) or {}
@@ -11394,7 +11439,7 @@ class App:
             self.store.data["projects"].setdefault(name, {})["localOnly"] = c["id"]
             self.store.save()
         self.invalidate()
-        remote_python(self.conf, PC_ADMIN_PY, ["builds", remote, "local"])
+        remote_python(self.conf, PC_ADMIN_PY, ["builds", remote, "local", c["id"]])
         self._pc_cache = None
         mounts = self.pc.mount([name]) if self.pc.state == "connected" else {}
         return {"project": item, "mount": mounts.get(name, "")}
@@ -11428,6 +11473,17 @@ class App:
         out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {}, "pins": r.get("pins") or {},
                "default": r.get("default") or "",
                "self": "" if self.web else self.pc.cfg()["id"]}
+        if not self.web:              # my Local only projects made before the owner was kept on the server
+            for p in self.projects():
+                if p.get("localOnly") == out["self"] and out["builds"].get(p["name"]) == "local" \
+                        and out["pins"].get(p["name"]) != out["self"] and p.get("remote"):
+                    remote_python(self.conf, PC_ADMIN_PY, ["builds", p["remote"], "local", out["self"]])
+                    out["pins"][p["name"]] = out["self"]
+        known = getattr(self, "_pc_cache", None)
+        if not known or {k: v for k, v in known[1].get("pins", {}).items() if known[1].get("builds", {}).get(k) == "local"} \
+                != {k: v for k, v in out["pins"].items() if out["builds"].get(k) == "local"}:
+            self._pc_cache = (time.time(), out)
+            self.invalidate()         # projects() learns which computer each Local only project lives on
         if not self.web and self.pc.cfg().get("trusted") is None:     # once, from an older version: keep what was chosen
             self.pc.trust([n for n, v in out["builds"].items() if v == "computers"], True)
         self._pc_cache = (time.time(), out)

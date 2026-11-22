@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.4 2026-11-22  A Local only project opened on another of your computers: its owner is known everywhere (no false "off"), @ lists the owner's files, nothing comes from this disk; work goes only to the owner
 #    1.65.3 2026-11-22  Chat top right: the line badge and the computer chip sit side by side (they overlapped)
 #    1.65.2 2026-11-22  Each Local only chat shows its line to your computer at the top right: connections, round trip, green / yellow / red
 #    1.65.1 2026-11-22  Local only: one connection per chat kept open, tool calls side by side, heartbeat + fast reconnect + safe retry on weak lines; chat shows the model's share of each answer's time
@@ -388,7 +389,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.3"
+VERSION="1.65.4"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

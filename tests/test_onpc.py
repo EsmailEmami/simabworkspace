@@ -772,7 +772,7 @@ class LocalOnlyApp(unittest.TestCase):
                 mock.patch.object(self.app.pc, "unmount") as um:
             r = self.app.pc_add_local({"local": self.folder})
             self.assertEqual(r["project"]["remote"], "~/.simab-mnt/mine")
-            self.assertEqual(calls[-1], ["builds", "~/.simab-mnt/mine", "local"])
+            self.assertEqual(calls[-1], ["builds", "~/.simab-mnt/mine", "local", self.app.pc.cfg()["id"]])
             p = next(x for x in self.app.projects(max_age=0) if x["name"] == "mine")
             self.assertEqual(p["localOnly"], self.app.pc.cfg()["id"])
             self.assertEqual(p["buildsOn"], "local")

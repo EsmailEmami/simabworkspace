@@ -43,7 +43,8 @@
     if (!d || !d.builds || !d.builds[name]) return null;
     if (d.builds[name] === 'local') {               // Local only: the files live on one computer
       var pr = (S.projects || []).filter(function (x) { return x.name === name; })[0] || {};
-      var dev = ((d.devices) || []).filter(function (x) { return x.id === pr.localOnly; })[0];
+      var owner = (d.pins || {})[name] || pr.localOnly;        // kept on the server: known on every computer
+      var dev = ((d.devices) || []).filter(function (x) { return x.id === owner; })[0];
       var who = dev ? dev.name : 'its computer';
       return isOn(dev) ? { on: 'local', ok: true, dev: who, text: 'Lives on ' + who + ' — Claude works on it there' }
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };

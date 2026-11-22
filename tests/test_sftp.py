@@ -487,5 +487,92 @@ class ChatLinkBadge(unittest.TestCase):
         self.assertEqual(sw.PcHub.chat_links(hub), {"y": {"n": 1, "rtt": None}})     # stale rtt not shown
 
 
+class OtherComputersProject(unittest.TestCase):
+    """A Local only project of ANOTHER of my computers: a same-path folder here is not it — @ and
+    the Files tab go to the computer it lives on."""
+    def setUp(self):
+        self.t = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.t})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.store = sw.Store(Path(self.t) / "gui.json")
+        self.app = sw.App(self.store, sw.ServerConf("esi", "h"))
+        self.here = os.path.join(self.t, "proj")
+        os.makedirs(self.here)
+        Path(self.here, "mine_only.txt").write_text("x")
+        self.me = self.app.pc.cfg()["id"]
+
+    def projects(self, owner):
+        proj = {"name": "proj", "remote": "~/proj", "local": self.here, "source": "manual", "localOnly": owner,
+                "commands": [], "sync": None, "endpoint": {}}
+        with mock.patch.object(sw, "merge_projects", return_value=[dict(proj, localExists=True)]), \
+                mock.patch.object(sw, "mutagen_sessions", return_value=[]):
+            self.app._projects_cache = (0, [])
+            return self.app.projects(max_age=0)
+
+    def test_other_computer_has_no_folder_here(self):
+        p = self.projects("ffffffffffff")[0]
+        self.assertEqual((p["local"], p["localExists"], p.get("elsewhere")), ("", False, True))
+
+    def test_owner_keeps_its_folder(self):
+        p = self.projects(self.me)[0]
+        self.assertEqual((p["local"], p["localExists"]), (self.here, True))
+
+    def test_at_list_comes_from_the_owner_not_this_disk(self):
+        p = {"name": "proj", "remote": "~/proj", "local": "", "localExists": False, "localOnly": "ffffffffffff"}
+        with mock.patch.object(self.app, "projects", return_value=[p]), \
+                mock.patch.object(self.app, "_project_conf", return_value=None), \
+                mock.patch.object(sw, "remote_python", return_value={"files": ["src/a.py", "README.md"]}) as rp:
+            files = self.app.project_files("proj")
+        self.assertIs(rp.call_args[0][1], sw.PC_FILES_PY)
+        self.assertEqual(rp.call_args[0][2], ["~/proj"])
+        self.assertIn("src/a.py", files)
+        self.assertNotIn("mine_only.txt", files)
+        compile(sw.PC_FILES_PY, "pcfiles", "exec")
+
+    def test_files_op_on_the_owner(self):
+        r = sw.PCFS_OPS["files"](self.here, "/srv/proj", {})
+        self.assertEqual(r, {"files": ["mine_only.txt"]})
+
+    def test_onpc_fs_cli_says_not_connected(self):
+        home = tempfile.mkdtemp()
+        f = os.path.join(home, "onpc")
+        Path(f).write_text(sw.ONPC_PY)
+        os.makedirs(os.path.join(home, ".cache/simabworkspace/pc"))
+        r = subprocess.run([sys.executable, f, "--fs", "files", "{}"], cwd=home, capture_output=True, timeout=20,
+                           env=dict(os.environ, HOME=home))
+        self.assertIn("not connected", json.loads(r.stdout)["error"])
+
+
+class OwnerKnownEverywhere(OtherComputersProject):
+    """The second computer has no localOnly in its own settings: the server's pin tells it the owner."""
+    def test_owner_from_the_server_pin(self):
+        self.app._pc_cache = (time_now(), {"builds": {"proj": "local"}, "pins": {"proj": "ffffffffffff"}})
+        p = self.projects("")[0]
+        self.assertEqual((p["localOnly"], p["localExists"], p.get("elsewhere")), ("ffffffffffff", False, True))
+
+    def test_owner_writes_its_pin(self):
+        calls = []
+
+        def remote(conf, code, args, **kw):
+            calls.append(args)
+            return {"devices": [], "builds": {"proj": "local"}, "pins": {}} if args == ["list"] else {}
+        proj = {"name": "proj", "remote": "~/proj", "localOnly": self.me}
+        with mock.patch.object(sw, "remote_python", side_effect=remote), \
+                mock.patch.object(self.app, "projects", return_value=[proj]), \
+                mock.patch.object(type(self.app.conf), "configured", new_callable=mock.PropertyMock, return_value=True):
+            out = self.app.pc_devices()
+        self.assertIn(["builds", "~/proj", "local", self.me], calls)
+        self.assertEqual(out["pins"], {"proj": self.me})
+
+    def test_admin_keeps_the_owner_pin(self):
+        self.assertIn('sys.argv[3] in ("computers", "local")', sw.PC_ADMIN_PY)
+
+
+def time_now():
+    import time
+    return time.time()
+
+
 if __name__ == "__main__":
     unittest.main()

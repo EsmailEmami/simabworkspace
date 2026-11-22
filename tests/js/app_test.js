@@ -150,6 +150,7 @@ global.fetch = (url, opts) => {
     if (body && body.name === 'bad.bin') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'folder not found' }) });
     res = { path: 'x', size: body.size };
   }
+  else if (url === '/api/fs/cheshmeh/write') res = { mtime: 2, size: (body.text || '').length };
   else if (url.startsWith('/api/fs/cheshmeh/read')) {
     const p = decodeURIComponent(url.split('path=')[1] || '');
     res = p.endsWith('.png') ? { path: p, size: 9, image: 'data:image/png;base64,AA==' } : { path: p, size: 12, text: 'line one\nسلام\n' };
@@ -1115,8 +1116,35 @@ const tests = {
     // the file, read-only, with line numbers
     main.click(); await settle();
     assert.ok(calls.some((c) => c.url === '/api/fs/cheshmeh/read?path=' + encodeURIComponent('cheshmeh-web-app/api/main.go')));
-    assert.strictEqual(q('.ft-nums', tab.pane)[0].textContent, '1\n2');
-    assert.strictEqual(q('.ft-text', tab.pane)[0].textContent, 'line one\nسلام');
+    // like VS Code: a last empty line after the final newline
+    assert.strictEqual(q('.ft-nums', tab.pane)[0].textContent, '1\n2\n3');
+    assert.strictEqual(q('.ft-text', tab.pane)[0].textContent, 'line one\nسلام\n\n');
+    // edited right there: a see-through textarea over the coloured text, no Edit / Cancel mode
+    {
+      const ta = q('.ft-input', tab.pane)[0];
+      assert.strictEqual(ta.value, 'line one\nسلام\n');
+      const hb = () => q('button', tab.vhead).map((b) => b.textContent);
+      assert.ok(!hb().includes('Edit') && !hb().includes('Save'));
+      ta.value = 'func x() {';
+      ta.selectionStart = ta.selectionEnd = ta.value.length;
+      ta.dispatch('keydown', { key: 'Enter' });          // keeps the indent, one more after "{"
+      assert.strictEqual(ta.value, 'func x() {\n\t');
+      assert.strictEqual(q('.ft-nums', tab.pane)[0].textContent, '1\n2');
+      assert.ok(q('.t-k', q('.ft-text', tab.pane)[0]).some((s) => s.textContent === 'func'));
+      assert.ok(hb().includes('Save') && hb().includes('Revert'));
+      assert.match(q('.files-path', tab.vhead)[0].textContent, / •$/);
+      ta.dispatch('keydown', { key: 's', ctrlKey: true }); await settle();
+      const w = calls.filter((c) => c.url === '/api/fs/cheshmeh/write').pop();
+      assert.deepStrictEqual([w.body.path, w.body.text], ['cheshmeh-web-app/api/main.go', 'func x() {\n\t']);
+      assert.ok(!hb().includes('Save'));
+      // a quiet refresh never wipes what you are typing
+      ta.value += 'y'; ta.dispatch('input'); tab.refresh(true); await settle();
+      assert.strictEqual(q('.ft-input', tab.pane)[0], ta);
+      const conf0 = window.confirm; window.confirm = () => true;
+      q('button', tab.vhead).find((b) => b.textContent === 'Revert').click(); await settle();
+      assert.strictEqual(q('.ft-input', tab.pane)[0].value, 'func x() {\n\t');
+      window.confirm = conf0;
+    }
     // VS Code look: coloured icons (folder shape / badge per type), indent guides, chevrons, coloured code
     assert.strictEqual(main.querySelector('.ft-file').textContent, 'GO');
     assert.strictEqual(rows()[0].querySelectorAll('.ft-guide').length, 0);

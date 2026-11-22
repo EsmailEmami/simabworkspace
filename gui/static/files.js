@@ -260,7 +260,7 @@
     var jobs = paths.map(function (p) { return self.list(p); });
     var done = Promise.all(jobs).then(function () { self.saveExpanded(); self.renderTree(); });
     this.loadGit();
-    if (this.file && quiet) this.openFile(this.file.path, this.file.mode, true);
+    if (this.file && quiet && !(this.file.editing && (this.file.dirty || (this.editor && document.activeElement === this.editor)))) this.openFile(this.file.path, this.file.mode, true);
     return done;
   };
 
@@ -461,9 +461,8 @@
       h('span', { class: 'grow' }),
       ch ? h('button', { class: 'btn sm' + (f.mode === 'diff' ? ' on' : ''), title: f.mode === 'diff' ? 'Show the file' : 'Show what changed',
         onclick: function () { self.openFile(f.path, f.mode === 'diff' ? 'file' : 'diff'); } }, f.mode === 'diff' ? 'File' : 'Changes') : null,
-      f.mode === 'file' && typeof d.text === 'string' && !f.editing ? h('button', { class: 'btn sm', title: 'Edit this file', onclick: function () { self.edit(); } }, 'Edit') : null,
-      f.editing ? h('button', { class: 'btn sm primary', title: 'Save (Ctrl+S)', onclick: function () { self.save(); } }, 'Save') : null,
-      f.editing ? h('button', { class: 'btn sm', title: 'Stop editing (changes are dropped)', onclick: function () { self.cancelEdit(); } }, 'Cancel') : null,
+      f.editing && f.dirty ? h('button', { class: 'btn sm primary', title: 'Save (Ctrl+S)', onclick: function () { self.save(); } }, 'Save') : null,
+      f.editing && f.dirty ? h('button', { class: 'btn sm', title: 'Drop your changes', onclick: function () { self.cancelEdit(); } }, 'Revert') : null,
       h('button', { class: 'btn sm', disabled: !this.isServer && !(p && p.remote), title: 'Mention this file in a Claude chat', onclick: function () { askClaude(self.project, f.path); } }, 'Ask Claude'),
       h('button', { class: 'btn sm', title: 'Copy the path', onclick: function () { copyPath(f.path); } }, 'Copy path')
     ].filter(Boolean));
@@ -501,13 +500,59 @@
     }
     if (d.tooBig) return h('div', { class: 'muted files-note' }, 'Too big to show here (' + fmtSize(d.size) + ').');
     if (d.binary) return h('div', { class: 'muted files-note' }, 'Binary file (' + fmtSize(d.size) + ').');
-    var text = d.text || '';
-    if (!text) return h('div', { class: 'muted files-note' }, 'Empty file.');
-    var lines = text.replace(/\n$/, '').split('\n').length, nums = [];
-    for (var i = 1; i <= lines; i++) nums.push(i);
-    return h('div', { class: 'files-code' },
-      h('pre', { class: 'ft-nums', 'aria-hidden': 'true' }, nums.join('\n')),
-      h('pre', { class: 'ft-text' }, highlight(text.replace(/\n$/, ''), d.path || (this.file && this.file.path) || '')));
+    if (typeof d.text !== 'string') return h('div', { class: 'muted files-note' }, 'Empty file.');
+    return this.codeEditor(d.text, d.path || (this.file && this.file.path) || '');
+  };
+
+  // The file is shown AND edited in one place, like VS Code: the coloured text is drawn under a
+  // see-through textarea of exactly the same font, size and line height (only its caret and selection show).
+  var LINE_H = 19;
+  P.codeEditor = function (text, path) {
+    var self = this, f = this.file;
+    var nums = h('pre', { class: 'ft-nums', 'aria-hidden': 'true' });
+    var view = h('pre', { class: 'ft-text', 'aria-hidden': 'true' });
+    var cur = h('div', { class: 'ft-curline' });
+    var ta = h('textarea', { class: 'ft-input', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', wrap: 'off', 'aria-label': path });
+    ta.value = text;
+    var lineCount = 0, timer = 0;
+    function paint() {
+      timer = 0;
+      var v = ta.value, n = v.split('\n').length;
+      if (n !== lineCount) { var a = []; for (var i = 1; i <= n; i++) a.push(i); nums.textContent = a.join('\n'); lineCount = n; }
+      view.replaceChildren.apply(view, highlight(v, path).concat(['\n']));
+    }
+    function later() { if (ta.value.length < 100000) paint(); else { clearTimeout(timer); timer = setTimeout(paint, 120); } }
+    function caretLine() {
+      var line = ta.value.slice(0, ta.selectionStart || 0).split('\n').length - 1;
+      cur.style.cssText = 'top:' + (8 + line * LINE_H) + 'px';
+    }
+    function changed() { if (f && !f.dirty) { f.dirty = true; self.renderHead(); } }
+    function insert(str) {
+      // execCommand keeps Ctrl+Z working; plain value setting is the fallback
+      if (!(document.execCommand && document.execCommand('insertText', false, str))) {
+        var a = ta.selectionStart, b = ta.selectionEnd;
+        ta.value = ta.value.slice(0, a) + str + ta.value.slice(b);
+        ta.selectionStart = ta.selectionEnd = a + str.length;
+        later(); changed();
+      }
+    }
+    ta.addEventListener('input', function () { later(); changed(); caretLine(); });
+    ['keyup', 'click', 'focus', 'select'].forEach(function (k) { ta.addEventListener(k, caretLine); });
+    ta.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key && e.key.toLowerCase() === 's') { e.preventDefault(); self.save(); }
+      else if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); insert('\t'); }
+      else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // keep the indentation of the line (one more step after an opening bracket)
+        var before = ta.value.slice(0, ta.selectionStart), line = before.slice(before.lastIndexOf('\n') + 1);
+        var ind = /^[ \t]*/.exec(line)[0];
+        if (/[{\[(:]\s*$/.test(line)) ind += ind.indexOf(' ') >= 0 && ind.indexOf('\t') < 0 ? '    ' : '\t';
+        e.preventDefault(); insert('\n' + ind);
+      }
+    });
+    if (f) { f.editing = true; f.dirty = false; }
+    this.editor = ta;
+    paint();
+    return h('div', { class: 'files-code ft-editor' }, nums, h('div', { class: 'ft-stack' }, cur, view, ta));
   };
 
   // ---------------------------------------------------------------- menus
@@ -645,35 +690,16 @@
 
   // ---------------------------------------------------------------- editing
   P.edit = function () {
-    var self = this, f = this.file;
-    if (!f || !f.data || typeof f.data.text !== 'string') return;
-    f.editing = true;
-    f.dirty = false;
-    var ta = this.editor = h('textarea', { class: 'files-edit', spellcheck: 'false', dir: 'auto', wrap: 'off' });
-    ta.value = f.data.text;
-    ta.addEventListener('input', function () { if (!f.dirty) { f.dirty = true; self.renderHead(); } });
-    ta.addEventListener('keydown', function (e) {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); self.save(); }
-      else if (e.key === 'Tab' && !e.shiftKey) {
-        e.preventDefault();
-        var a = ta.selectionStart, b = ta.selectionEnd;
-        ta.value = ta.value.slice(0, a) + '\t' + ta.value.slice(b);
-        ta.selectionStart = ta.selectionEnd = a + 1;
-        if (!f.dirty) { f.dirty = true; self.renderHead(); }
-      } else if (e.key === 'Escape' && !f.dirty) { self.cancelEdit(); }
-    });
-    this.vbody.replaceChildren(ta);
-    this.renderHead();
-    setTimeout(function () { ta.focus(); }, 30);
+    var ta = this.editor;
+    if (ta && this.file && this.file.editing) setTimeout(function () { ta.focus(); }, 30);
   };
 
   P.cancelEdit = function () {
     var f = this.file;
     if (!f) return;
     if (f.dirty && !window.confirm('Drop your changes to ' + f.path + '?')) return;
-    f.editing = false; f.dirty = false;
-    this.renderHead();
     this.vbody.replaceChildren(this.content(f.data));
+    this.renderHead();
   };
 
   P.save = function (force) {

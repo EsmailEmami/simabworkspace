@@ -365,7 +365,7 @@
 
   // widgets that own their inputs, code/path fields (.mono), the terminal, the command palette…
   var SKIP_SELECTOR = [
-    '[data-voice-to-text="off"]', '.vtt-btn', '.xterm', '.mono', '.files-edit', '.palette',
+    '[data-voice-to-text="off"]', '.vtt-btn', '.xterm', '.mono', '.files-edit', '.ft-input', '.palette',
     '[role="combobox"]', '[role="listbox"]', '[role="searchbox"][aria-autocomplete]',
     '.ProseMirror', '.ql-editor', '.tiptap', '.cm-editor', '.monaco-editor', '.CodeMirror'
   ].join(', ');

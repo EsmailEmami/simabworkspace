@@ -878,6 +878,17 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .files-code pre { margin: 0; padding: 8px 0; font: 12.5px/1.55 var(--mono); }
 .ft-nums { flex: none; text-align: right; color: var(--faint); padding: 8px 10px 8px 12px !important; user-select: none; border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg); }
 .ft-text { padding: 8px 14px !important; white-space: pre; unicode-bidi: plaintext; text-align: left; tab-size: 4; color: #d4d4d4; }
+/* view = editor: the coloured <pre> under a see-through <textarea> with the very same metrics */
+.ft-editor { min-height: 100%; }
+.ft-editor pre, .ft-editor .ft-input { font: 12.5px/19px var(--mono) !important; }
+.ft-stack { position: relative; flex: 1 0 auto; min-width: 0; }
+.ft-stack .ft-text { position: relative; pointer-events: none; min-height: 100%; }
+.ft-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; border: 0; outline: none; resize: none; overflow: hidden;
+  padding: 8px 14px; background: transparent; color: transparent; caret-color: #aeafad; white-space: pre; unicode-bidi: plaintext;
+  text-align: left; tab-size: 4; -webkit-text-fill-color: transparent; }
+.ft-input::selection { background: rgba(38, 79, 120, .75); -webkit-text-fill-color: transparent; }
+.ft-curline { position: absolute; left: 0; right: 0; height: 19px; top: 8px; border-top: 1px solid #282d36; border-bottom: 1px solid #282d36; pointer-events: none; display: none; }
+.ft-stack:focus-within .ft-curline { display: block; }
 .files-img { padding: 16px; }
 .files-img img { max-width: 100%; max-height: 70vh; cursor: zoom-in; background: repeating-conic-gradient(#1a1e26 0 25%, #12151b 0 50%) 0 0 / 16px 16px; }
 /* phones: one panel at a time — the tree, or the file with a back arrow */
@@ -889,7 +900,6 @@ body.compact .files-back { display: inline-grid; }
 body.compact .ft-row { height: 34px; font-size: 13.5px; }
 body.compact .files-filter { height: 32px; }
 @media (pointer: coarse) { .ft-row { height: 34px; } .files-vhead .btn.sm { height: 32px; } .files-bar .icon-btn { width: 32px; height: 32px; } }
-.files-edit { flex: 1; width: 100%; border: 0; outline: none; background: var(--bg); color: var(--text); font: 13px/1.5 var(--mono); padding: 12px 16px; resize: none; tab-size: 4; }
 
 /* chat: the message box hides while you work elsewhere (the live status line stays) */
 .pane.chat.away .chat-composer .cbox, .pane.chat.away .chat-composer .attach, .pane.chat.away .chat-composer .slash { display: none; }

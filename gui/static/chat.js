@@ -371,7 +371,8 @@
 
     this.linkEl = h('div', { class: 'chat-link hidden' });      // Local only: this chat's line to the computer
     document.addEventListener('sw-pc-net', function (ev) { self.paintLink(ev.detail); });
-    this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn, this.linkEl);
+    this.topRight = h('div', { class: 'chat-tr' }, this.linkEl);   // top right, side by side: line badge, where chip
+    this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn, this.topRight);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
     // a narrow chat (tablet split, laptop side pane) gets the phone's one chip instead of three selects
     if (window.ResizeObserver) new window.ResizeObserver(function () { self.fitBar(); }).observe(composer);
@@ -1460,7 +1461,7 @@
 
   // Computers (computers.js): where this chat's work runs, shown next to the status
   P.setWhere = function (text, title, cls, onclick) {
-    if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.body.append(this.whereEl); }   // top right of the chat
+    if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.topRight.append(this.whereEl); }   // top right, after the line badge
     this.whereEl.textContent = text || '';
     this.whereEl.title = title || '';
     this.whereEl.onclick = onclick || null;

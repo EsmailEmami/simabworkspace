@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.3 2026-11-22  Chat top right: the line badge and the computer chip sit side by side (they overlapped)
 #    1.65.2 2026-11-22  Each Local only chat shows its line to your computer at the top right: connections, round trip, green / yellow / red
 #    1.65.1 2026-11-22  Local only: one connection per chat kept open, tool calls side by side, heartbeat + fast reconnect + safe retry on weak lines; chat shows the model's share of each answer's time
 #    1.65.0 2026-11-22  Local only projects fast on big projects and weak internet: Claude (still on the server) reads, edits and searches files on your computer in one request each; heavy folders hidden from the mount; compressed link; Computers window never scrolls sideways
@@ -387,7 +388,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.2"
+VERSION="1.65.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -1831,7 +1831,9 @@ const tests = {
     const chat = S.active;
     global.SWComputers.decorate();
     assert.strictEqual(chat.whereEl.textContent, '⌂ laptop ▾', 'top right of the chat: which computer');
-    assert.strictEqual(chat.whereEl.parentNode, chat.body, 'at the top of the chat, not in the status line');
+    assert.strictEqual(chat.whereEl.parentNode, chat.topRight, 'at the top of the chat, not in the status line');
+    assert.strictEqual(chat.topRight.parentNode, chat.body);
+    assert.strictEqual(chat.topRight.lastChild, chat.whereEl, 'beside the line badge, not on top of it');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'server', shop: 'server' } }));
     assert.strictEqual(chat.whereEl.textContent, '▣ server');
     chat.whereEl.onclick({ currentTarget: chat.whereEl });

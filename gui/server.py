@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.5"
+VERSION = "1.64.6"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -908,11 +908,30 @@ def posix_sh(cmd: str) -> str:
     return "sh -c " + shlex.quote(cmd)
 
 
+def win_ssh_config() -> list:
+    """Windows: ssh refuses ~/.ssh/config when its owner/ACL is "wrong" ("Bad owner or
+    permissions on C:\\Users\\…/.ssh/config") and then connects to nothing. A file given with
+    -F is not checked, so ssh gets a copy of the user's config (Host aliases, Include, proxies
+    still work) from our own folder; no config → an empty one. [] off Windows / on errors."""
+    if not IS_WIN:
+        return []
+    try:
+        src = Path(home_path(".ssh", "config"))
+        dst = config_dir() / "ssh_config"
+        data = src.read_bytes() if src.is_file() else b""
+        if not dst.is_file() or dst.read_bytes() != data:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+        return ["-F", str(dst)]
+    except OSError:
+        return []
+
+
 def ssh_base(conf: ServerConf, multiplex=True, batch=False, forwards=False) -> list:
     """forwards=False (background work: chat, git, lists): port forwardings from the user's
     ~/.ssh/config (RemoteForward…) are not opened — they only fail ("remote port forwarding
     failed for listen port …") and end up in the chat. Terminals and tunnels keep them."""
-    a = ["ssh", "-p", str(conf.port),
+    a = ["ssh", *win_ssh_config(), "-p", str(conf.port),
          "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
          "-o", "StrictHostKeyChecking=accept-new"]
     if conf.key and os.path.isfile(os.path.expanduser(conf.key)):
@@ -5491,7 +5510,8 @@ PC_HINT = (
     "work here as usual). Every Bash command is run on the user's computer automatically, in the same "
     "folder there, after the sync caught up — so tools, node, git, docker etc. are the ones installed there; "
     "if it is Windows the shell is Git Bash. Your own files (~/.claude: memory, plans, settings; /tmp) are "
-    "on this server: use Read/Write/Glob for them; a Bash command that mentions ~/.claude runs here. `cd` "
+    "on this server: use Read/Write/Glob for them; a Bash command that mentions ~/.claude runs here. Git "
+    "commands (only git, cd, head, tail …) run here too, where the repo is. `cd` "
     "does not carry over to the next command: use `cd dir && command`. Give long builds a long Bash timeout "
     "(600000 ms). If a command says no computer is connected, stop and tell the user; never try to run it "
     "on the server instead. Dev servers (ng serve, npm start …): `onpc --bg NAME COMMAND` starts it on the "
@@ -5515,7 +5535,7 @@ ONPC_PY = r'''#!/usr/bin/env python3
 # onpc — run a command on your own computer instead of this server (Simab Workspace).
 #   onpc npm run build        onpc "npm ci && npm test"        onpc --on laptop go test ./...
 #   onpc --list               your computers and which are connected
-import os, sys, json, socket, struct, signal, shlex
+import os, re, sys, json, socket, struct, signal, shlex
 D = os.path.expanduser("~/.cache/simabworkspace/pc")
 HINT = @@HINT@@
 LOCAL_HINT = @@LOCAL_HINT@@
@@ -5782,9 +5802,34 @@ def hook():
     home = os.path.expanduser("~")
     if any(x in cmd for x in ("~/.claude", "$HOME/.claude", "${HOME}/.claude", home + "/.claude", "/tmp/claude-")):
         return 0
+    if git_stays_here(cmd, i.get("cwd") or os.getcwd()):
+        return 0
     ti["command"] = shlex.quote(me) + " " + shlex.quote(cmd)
     sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": ti}}))
     return 0
+
+
+GIT_HELPERS = {"cd", "head", "tail", "grep", "wc", "sort", "echo", "true", "cat"}
+
+
+def git_stays_here(cmd, cwd):
+    """A synced project's copy on the computer often has no .git (sync without .git: "not a git
+    repository"), but the repo is here: a command of only git (+ cd / head / tail …) runs on this
+    server. Not for a Local only mount (the folder is the computer's own, mounted here)."""
+    segs = [x.strip() for x in re.split(r"&&|\|\||[;|\n]", cmd) if x.strip()]
+    first = [x.split()[0] for x in segs]
+    if "git" not in first or any(w not in GIT_HELPERS and w != "git" for w in first):
+        return False
+    d = os.path.realpath(cwd or ".")
+    while True:
+        if d != "/" and os.path.ismount(d):
+            return False
+        if os.path.exists(os.path.join(d, ".git")):
+            return True
+        up = os.path.dirname(d)
+        if up == d:
+            return False
+        d = up
 
 
 def bg(body):
@@ -8087,7 +8132,7 @@ def install_ssh_key(conf: ServerConf, password: str, timeout=45) -> str:
         argv = [tool, "-o", "StrictHostKeyChecking=accept-new", "-i", conf.key + ".pub", "-p", str(conf.port), conf.target]
     else:
         pub = Path(conf.key + ".pub").read_text().strip()
-        argv = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", str(conf.port), conf.target,
+        argv = ["ssh", *win_ssh_config(), "-o", "StrictHostKeyChecking=accept-new", "-p", str(conf.port), conf.target,
                 "umask 077; mkdir -p ~/.ssh; grep -qxF " + shlex.quote(pub) + " ~/.ssh/authorized_keys 2>/dev/null || echo " + shlex.quote(pub) + " >> ~/.ssh/authorized_keys"]
     sent, text = ssh_with_password(argv, password, timeout)
     if sent >= 2 or re.search(r"Permission denied", text):
@@ -10886,7 +10931,7 @@ def web_verify_password(conf: ServerConf, password: str) -> None:
     pub = Path(conf.key + ".pub").read_text().strip()
     marker = "SW-OK-" + secrets.token_hex(8)
     q = shlex.quote(pub)
-    argv = ["ssh", "-p", str(conf.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no",
+    argv = ["ssh", *win_ssh_config(), "-p", str(conf.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "PubkeyAuthentication=no",
             "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "NumberOfPasswordPrompts=1",
             "-o", "ConnectTimeout=10", "-o", "ControlMaster=no", "-o", "ControlPath=none", conf.target,
             f"umask 077; mkdir -p ~/.ssh && {{ grep -qxF {q} ~/.ssh/authorized_keys 2>/dev/null || echo {q} >> ~/.ssh/authorized_keys; }} && echo {marker}"]

@@ -352,5 +352,41 @@ class Installer(unittest.TestCase):
         self.assertEqual(ps.count("("), ps.count(")"))
 
 
+class WinSshConfig(unittest.TestCase):
+    """ssh on Windows refuses ~/.ssh/config with a 'bad' owner/ACL: we pass a copy with -F."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for p in (mock.patch.object(sw, "IS_WIN", True),
+                  mock.patch.object(sw, "home_path", lambda *a: self.root.joinpath("home", *a)),
+                  mock.patch.object(sw, "config_dir", lambda: self.root / "cfg")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_copy_of_user_config_given_with_F(self):
+        src = self.root / "home" / ".ssh" / "config"
+        src.parent.mkdir(parents=True)
+        src.write_text("Host x\n  User y\n")
+        a = sw.win_ssh_config()
+        self.assertEqual(a, ["-F", str(self.root / "cfg" / "ssh_config")])
+        self.assertEqual(Path(a[1]).read_text(), "Host x\n  User y\n")
+        src.write_text("Host z\n")                          # follows the user's changes
+        self.assertEqual(Path(sw.win_ssh_config()[1]).read_text(), "Host z\n")
+
+    def test_no_user_config_gives_empty_file(self):
+        a = sw.win_ssh_config()
+        self.assertEqual(Path(a[1]).read_bytes(), b"")
+
+    def test_in_every_ssh_command(self):
+        conf = sw.ServerConf("u", "h")
+        argv = sw.ssh_base(conf)
+        self.assertEqual(argv[1], "-F")
+        self.assertEqual(sw.pc_link_argv(conf, "/tmp/s.sock", 15550)[1], "-F")   # Computers link
+        with mock.patch.object(sw, "IS_WIN", False):
+            self.assertNotIn("-F", sw.ssh_base(conf))
+        self.assertEqual(sw.Path(sw.__file__).read_text(encoding="utf-8").count('["ssh", *win_ssh_config()'), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

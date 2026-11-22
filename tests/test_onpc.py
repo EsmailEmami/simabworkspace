@@ -1122,3 +1122,29 @@ class PhoneAccess(unittest.TestCase):
         built = sw.build_spec({"kind": "pcterm", "project": "", "_ticket": "tick-1"}, sw.ServerConf("esi", "h"), self.store, [])
         self.assertIn("--ticket tick-1", built["argv"][-1])
         self.assertNotIn("_ticket", json.dumps(built["spec"]))
+
+
+class GitStaysOnServer(unittest.TestCase):
+    """The computer's synced copy may have no .git: git-only commands stay on the server."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.f = os.path.join(self.tmp.name, "onpc")
+        Path(self.f).write_text(sw.ONPC_PY)
+        self.repo = os.path.join(self.tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, ".git"))
+        os.makedirs(os.path.join(self.repo, "sub"))
+
+    def hook(self, cmd, cwd):
+        r = subprocess.run([sys.executable, self.f, "--hook"], input=json.dumps(
+            {"tool_input": {"command": cmd}, "cwd": cwd}).encode(), capture_output=True, timeout=20)
+        return r.stdout.decode()
+
+    def test_git_only_stays(self):
+        for c in ("git status", "cd sub && git log --oneline | head -5", "git add -A && git commit -m x; git push"):
+            self.assertEqual(self.hook(c, os.path.join(self.repo, "sub")), "", c)
+
+    def test_other_commands_go_to_the_computer(self):
+        for c in ("npm test", "git pull && npm i", "ls"):
+            self.assertIn("updatedInput", self.hook(c, self.repo), c)
+        self.assertIn("updatedInput", self.hook("git status", self.tmp.name))      # no repo here

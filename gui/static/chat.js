@@ -1275,7 +1275,7 @@
     var bs = window.SWComputers && SWComputers.buildState ? SWComputers.buildState(p.name) : null;
     var up = n.state === 'connected' && !(bs && bs.on === 'local' && !bs.ok);
     var me = (n.chats || {})[(this.info.spec || {}).relay] || { n: 0, rtt: null };
-    var rtt = !up ? null : me.rtt != null ? me.rtt : n.rtt;
+    var rtt = !up ? null : me.rtt != null ? me.rtt : n.rtt != null ? Math.round(n.rtt) : null;
     var q = !up ? 'off' : rtt == null ? 'wait' : rtt < 150 ? 'fast' : rtt < 400 ? 'slow' : 'bad';
     var word = { off: 'offline', wait: 'checking', fast: 'fast', slow: 'slow', bad: 'bad' }[q];
     el.className = 'chat-link q-' + q;

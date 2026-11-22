@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.8"
+VERSION = "1.65.9"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2618,6 +2618,16 @@ for f in (os.listdir(d) if os.path.isdir(d) else []):
             pass
         continue
     out[f[:-5]] = {"n": j.get("n") or 0, "rtt": j.get("rtt") if age < 60 else None}
+# a command running on the computer for a chat is a line too (RunNote, less than an hour old)
+rd = os.path.expanduser("~/.cache/simabworkspace/pc/runs")
+for key in (os.listdir(rd) if os.path.isdir(rd) else []):
+    for f in os.listdir(os.path.join(rd, key)):
+        p = os.path.join(rd, key, f)
+        try:
+            if f.endswith(".json") and now - os.path.getmtime(p) < 3600 and json.load(open(p)).get("state") == "running":
+                out.setdefault(key, {"n": 0, "rtt": None})["n"] += 1
+        except (OSError, ValueError):
+            pass
 print(json.dumps({"chats": out}))
 '''
 
@@ -6489,8 +6499,12 @@ def main(a):
     if a[:1] == ["--mcp"]:            # Local only: the MCP config of Grep / Glob on the computer
         on = project_on(os.path.realpath(os.getcwd()))[0]
         if on == "local":
-            sys.stdout.write(json.dumps({"mcpServers": {"pc": {"type": "stdio", "command": sys.executable,
-                                         "args": [os.path.realpath(os.path.abspath(sys.argv[0])), "--mcp-serve"]}}}))
+            # Claude gives an MCP server only a few variables (HOME, PATH…), not SIMAB_CHAT / SIMAB_PC: passed here,
+            # else this chat's connection is filed under no chat (its badge always said 0)
+            env = {k: os.environ[k] for k in ("SIMAB_CHAT", "SIMAB_PC") if os.environ.get(k)}
+            sys.stdout.write(json.dumps({"mcpServers": {"pc": dict({"type": "stdio", "command": sys.executable,
+                                         "args": [os.path.realpath(os.path.abspath(sys.argv[0])), "--mcp-serve"]},
+                                         **({"env": env} if env else {}))}}))
         return 0
     if a[:1] == ["--mcp-serve"]:
         return mcp_serve()
@@ -7531,6 +7545,10 @@ class PcHub:
                 continue
             fresh = v.get("rtt") is not None and now - v.get("at", 0) < 60
             out[k] = {"n": max(v["n"], 0), "rtt": v["rtt"] if fresh else None}
+        runs = getattr(self, "runs", None)
+        for r in list(runs) if isinstance(runs, (list, collections.deque)) else []:   # a running command is a line too
+            if r.get("chat") and r.get("state") in ("running", "asking"):
+                out.setdefault(r["chat"], {"n": 0, "rtt": None})["n"] += 1
         return out
 
     # dev servers (onpc --bg) -------------------------------------------------------

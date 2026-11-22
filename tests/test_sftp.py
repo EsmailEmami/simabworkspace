@@ -482,6 +482,25 @@ class ChatLinkBadge(unittest.TestCase):
         out = sw.PcHub.chat_links(hub)
         self.assertEqual(list(out.values()), [{"n": 0, "rtt": 87}])
 
+    def test_running_commands_count_as_lines(self):
+        hub = mock.Mock(chatlinks={"k" * 16: {"n": 1, "rtt": 40, "at": 9e12}},
+                        runs=[{"chat": "k" * 16, "state": "running"}, {"chat": "j" * 16, "state": "asking"},
+                              {"chat": "k" * 16, "state": "done"}])
+        self.assertEqual(sw.PcHub.chat_links(hub), {"k" * 16: {"n": 2, "rtt": 40}, "j" * 16: {"n": 1, "rtt": None}})
+
+    def test_mcp_config_carries_the_chat_key(self):
+        home = tempfile.mkdtemp()
+        f = os.path.join(home, "onpc")
+        Path(f).write_text(sw.ONPC_PY)
+        proj = os.path.realpath(os.path.join(home, "proj"))
+        os.makedirs(proj)
+        d = os.path.join(home, ".cache/simabworkspace/pc")
+        os.makedirs(d)
+        Path(d, "projects.json").write_text(json.dumps({proj: "local"}))
+        r = subprocess.run([sys.executable, f, "--mcp"], cwd=proj, capture_output=True, timeout=20,
+                           env=dict(os.environ, HOME=home, SIMAB_CHAT="a" * 16))
+        self.assertEqual(json.loads(r.stdout)["mcpServers"]["pc"]["env"], {"SIMAB_CHAT": "a" * 16})
+
     def test_old_and_gone_chats_are_forgotten(self):
         hub = mock.Mock(chatlinks={"x": {"n": 0, "rtt": 50, "at": 1.0}, "y": {"n": 1, "rtt": 50, "at": 1.0}})
         self.assertEqual(sw.PcHub.chat_links(hub), {"y": {"n": 1, "rtt": None}})     # stale rtt not shown

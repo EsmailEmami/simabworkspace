@@ -473,11 +473,11 @@
     function close() { if (shown[a.id]) { shown[a.id].close(); delete shown[a.id]; } }
     var md = SW.openModal({ sticky: true,  title: 'Run on this computer?', size: 'sm', body: h('div', { class: 'pc-ask' },
       h('div', { class: 'muted' }, 'Claude (project ', h('b', null, a.project), ') wants to run:'),
-      h('pre', { class: 'pc-cmd' }, a.cmd), left),
+      h('pre', { class: 'pc-cmd' }, a.cmd), a.warn ? h('div', { class: 'pc-warn' }, '⚠ ' + a.warn) : null, left),
       foot: [h('button', { class: 'btn danger', onclick: function () { answer('deny'); } }, 'Deny'),
         h('div', { class: 'pc-ask-btns' },
-          h('button', { class: 'btn', title: 'Never ask again for this exact command in ' + a.project, onclick: function () { answer('always'); } }, 'Always allow this'),
-          h('button', { class: 'btn', title: 'Everything in ' + a.project + ' runs without asking for 1 hour', onclick: function () { answer('hour'); } }, 'Allow all 1 hour'),
+          a.warn ? null : h('button', { class: 'btn', title: 'Never ask again for this exact command in ' + a.project, onclick: function () { answer('always'); } }, 'Always allow this'),
+          a.warn ? null : h('button', { class: 'btn', title: 'Everything in ' + a.project + ' runs without asking for 1 hour', onclick: function () { answer('hour'); } }, 'Allow all 1 hour'),
           h('button', { class: 'btn primary', autofocus: true, onclick: function () { answer('once'); } }, 'Allow once'))] });
     md.onclose = function () { delete shown[a.id]; };
     shown[a.id] = { a: a, left: [left], close: function () { md.close(); } };
@@ -541,7 +541,8 @@
       return;
     }
     var views = [];
-    if (mode === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; })) {      // the chat is in auto: no question
+    // a deny-list command (a.warn) is always asked, even in auto
+    if (!a.warn && mode === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; })) {      // the chat is in auto: no question
       shown[a.id] = { a: a, left: [], answered: 'once', close: function () {} };
       sendAnswer(a, 'once');
       tabs.filter(function (t) { return AUTO_CHAT[t.mode]; }).slice(0, 1).forEach(function (t) {
@@ -560,7 +561,7 @@
       api('POST', 'pc', { mode: v }).then(function () {
         toast('This computer: ' + MODES.filter(function (m) { return m[0] === v; })[0][1], 'ok');
         // the new mode lets this command run without a question → run it now
-        if (v === 'all' || (v === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; }))) answer('once');
+        if (!a.warn && (v === 'all' || (v === 'chat' && tabs.some(function (t) { return AUTO_CHAT[t.mode]; })))) answer('once');
       }).catch(fail);
     } };
     views = tabs.map(function (t) { return t.pcAskCard(a, answer, modes); });

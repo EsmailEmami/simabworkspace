@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.9"
+VERSION = "1.65.10"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5679,6 +5679,10 @@ PC_UNLOCK_TTL = 3600     # an MFA unlock from the phone / web: terminal, run com
 PC_TICKET_TTL = 60       # one terminal of the web version per ticket
 PC_MFA_FAILS = 5         # wrong codes per 15 minutes before unlocking is refused
 PC_ID_RE = re.compile(r"[0-9a-f]{12}")
+PC_ONSERVER = "onserver "     # a Bash command starting with it stays on THIS server (the user asked so)
+PC_ONSERVER_HINT = (
+    "Only when the user explicitly asks to run something on this server (not on their computer), start the "
+    "Bash command with `onserver ` (e.g. `onserver ls`): it then runs here, in this folder.")
 PC_HINT = (
     "This project's commands run on the user's own computer, not on this server. The files here are "
     "the server's copy, synced both ways with the copy on that computer (Read, Edit, Write, Grep and Glob "
@@ -5691,7 +5695,7 @@ PC_HINT = (
     "(600000 ms). If a command says no computer is connected, stop and tell the user; never try to run it "
     "on the server instead. Dev servers (ng serve, npm start …): `onpc --bg NAME COMMAND` starts it on the "
     "computer and returns at once with its URL; `onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never "
-    "run a dev server in the foreground.")
+    "run a dev server in the foreground. " + PC_ONSERVER_HINT)
 
 PC_LOCAL_HINT = (
     "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
@@ -5709,7 +5713,7 @@ PC_LOCAL_HINT = (
     "`onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never run a dev server in the foreground. "
     "Grep / Glob leave out heavy folders (node_modules, .venv, venv, __pycache__, .next, .gradle …) and .git; "
     "mcp__pc__Read can still read a file inside them. git status / log / diff go through Bash (it runs on "
-    "the computer, where the repo is).")
+    "the computer, where the repo is). " + PC_ONSERVER_HINT)
 
 ONPC_PY = r'''#!/usr/bin/env python3
 # onpc — run a command on your own computer instead of this server (Simab Workspace).
@@ -6035,6 +6039,10 @@ def hook():
     cmd = ti.get("command")
     me = os.path.realpath(os.path.abspath(sys.argv[0]))
     if not isinstance(cmd, str) or not cmd.strip() or cmd.lstrip().startswith(me):
+        return 0
+    if cmd.lstrip().startswith("onserver "):      # the user asked for this server (PC_ONSERVER): run it here as it is
+        ti["command"] = cmd.lstrip()[len("onserver "):]
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": ti}}))
         return 0
     if cmd.lstrip().startswith("onpc "):          # Claude calls onpc itself (--bg …): just make sure it is found
         ti["command"] = shlex.quote(me) + cmd.lstrip()[4:]
@@ -7111,18 +7119,27 @@ def pc_match(seg: str, patterns) -> bool:
 
 
 def pc_guard(c: dict, project: str, cmd: str) -> str:
-    """Why the allowed projects / the deny list refuse it ("" = they do not). Applies to every command."""
+    """Why the allowed projects refuse it ("" = they do not). Applies to every command."""
     if c.get("projects") and project not in c["projects"]:
         return f"project {project} may not run commands on this computer (Settings → Computers)"
+    return ""
+
+
+def pc_denied(c: dict, cmd: str) -> str:
+    """A part on the deny list → why. The user's wish (2026-11-22): such a command is not refused but
+    ASKED every time (no mode, Always, 1 hour or auto chat skips the question); the user may allow it."""
     bad = [s for s in pc_segments(cmd) or [cmd.strip()] if pc_match(s, c.get("deny"))]
-    return f"“{bad[0]}” is on the deny list of this computer (Settings → Computers)" if bad else ""
+    return f"“{bad[0]}” is on the deny list of this computer" if bad else ""
 
 
 def pc_decide(c: dict, project: str, cmd: str, hour: dict, now: float):
-    """→ ("allow" | "ask" | "deny", why). Deny list and allowed projects win over everything."""
+    """→ ("allow" | "ask" | "deny", why). Allowed projects win over everything; the deny list asks always."""
     why = pc_guard(c, project, cmd)
     if why:
         return "deny", why
+    why = pc_denied(c, cmd)
+    if why:
+        return "ask", why
     segs = pc_segments(cmd) or [cmd.strip()]
     mode = c.get("mode")
     if mode == "all":
@@ -7604,7 +7621,7 @@ class PcHub:
                    "start": time.time(), "end": 0, "code": None, "state": "asking", "out": ""}
             if verdict == "ask":
                 self.runs.appendleft(run)
-                ok = self.ask(project["name"], "[dev server] " + cmd.strip(), run)
+                ok = self.ask(project["name"], "[dev server] " + cmd.strip(), run, why)
                 run.update(state="running" if ok else "denied", end=time.time())
                 if not ok:
                     return h._json(403, {"error": f"the user did not allow it on {c['name']} — it was NOT started"})
@@ -8047,6 +8064,9 @@ class PcHub:
             if c.get("mode") == "chat" and (project.get("localOnly") or project["name"] in (c.get("trusted") or [])):
                 why = pc_guard(c, project["name"], cmd)
                 verdict = "deny" if why else "allow"
+                if verdict == "allow":
+                    why = pc_denied(c, cmd)
+                    verdict = "ask" if why else "allow"
             else:
                 verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
         chat = b.get("chat") if isinstance(b.get("chat"), str) and RELAY_KEY_RE.fullmatch(b.get("chat") or "") else ""
@@ -8075,7 +8095,7 @@ class PcHub:
         try:
             if verdict == "ask":
                 frame(b"e", f"onpc: waiting for the user to approve it on {c['name']}…\n".encode())
-                if not self.ask(project["name"], cmd.strip(), run):
+                if not self.ask(project["name"], cmd.strip(), run, why):
                     run.update(state="denied", end=time.time(), out="denied by the user")
                     frame(b"e", f"onpc: the user did not allow this command on {c['name']} — it was NOT run.\n".encode())
                     frame(b"x", code=126)
@@ -8137,8 +8157,10 @@ class PcHub:
             raise OSError("onpc went away")
         return code
 
-    def ask(self, project: str, cmd: str, run: dict) -> bool:
+    def ask(self, project: str, cmd: str, run: dict, warn: str = "") -> bool:
+        """warn = why it is on the deny list: the window never answers it on its own, only Once / Deny."""
         a = {"id": secrets.token_hex(6), "project": project, "cmd": cmd, "at": time.time(), "chat": run.get("chat") or "",
+             "warn": warn,
              "until": time.time() + PC_ASK_WAIT, "answer": "", "_ev": threading.Event(), "run": run["id"]}
         with self.lock:
             self.asks[a["id"]] = a
@@ -8146,6 +8168,8 @@ class PcHub:
         with self.lock:
             self.asks.pop(a["id"], None)
         ans = a["answer"] or "deny"
+        if warn and ans != "deny":
+            ans = "once"                     # a deny-list command is never remembered
         if ans == "always":
             with self.lock:
                 c = self.cfg()
@@ -12465,11 +12489,38 @@ def share_inject(html: bytes, target: str, ports=None) -> bytes:
     return html[:i] + tag + html[i:]
 
 
-def share_page(title: str, text: str, script: str = "") -> bytes:
+SHARE_PAGE_CSS = """
+:root{color-scheme:light dark;--bg:#f4f5f7;--card:#fff;--fg:#1d2330;--mute:#6b7280;--line:#e3e6eb;--acc:#3b82f6}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--card:#1d2026;--fg:#e8eaee;--mute:#9aa1ad;--line:#2c3038;--acc:#60a5fa}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;align-items:center;justify-content:center;padding:1.5em;background:var(--bg);color:var(--fg);
+font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.card{width:100%;max-width:24em;background:var(--card);border:1px solid var(--line);border-radius:14px;
+padding:2em 1.75em;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+.brand{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin-bottom:1.25em}
+.spin{width:28px;height:28px;margin:0 auto 1em;border:3px solid var(--line);border-top-color:var(--acc);
+border-radius:50%;animation:r .8s linear infinite;display:none}
+body.busy .spin{display:block}
+@keyframes r{to{transform:rotate(360deg)}}
+#m{margin:0;font-size:16px}
+.acts{display:flex;flex-direction:column;gap:.6em;margin-top:1.5em}
+.acts:empty{display:none}
+button,.btn{display:block;width:100%;padding:.65em 1em;border-radius:8px;font:inherit;cursor:pointer;
+text-decoration:none;border:1px solid var(--line);background:transparent;color:var(--fg)}
+button{background:var(--acc);border-color:var(--acc);color:#fff}
+button:hover{filter:brightness(1.08)}.btn:hover{background:var(--line)}
+"""
+
+
+def share_page(title: str, text: str, script: str = "", busy: bool = False) -> bytes:
+    """The small pages of Share on your domain (asking, opening, not found …): one centred card."""
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
-            '<title>' + esc(title) + '</title></head><body style="font:15px system-ui,sans-serif;color:#777;'
-            'padding:2em;max-width:36em"><p id="m">' + esc(text) + '</p>' + script + '</body></html>').encode()
+    return ('<!doctype html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>' + esc(title) + '</title><style>' + SHARE_PAGE_CSS + '</style></head>'
+            '<body' + (' class="busy"' if busy else '') + '><div class="card"><div class="brand">Simab Workspace</div>'
+            '<div class="spin"></div><p id="m">' + esc(text) + '</p>' + script + '</div></body></html>').encode()
 
 
 def share_js(v) -> str:
@@ -12495,21 +12546,21 @@ sw.register('/__simab/sw.js', { scope: '/' }).then(function () { return sw.ready
 })();</script>"""
 
 # "Ask me": the visitor waits here while the owner is asked on the phone / computer
-SHARE_WAIT_JS = """<p><button id="again" style="display:none">Ask again</button> <a href=@@IN@@ style="margin-left:1em">I am the owner — sign in</a></p>
+SHARE_WAIT_JS = """<div class="acts"><button id="again" style="display:none">Ask again</button><a class="btn" href=@@IN@@>I am the owner — sign in</a></div>
 <script>(function(){
 var t = @@T@@, m = document.getElementById('m'), again = document.getElementById('again');
-function say(x) { m.textContent = x; }
+function say(x, busy) { m.textContent = x; document.body.classList.toggle('busy', !!busy); }
 function poll(id) {
   fetch('/__simab/ask?id=' + id, { credentials: 'include' }).then(function (r) { return r.json(); }).then(function (d) {
-    if (d.state === 'allowed') { say('Allowed — opening…'); location.reload(); }
+    if (d.state === 'allowed') { say('Allowed — opening…', 1); location.reload(); }
     else if (d.state === 'denied') say('The owner did not let you in.');
-    else if (d.state === 'waiting') setTimeout(function () { poll(id); }, 2000);
+    else if (d.state === 'waiting') { document.body.classList.add('busy'); setTimeout(function () { poll(id); }, 2000); }
     else { say('No answer from the owner.'); again.style.display = ''; }
   }, function () { setTimeout(function () { poll(id); }, 4000); });
 }
 function ask() {
   again.style.display = 'none';
-  say('Asking the owner of this link to let you in…');
+  say('Asking the owner of this link to let you in…', 1);
   fetch('/__simab/ask', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ t: t }) })
     .then(function (r) { return r.json(); }).then(function (d) { if (d.id) poll(d.id); else { say(d.error || 'Not possible now.'); again.style.display = ''; } },
       function () { say('Could not ask — check your connection.'); again.style.display = ''; });
@@ -12938,7 +12989,7 @@ class ShareHub:
     def _wait_page(self, h, sd: dict, sh: dict, to: str, sw: bool):
         t = f"{sh['user']}/{sh['slug']}/{sh['name']}"
         js = SHARE_WAIT_JS.replace("@@T@@", share_js(t)).replace("@@IN@@", share_js(self._signin_url(sd, f"/{t}{to}")))
-        return h._send(200, share_page("Asking…", "Asking the owner of this link to let you in…", js), MIME[".html"])
+        return h._send(200, share_page("Asking…", "Asking the owner of this link to let you in…", js, busy=True), MIME[".html"])
 
     # the way to the computer --------------------------------------------------------------------------
     def device(self, app, project: str) -> str:
@@ -13231,7 +13282,7 @@ class ShareHub:
             return h._send(200 if sw else 302, b"", "text/plain", {"X-Simab-Location" if sw else "Location": loc})
         js = SHARE_ENTRY_JS.replace("@@T@@", share_js(t)).replace("@@TO@@", share_js(to))
         sec = "; Secure" if self.gate.secure else ""
-        return h._send(200, share_page("Opening…", "Opening…", js), MIME[".html"],
+        return h._send(200, share_page("Opening…", "Opening…", js, busy=True), MIME[".html"],
                        {"Set-Cookie": f"{SHARE_LAST}={t}; Path=/; HttpOnly; SameSite=Lax{sec}"})
 
     def _serve(self, h, method, ws, domain, sd, app, sh, sub, q, base, nav, sw=False):
@@ -13759,7 +13810,7 @@ class Handler(BaseHTTPRequestHandler):
         ws = gate.ws_of(self._cookie())
         if not ws:
             return self._send(401, share_page("Sign in", "Sign in to the workspace in this browser first, then open the link again.",
-                                              '<p><a href="/">Sign in</a></p>'), MIME[".html"])
+                                              '<div class="acts"><a class="btn" href="/">Sign in</a></div>'), MIME[".html"])
         if not gate.share.host or gate.share.ws_of_user((query.get("u") or [""])[0]) != ws:
             return self._send(403, share_page("Not yours", "This link belongs to another user — sign in as that user."), MIME[".html"])
         to = (query.get("to") or ["/"])[0]

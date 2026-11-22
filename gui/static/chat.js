@@ -1427,11 +1427,11 @@
     var card = h('div', { class: 'perm-card pc-perm' },
       h('div', { class: 'perm-title' }, h('span', { class: 'pc-perm-ic' }, '⌂'), 'Run on ', h('b', null, 'this computer'),
         h('span', { class: 'muted' }, '· ' + a.project)),
-      h('pre', { class: 'pc-cmd' }, a.cmd),
+      h('pre', { class: 'pc-cmd' }, a.cmd), a.warn ? h('div', { class: 'pc-warn' }, '⚠ ' + a.warn) : null,
       h('div', { class: 'perm-actions' },
         b('Allow once', 'once', 'primary'),
-        b('Always allow this', 'always', '', 'Never ask again for this exact command in ' + a.project),
-        b('Allow all 1 hour', 'hour', '', 'Everything in ' + a.project + ' runs without asking for 1 hour'),
+        a.warn ? null : b('Always allow this', 'always', '', 'Never ask again for this exact command in ' + a.project),
+        a.warn ? null : b('Allow all 1 hour', 'hour', '', 'Everything in ' + a.project + ' runs without asking for 1 hour'),
         b('Deny', 'deny', 'danger'), modeSel ? h('span', { class: 'pc-mode-l' }, 'mode', modeSel) : null, left));
     this.perms[key] = card;
     this.add(card);

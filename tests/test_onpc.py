@@ -45,10 +45,13 @@ class Rules(unittest.TestCase):
         self.assertEqual(sw.pc_segments("npm ci && npm run build 2>&1 | tail -5; echo ok"),
                          ["npm ci", "npm run build 2>&1", "tail -5", "echo ok"])
 
-    def test_deny_list_wins_in_any_part(self):
+    def test_deny_list_always_asks(self):
         v, why = sw.pc_decide(self.cfg(mode="all"), "web", "npm run build && git push origin", {}, 0)
-        self.assertEqual(v, "deny")
+        self.assertEqual(v, "ask", "the user may allow it (2026-11-22)")
         self.assertIn("git push origin", why)
+        v, why = sw.pc_decide(self.cfg(mode="new", always={"web": ["rm -rf /x"]}), "web", "rm -rf /x", {"web": 9e9}, 0)
+        self.assertEqual((v, bool(why)), ("ask", True), "no Always / 1 hour skips the deny list")
+        self.assertEqual(sw.pc_decide(self.cfg(mode="all"), "web", "rm -rf build", {}, 0)[0], "allow")
 
     def test_modes(self):
         self.assertEqual(sw.pc_decide(self.cfg(mode="all"), "web", "npm test", {}, 0)[0], "allow")
@@ -331,10 +334,18 @@ class EndToEnd(unittest.TestCase):
         out, err = p.communicate(timeout=20)
         self.assertEqual((p.returncode, out), (126, b""))
         self.assertIn(b"NOT run", err)
-        code, out, err = self.onpc("sudo rm x")
-        self.assertEqual((code, out), (126, ""))
-        self.assertIn("deny list", err)
-        self.assertEqual(self.hub.pending()["runs"][0]["state"], "denied")
+        self.setcfg(mode="all")
+        p = self.onpc_proc("sudo rm x")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]), "deny list: asked even in mode all")
+        a = self.hub.pending()["asks"][0]
+        self.assertIn("deny list", a["warn"])
+        self.hub.answer(a["id"], "always")
+        p.communicate(timeout=20)
+        self.assertNotIn("sudo rm x", self.hub.cfg()["always"].get("proj") or [], "never remembered")
+        p = self.onpc_proc("sudo rm x")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]), "asked again next time")
+        self.hub.answer(self.hub.pending()["asks"][0]["id"], "deny")
+        self.assertEqual(p.wait(timeout=20), 126)
 
     def test_wrong_secret_or_turned_off(self):
         self.setcfg(on=False)
@@ -498,7 +509,10 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(p.returncode, 126)
         self.hub.trust("proj", True)                  # chosen on this computer ("Commands run on" here)
         self.setcfg(deny=["echo nope*"])
-        self.assertEqual(self.onpc("echo nope")[0], 126, "the deny list holds for hooked commands too")
+        p = self.onpc_proc("echo nope")
+        self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]), "the deny list asks for hooked commands too")
+        self.hub.answer(self.hub.pending()["asks"][0]["id"], "deny")
+        self.assertEqual(p.wait(timeout=20), 126)
         self.setcfg(mode="every")
         p = self.onpc_proc("echo asks")
         self.assertTrue(wait_for(lambda: self.hub.pending()["asks"]), "ask = asks, also for hooked commands")
@@ -1190,9 +1204,26 @@ class GitStaysOnServer(unittest.TestCase):
             self.assertIn("updatedInput", self.hook(c, self.repo), c)
         self.assertIn("updatedInput", self.hook("git status", self.tmp.name))      # no repo here
 
+    def test_onserver_prefix_stays_here(self):
+        out = json.loads(self.hook("onserver rm -rf .synctmp && ls", self.repo))
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["command"], "rm -rf .synctmp && ls",
+                         "prefix removed, nothing wrapped in onpc")
+        self.assertIn("onserver", sw.PC_HINT)
+        self.assertIn("onserver", sw.PC_LOCAL_HINT)
+
 
 class ComputersModalNoSideScroll(unittest.TestCase):
     def test_css(self):
         css = (Path(sw.__file__).parent / "static" / "app.css").read_text()
         self.assertIn(".modal.pcm .set-pane { overflow-x: hidden; overflow-wrap: anywhere; }", css)
         self.assertIn(":where(.modal.pcm .set-pane *) { min-width: 0; max-width: 100%; }", css)
+
+
+class DenyListAskNeverAuto(unittest.TestCase):
+    """A deny-list command (ask with "warn") is never answered by the window on its own."""
+    def test_js(self):
+        st = Path(sw.__file__).parent / "static"
+        js = (st / "computers.js").read_text()
+        self.assertIn("if (!a.warn && mode === 'chat' && tabs.some", js, "auto chat skips only normal asks")
+        self.assertIn("if (!a.warn && (v === 'all'", js, "changing the mode does not answer it")
+        self.assertIn("a.warn ? null : b('Always allow this'", (st / "chat.js").read_text())

@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.10 2026-11-22  Share pages get a real design; deny list asks you instead of refusing; "onserver " runs a command on the server
 #    1.65.9 2026-11-22  Local only chat badge counts its real connections and running commands (it always said 0)
 #    1.65.8 2026-11-22  Web version / phone: Local only chats show their line (connections, round trip, colour) and the live output of commands on your computer; Changes / git of a Local only project work from anywhere (run on its computer)
 #    1.65.7 2026-11-22  Local only: the computer a project lives on is recorded on the server at every connect, so the web version and the phone no longer show "PC · off"
@@ -394,7 +395,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.9"
+VERSION="1.65.10"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

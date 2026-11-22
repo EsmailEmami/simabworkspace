@@ -425,6 +425,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertIn(b"Asking the owner", d)
         self.assertIn(b"I am the owner", d)
+        self.assertIn(b'<body class="busy"><div class="card">', d, "waiting page: centred card + spinner")
+        self.assertIn(b'class="btn"', d, "sign-in link looks like a button")
         r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/front"}))
         aid = json.loads(d)["id"]
         r, d = self.req("POST", "/__simab/ask", {"Content-Type": "application/json"}, body=json.dumps({"t": "esi/esi/front"}))
@@ -765,3 +767,15 @@ class PortStop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharePageLook(unittest.TestCase):
+    def test_card(self):
+        sp = sw.share_page
+        d = sp("Not found", "a <b>", "").decode()
+        self.assertIn('<div class="card">', d)
+        self.assertIn("a &lt;b&gt;", d)
+        self.assertIn("prefers-color-scheme:dark", d)
+        self.assertNotIn('class="busy"', d, "no spinner on a final page")
+        self.assertIn('<body class="busy">', sp("Opening…", "Opening…", "", busy=True).decode())
+

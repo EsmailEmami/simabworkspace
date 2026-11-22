@@ -37,7 +37,8 @@
   function kids(el, list) { el.replaceChildren.apply(el, list.filter(Boolean)); }
 
   // where a project builds and whether that works right now
-  function buildState(name, d) {
+  // chatPc: the computer chosen in one chat (its ⚒ chip) — before the project's and the default
+  function buildState(name, d, chatPc) {
     d = d || info;
     if (!d || !d.builds || !d.builds[name]) return null;
     if (d.builds[name] === 'local') {               // Local only: the files live on one computer
@@ -48,12 +49,13 @@
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
     }
     if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Commands run on the server' };
-    var pin = (d.pins || {})[name];
-    if (pin) {                                       // a computer chosen for this project
+    var pin = chatPc || (d.pins || {})[name] || d['default'];
+    if (pin) {                                       // a computer chosen for this chat / project / all projects
+      var why = chatPc ? 'chosen for this chat' : (d.pins || {})[name] ? 'chosen for this project' : 'your default computer';
       var pd = (d.devices || []).filter(function (x) { return x.id === pin; })[0];
       var pn = pd ? pd.name : 'the chosen computer';
-      return isOn(pd) ? { on: 'computers', ok: true, text: 'Commands run on ' + pn + ' (chosen; files synced with the server)' }
-        : { on: 'computers', ok: false, text: pn + ' (chosen for this project) is not connected — Claude cannot run its commands' };
+      return isOn(pd) ? { on: 'computers', ok: true, dev: pn, text: 'Commands run on ' + pn + ' (' + why + '; files synced with the server)' }
+        : { on: 'computers', ok: false, dev: pn, text: pn + ' (' + why + ') is not connected — Claude cannot run its commands' };
     }
     var on = online(d);
     return on.length ? { on: 'computers', ok: true, text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
@@ -259,9 +261,23 @@
         });
         return sel;
       }
+      var defSel = null;
+      if ((devs.devices || []).length > 1) {
+        defSel = h('select', { class: 'inp pc-pin pc-default', title: 'Used by every My computers project without its own choice' },
+          [h('option', { value: '' }, 'Any connected')].concat(devs.devices.map(function (x) { return h('option', { value: x.id }, x.name); })));
+        defSel.value = devs['default'] || '';
+        defSel.addEventListener('change', function () {
+          api('POST', 'pc/default', { dev: defSel.value }).then(function (x) {
+            devs = x; setInfo(x); renderBuilds();
+            toast('Default computer: ' + (defSel.value ? defSel.options[defSel.selectedIndex].textContent : 'any connected'), 'ok');
+          }).catch(fail);
+        });
+      }
       kids(buildBox, [h('div', { class: 'pc-note' }, 'My computers: the files stay on the server (synced with this computer) and Claude works on them there, '
         + 'but every command it runs (build, npm, git, tests, dev servers…) runs on a connected computer. If none is connected it stops and tells you — '
-        + 'it never runs them on the server instead. New chats pick up a change.')].concat(names.map(function (n) {
+        + 'it never runs them on the server instead. Order: the chat\'s ⚒ chip, then the project, then the default.'),
+        defSel ? h('div', { class: 'pc-build' }, h('div', { class: 'pc-build-main' }, h('b', null, 'Default computer'),
+          h('small', { class: 'muted' }, 'for every project below without its own choice')), defSel) : null].concat(names.map(function (n) {
         var st = buildState(n, devs);
         function pick(v) {
           if (v === b[n]) return;
@@ -572,11 +588,33 @@
     (S.tabs || []).forEach(function (t) {
       if (!t.setWhere || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
-      var st = p ? buildState(p.name) : null;
+      var st = p ? buildState(p.name, null, t.info.spec.pc) : null;
       if (!st || st.on === 'server') { t.setWhere(''); return; }
       if (!infoFresh) { t.setWhere(st.on === 'local' ? '⌂ local …' : '⚒ PC …', 'checking…', ''); return; }
-      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ runs on PC' + (st.ok ? '' : ' · off'), st.text, st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad');
+      var many = st.on === 'computers' && ((info && info.devices) || []).length > 1;
+      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ ' + (st.dev || 'runs on PC') + (st.ok ? '' : ' · off') + (many ? ' ▾' : ''),
+        st.text + (many ? '\nclick: choose the computer of this chat' : ''), st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad',
+        many ? function (ev) { chatPcMenu(t, p.name, ev.currentTarget); } : null);
     });
+  }
+
+  // the ⚒ chip of a My computers chat: which computer runs this chat's commands
+  function chatPcMenu(t, name, el) {
+    var cur = t.info.spec.pc || '';
+    var base = buildState(name, info, '');
+    var items = [{ header: 'Commands of this chat run on' },
+      { label: (cur ? '   ' : '✓ ') + 'Project setting (' + (base && base.dev ? base.dev : 'any connected') + ')', action: function () { pick(''); } }];
+    (info.devices || []).forEach(function (x) {
+      items.push({ label: (cur === x.id ? '✓ ' : '   ') + x.name + (isOn(x) ? '' : ' (not connected)'), action: function () { pick(x.id); } });
+    });
+    function pick(id) {
+      if (id === cur) return;
+      t.send({ t: 'pc', pc: id });
+      if (id) t.info.spec.pc = id; else delete t.info.spec.pc;
+      decorate();
+    }
+    var r = el.getBoundingClientRect();
+    SW.showMenu(r.left, r.bottom + 2, items);
   }
 
   // ------------------------------------------------------------------ live output box
@@ -691,6 +729,13 @@
   // Local only projects live and die by this computer's internet: 5 bars from the round trip to the
   // server, and what goes over the link right now (↓ from the server, ↑ to it).
   function rate(b) { return b < 1024 ? Math.round(b) + ' B/s' : b < 1048576 ? (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB/s' : (b / 1048576).toFixed(1) + ' MB/s'; }
+  // Local only: how many file requests the server makes (each one is a round trip) and where to
+  function fsLine(f, ops) {
+    if (!f || !f.n) return '';
+    return '\nFile requests: ' + (ops || 0) + '/s now, ' + f.n + ' in all (' + f.ms + ' ms each here)'
+      + (f.hidden ? ', ' + f.hidden + ' to hidden heavy folders' : '')
+      + (f.busy && f.busy.length ? '\nBusiest: ' + f.busy.map(function (b) { return b[0] + ' ' + b[1]; }).join(', ') : '');
+  }
   function netBox(n) {
     var el = document.getElementById('pc-net');
     if (!el) return;
@@ -702,7 +747,7 @@
     el.replaceChildren(h('span', { class: 'nbars' }, bars),
       h('span', { class: 'nrate' }, '↓' + rate(n.down) + ' ↑' + rate(n.up)));
     el.title = n.state !== 'connected' ? 'This computer is not connected to the server — Local only projects cannot work'
-      : 'Connection to the server: ' + (n.rtt == null ? 'no answer' : n.rtt + ' ms round trip') + '\nNow: ↓ ' + rate(n.down) + ' from the server, ↑ ' + rate(n.up) + ' to it';
+      : 'Connection to the server: ' + (n.rtt == null ? 'no answer' : n.rtt + ' ms round trip') + '\nNow: ↓ ' + rate(n.down) + ' from the server, ↑ ' + rate(n.up) + ' to it' + fsLine(n.files, n.ops);
   }
   // a real speed test over ssh (installed app): click the bars, or ⚙ → Speed test…
   function speedTest() {

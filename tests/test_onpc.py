@@ -159,6 +159,26 @@ class ServerScripts(unittest.TestCase):
         script = sw.chat_remote_script(os.path.join(self.home, "proj"), "printenv SIMAB_CHAT; true", [], "x; rm -rf ~")
         self.assertNotIn("rm -rf", script, "only a real relay key")
 
+    def test_default_and_chat_computers_are_written_by_admin(self):
+        self.py(sw.PC_ADMIN_PY, ["default", "abcdef012345"])
+        self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], b"{}"))["default"], "abcdef012345")
+        self.py(sw.PC_ADMIN_PY, ["default", ""])
+        self.assertEqual(json.loads(self.py(sw.PC_ADMIN_PY, ["list"], b"{}"))["default"], "")
+        self.py(sw.PC_ADMIN_PY, ["chatpin", "00112233445566aa", "abcdef012345"])
+        self.py(sw.PC_ADMIN_PY, ["chatpin", "00112233445566bb", ""])
+        self.assertEqual(json.loads(Path(self.home, ".cache/simabworkspace/pc/chatpins.json").read_text()),
+                         {"00112233445566aa": "abcdef012345", "00112233445566bb": ""})
+
+    def test_chat_passes_its_computer_to_claude(self):
+        s = sw.chat_remote_script("~/p", "claude", [], "00112233445566aa", "abcdef012345")
+        self.assertIn("SIMAB_PC=abcdef012345; export SIMAB_PC;", s)
+        self.assertNotIn("SIMAB_PC", sw.chat_remote_script("~/p", "claude", [], "00112233445566aa", "bad;rm"))
+        st = sw.Store(Path(self.home) / "gui.json")
+        st.set_chat_pc("p", "c1", "abcdef012345")
+        self.assertEqual(st.data["projects"]["p"]["chatPc"], {"c1": "abcdef012345"})
+        st.set_chat_pc("p", "c1", "")
+        self.assertEqual(st.data["projects"]["p"]["chatPc"], {})
+
 
 class Forwarder(threading.Thread):
     """Stands in for `ssh -R`: unix socket on the "server" → the app's TCP port."""
@@ -244,12 +264,13 @@ class EndToEnd(unittest.TestCase):
         self.envp.stop()
         self.tmp.cleanup()
 
-    def onpc_proc(self, *args, cwd=None, chat=""):
+    def onpc_proc(self, *args, cwd=None, chat="", env=None):
         return subprocess.Popen([sys.executable, self.onpc_file] + list(args), cwd=cwd or os.path.join(self.srv_dir, "web"),
-                                env=dict(os.environ, HOME=self.home, SIMAB_CHAT=chat), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                env=dict(os.environ, HOME=self.home, SIMAB_CHAT=chat, **(env or {})),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    def onpc(self, *args, cwd=None):
-        p = self.onpc_proc(*args, cwd=cwd)
+    def onpc(self, *args, cwd=None, chat="", env=None):
+        p = self.onpc_proc(*args, cwd=cwd, chat=chat, env=env)
         out, err = p.communicate(timeout=30)
         return p.returncode, out.decode(), err.decode()
 
@@ -421,6 +442,26 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("NOT run", err)
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): self.hub.cfg()["id"]}))
         self.assertEqual(self.onpc("echo x")[:2], (0, "x\n"))
+
+    def test_a_chat_or_the_default_chooses_the_computer(self):
+        """Order: this chat (chatpins.json by relay key, else SIMAB_PC) → the project → the default ("*")."""
+        me, other, key = self.hub.cfg()["id"], "ffffffffffff", "00112233445566aa"
+        real = os.path.realpath(self.srv_dir)
+        Path(self.pcdir, "pins.json").write_text(json.dumps({"*": other}))
+        code, _, err = self.onpc("echo x")
+        self.assertEqual(code, 255)
+        self.assertIn("your default computer", err)
+        Path(self.pcdir, "pins.json").write_text(json.dumps({"*": other, real: me}))
+        self.assertEqual(self.onpc("echo x")[:2], (0, "x\n"), "the project's choice beats the default")
+        code, _, err = self.onpc("echo x", env={"SIMAB_PC": other})
+        self.assertIn("chosen for this chat", err, "chosen in the chat before Claude started")
+        Path(self.pcdir, "chatpins.json").write_text(json.dumps({key: ""}))
+        self.assertEqual(self.onpc("echo x", chat=key, env={"SIMAB_PC": other})[:2], (0, "x\n"),
+                         "changed back in the chat: the project's choice again")
+        Path(self.pcdir, "pins.json").write_text(json.dumps({real: other}))
+        Path(self.pcdir, "chatpins.json").write_text(json.dumps({key: me}))
+        self.assertEqual(self.onpc("echo x", chat=key)[:2], (0, "x\n"), "the chat beats the project")
+        self.assertEqual(self.onpc("echo x")[0], 255, "another chat keeps the project's choice")
 
     def test_web_and_phone_see_and_answer_the_question(self):
         """PC_BRIDGE_PY (on the server as the user) asks the computer over its socket."""
@@ -1148,3 +1189,10 @@ class GitStaysOnServer(unittest.TestCase):
         for c in ("npm test", "git pull && npm i", "ls"):
             self.assertIn("updatedInput", self.hook(c, self.repo), c)
         self.assertIn("updatedInput", self.hook("git status", self.tmp.name))      # no repo here
+
+
+class ComputersModalNoSideScroll(unittest.TestCase):
+    def test_css(self):
+        css = (Path(sw.__file__).parent / "static" / "app.css").read_text()
+        self.assertIn(".modal.pcm .set-pane { overflow-x: hidden; overflow-wrap: anywhere; }", css)
+        self.assertIn(":where(.modal.pcm .set-pane *) { min-width: 0; max-width: 100%; }", css)

@@ -173,6 +173,10 @@
     return h('pre', { class: 'tool-pre ' + (cls || ''), dir: 'auto' }, t);
   }
 
+  // Local only projects: Grep / Glob / Read / Edit / Write run on the user's computer (MCP server "pc"
+  // of onpc) — shown as Claude's own cards
+  function pcTool(n) { return String(n || '').replace(/^mcp__pc__(Grep|Glob|Read|Edit|Write)$/, '$1'); }
+
   function toolSummary(tab, name, input) {
     input = input || {};
     switch (name) {
@@ -851,7 +855,7 @@
       if (ev.type === 'message_start') { this.msgTok = 0; this.setPhase('work', 'thinking…'); }
       else if (ev.type === 'content_block_start') {
         var cb = ev.content_block || {};
-        this.setPhase('work', cb.type === 'text' ? 'writing…' : cb.type === 'tool_use' ? 'preparing ' + cb.name + '…' : 'thinking…');
+        this.setPhase('work', cb.type === 'text' ? 'writing…' : cb.type === 'tool_use' ? 'preparing ' + pcTool(cb.name) + '…' : 'thinking…');
       } else if (ev.type === 'message_delta' && ev.usage && ev.usage.output_tokens) {
         this.msgTok = ev.usage.output_tokens;
         this.outTokens = (this.tokBase || 0) + this.msgTok;
@@ -859,7 +863,7 @@
       } else if (ev.type === 'message_stop') { this.tokBase = (this.tokBase || 0) + (this.msgTok || 0); this.msgTok = 0; }
     } else if (t === 'assistant' && !e.parent_tool_use_id) {
       var tools = ((e.message || {}).content || []).filter(function (b) { return b.type === 'tool_use'; });
-      if (tools.length) { var b = tools[tools.length - 1]; this.setPhase('work', 'running ' + b.name + toolHint(this, b.input)); }
+      if (tools.length) { var b = tools[tools.length - 1]; this.setPhase('work', 'running ' + pcTool(b.name) + toolHint(this, b.input)); }
     } else if (t === 'user' && !e.parent_tool_use_id) {
       var c = (e.message || {}).content;
       if (Array.isArray(c) && c.some(function (x) { return x.type === 'tool_result'; })) this.setPhase('work', 'thinking…');
@@ -919,6 +923,10 @@
       case '_init': this.applyInit(e.info || {}); break;
       case '_watch': this.setWatch(e); break;
       case '_mode': this.setMode(e.mode); break;
+      case '_pc':                          // the computer of this chat (computers.js ⚒ chip)
+        if (this.info && this.info.spec) { if (e.pc) this.info.spec.pc = e.pc; else delete this.info.spec.pc; }
+        if (window.SWComputers) SWComputers.decorate();
+        break;
       case '_model': this.model = e.model || 'opus'; this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
       case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; this.paintOpts(); if (!this.replaying) this.system('effort: ' + e.effort); break;
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
@@ -965,7 +973,7 @@
       var el;
       if (cb.type === 'text') el = h('div', { class: 'live-text', dir: 'auto' });
       else if (cb.type === 'thinking') el = h('details', { class: 'thinking live', open: true }, h('summary', null, 'thinking…'), h('div', { class: 'think-body', dir: 'auto' }));
-      else if (cb.type === 'tool_use') el = h('div', { class: 'tool-card pending' }, h('div', { class: 'tool-head' }, h('span', { class: 'tname' }, TOOL_FA[cb.name] || cb.name), h('i', { class: 'spin' })));
+      else if (cb.type === 'tool_use') el = h('div', { class: 'tool-card pending' }, h('div', { class: 'tool-head' }, h('span', { class: 'tname' }, TOOL_FA[pcTool(cb.name)] || pcTool(cb.name)), h('i', { class: 'spin' })));
       if (el) { el.dataset.draft = '1'; el.dataset.type = cb.type; el._pending = ''; g.append(el); this.draft.blocks[ev.index] = { el: el, type: cb.type, done: false }; this.scrollEnd(); }
     } else if (ev.type === 'content_block_delta') {
       var b = this.draft.blocks[ev.index];
@@ -1087,7 +1095,7 @@
 
   P.toolCard = function (b) {
     var self = this;
-    var name = b.name || '?';
+    var name = pcTool(b.name || '?');
     var detail = toolDetail(this, name, b.input);
     var body = h('div', { class: 'tool-body' }, detail);
     var resBox = h('div', { class: 'tool-result hidden' });
@@ -1123,7 +1131,7 @@
     if (ag) {
       var self0 = this;
       (msg.content || []).forEach(function (b) {
-        if (b.type === 'tool_use') { ag.steps++; ag.last = b.name + toolHint(self0, b.input); }
+        if (b.type === 'tool_use') { ag.steps++; ag.last = pcTool(b.name) + toolHint(self0, b.input); }
         else if (b.type === 'text' && b.text && b.text.trim()) ag.last = b.text.trim().split('\n')[0].slice(0, 90);
       });
       this.renderAgents();
@@ -1133,7 +1141,7 @@
     if (!card._sub) { card._sub = h('div', { class: 'subagent' }); card.querySelector('.tool-body').append(card._sub); }
     var self = this;
     (msg.content || []).forEach(function (b) {
-      if (b.type === 'tool_use') card._sub.append(h('div', { class: 'subline' }, '↳ ', h('b', null, TOOL_FA[b.name] || b.name), ' ', toolSummary(self, b.name, b.input)));
+      if (b.type === 'tool_use') card._sub.append(h('div', { class: 'subline' }, '↳ ', h('b', null, TOOL_FA[pcTool(b.name)] || pcTool(b.name)), ' ', toolSummary(self, pcTool(b.name), b.input)));
       else if (b.type === 'text' && b.text.trim()) card._sub.append(h('div', { class: 'subline', dir: 'auto' }, b.text.slice(0, 300)));
     });
   };
@@ -1336,7 +1344,7 @@
     var self = this;
     var req = e.request || {};
     if (req.subtype !== 'can_use_tool') return;
-    var name = req.tool_name;
+    var name = pcTool(req.tool_name);
     var rid = e.request_id;
     if (name === 'AskUserQuestion') { this.questionCard(rid, req.input || {}); this.alertUser('Claude has a question', 'question'); return; }
     if (name === 'ExitPlanMode') { this.planCard(rid, req.input || {}); this.alertUser('Claude’s plan is ready', 'plan'); return; }
@@ -1426,11 +1434,12 @@
   };
 
   // Computers (computers.js): where this chat's work runs, shown next to the status
-  P.setWhere = function (text, title, cls) {
+  P.setWhere = function (text, title, cls, onclick) {
     if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.statusEl.append(this.whereEl); }
     this.whereEl.textContent = text || '';
     this.whereEl.title = title || '';
-    this.whereEl.className = 'pc-where' + (cls ? ' ' + cls : '') + (text ? '' : ' hidden');
+    this.whereEl.onclick = onclick || null;
+    this.whereEl.className = 'pc-where' + (cls ? ' ' + cls : '') + (onclick ? ' pick' : '') + (text ? '' : ' hidden');
   };
   // the live output of a command that runs on the user's computer, inside its Bash card
   P.pcRunView = function (run, out, who) {

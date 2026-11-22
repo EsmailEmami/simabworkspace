@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.6"
+VERSION = "1.65.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -154,6 +154,7 @@ def win_python(gui=False) -> str:
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if IS_WIN else {}     # a short command, no console flash
 
 
 def detached_kwargs() -> dict:
@@ -533,6 +534,17 @@ class Store:
             if effort in CHAT_EFFORTS:
                 pp["chatEffort"] = effort
                 self.data["settings"]["chatEffort"] = effort
+            self.save()
+
+    def set_chat_pc(self, project: str, conv: str, dev: str):
+        """The computer chosen in one conversation (its ⚒ chip) — kept for when it is reopened."""
+        with self.lock:
+            m = self.data["projects"].setdefault(project or "", {}).setdefault("chatPc", {})
+            m.pop(conv, None)
+            if dev:
+                m[conv] = dev
+            while len(m) > 200:
+                m.pop(next(iter(m)))
             self.save()
 
     # project colour (tabs of the project are marked with it); "" = automatic
@@ -1851,17 +1863,31 @@ def chat_args(mode: str, model: str = "", resume: str = "", effort: str = "") ->
     return a
 
 
-def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "") -> str:
+PC_EDIT_TOOLS = {"mcp__pc__Edit", "mcp__pc__Write"}
+
+
+def pc_edit_verdict(tool, mode):
+    """Local only: Edit / Write run on the computer as MCP tools, which Claude's modes do not cover —
+    accept edits / auto / bypass → allowed, plan → denied, else None (the user is asked, like Claude's Edit)."""
+    if tool not in PC_EDIT_TOOLS:
+        return None
+    return True if mode in ("acceptEdits", "auto", "bypassPermissions") else False if mode == "plan" else None
+
+
+def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "", pc: str = "") -> str:
     """chat: the relay key of the chat tab — onpc sends it, so a question about a command goes to
     exactly that chat (not to whatever tab is open)."""
     cmd = claude_cmd or "claude"
     # a project built on the user's own computers: Claude is told to use onpc (see PC_HINT)
     inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "")
              + (f"SIMAB_CHAT={chat}; export SIMAB_CHAT; " if RELAY_KEY_RE.fullmatch(chat or "") else "")
+             + (f"SIMAB_PC={pc}; export SIMAB_PC; " if PC_ID_RE.fullmatch(pc or "") else "")
              + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); L=$("$HOME/.local/bin/onpc" --local 2>/dev/null); '
              + 'if [ $? = 3 ]; then echo "simabworkspace: this project lives on your computer and it is not connected'
-             + ' — open Simab Workspace there (Computers → Connect this computer)" >&2; exit 98; fi; exec ' + cmd + " "
-             + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"} ${L:+--settings "$L"}')
+             + ' — open Simab Workspace there (Computers → Connect this computer)" >&2; exit 98; fi; '
+             + 'M=$("$HOME/.local/bin/onpc" --mcp 2>/dev/null); exec ' + cmd + " "
+             + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"} ${L:+--settings "$L"}'
+             + ' ${M:+--mcp-config "$M" --disallowedTools Grep,Glob,Read,Edit,Write,MultiEdit}')
     # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
     return (f"cd {remote_path_expr(rpath)} || exit 97; "
             f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote("exec sh -c " + shlex.quote(inner))}')
@@ -2718,10 +2744,10 @@ class ChatSession:
 
     def _connect(self, how="start"):
         if self.relay_key:
-            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort,
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, pc=self.spec.get("pc") or "",
                                            relay=(how, self.relay_key, self.relay_off, self.session_id or ""))
         else:
-            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort)
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, pc=self.spec.get("pc") or "")
         env = dict(os.environ, PATH=tool_path())
         try:
             proc = subprocess.Popen(argv, cwd=self.built["cwd"], env=env, stdin=subprocess.PIPE,
@@ -2888,6 +2914,8 @@ class ChatSession:
             self.spec["resume"] = sid
             if self.relay_on:
                 self._write({"type": "_sw_relay_conv", "id": sid})
+            if self.spec.get("pc") and getattr(self, "remember_pc", None):    # chosen before the first message
+                self.remember_pc(self.spec.get("project"), sid, self.spec["pc"])
             if self.on_change:
                 self.on_change(self)
         if t == "stream_event":
@@ -2914,7 +2942,11 @@ class ChatSession:
                 with self.lock:
                     fresh = ev.get("request_id") not in self.pending
                     self.pending[ev.get("request_id")] = ev
-                if fresh:
+                auto = pc_edit_verdict(req.get("tool_name"), self.mode)
+                if auto is not None:            # Local only Edit / Write on the computer: as Claude's own would be
+                    self.answer_permission(ev.get("request_id"), auto, False,
+                                           "" if auto else "Plan mode: do not change files yet — finish the plan first.")
+                elif fresh:
                     self._notify("ask", str(req.get("tool_name") or ""))
             else:
                 # not supported here: answer so Claude does not wait forever
@@ -3024,6 +3056,30 @@ class ChatSession:
                 self.remember(self.spec.get("project"), effort=self.effort)
             self._request({"subtype": "apply_flag_settings", "settings": {"effortLevel": self.effort}})
             self._log({"type": "_effort", "effort": self.effort})
+        elif t == "pc" and isinstance(m.get("pc"), str) and (m["pc"] == "" or PC_ID_RE.fullmatch(m["pc"])):
+            self.set_pc(m["pc"])
+
+    def set_pc(self, dev: str):
+        """The computer of this chat ("" = the project's / default choice): onpc reads it at once
+        (chatpins.json by relay key), a restarted Claude gets it as SIMAB_PC, a reopened chat from the store."""
+        if dev:
+            self.spec["pc"] = dev
+        else:
+            self.spec.pop("pc", None)
+        if self.session_id and getattr(self, "remember_pc", None):
+            self.remember_pc(self.spec.get("project"), self.session_id, dev)
+        key, conf = self.relay_key, self.built.get("conf")
+
+        def tell():
+            try:
+                remote_python(conf, PC_ADMIN_PY, ["chatpin", key, dev])
+            except ApiError as e:
+                log_line(f"chatpin: {e.message}")
+        if key and conf:
+            threading.Thread(target=tell, daemon=True).start()
+        self._log({"type": "_pc", "pc": dev})
+        if self.on_change:
+            self.on_change(self)
 
     def _ask_title(self, content):
         """Like the VS Code extension: Claude names the conversation from the first message
@@ -3322,10 +3378,13 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     effort = chat_effort(pp["chatEffort"] if "chatEffort" in pp else s.get("chatEffort", ""))
     claude_cmd = s.get("claudeCmd") or "claude"
     multiplex = bool(s.get("sshMultiplex"))
+    pc = spec.get("pc") if isinstance(spec.get("pc"), str) and PC_ID_RE.fullmatch(spec.get("pc")) else \
+        ((pp.get("chatPc") or {}).get(resume) or "" if resume else "")
 
-    def make_argv(mode_, model_, resume_, effort_="", relay=None):
-        """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY)."""
-        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "")
+    def make_argv(mode_, model_, resume_, effort_="", relay=None, pc=""):
+        """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY).
+        pc: the computer chosen in this chat (onpc runs its commands there)."""
+        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "", pc)
         if relay:
             script = chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")
         return ssh_base(c, multiplex=multiplex and not relay) + ["-T", c.target, script]
@@ -3338,7 +3397,8 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
             "relay": relay or secrets.token_hex(8), "relay_restored": bool(relay),
             "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new",
                      "slot": 0, **({"resume": resume} if resume else {}),
-                     **({"named": spec["named"]} if spec.get("named") in CHAT_NAMED else {})}}
+                     **({"named": spec["named"]} if spec.get("named") in CHAT_NAMED else {}),
+                     **({"pc": pc} if pc else {})}}
 
 
 
@@ -5520,7 +5580,9 @@ PC_HINT = (
 
 PC_LOCAL_HINT = (
     "This project lives only on the user's own computer: this folder is a live mount of it (nothing is "
-    "stored on this server). Read, Edit, Write, Grep and Glob work here as usual. Every Bash command is "
+    "stored on this server). Your file tools for it are mcp__pc__Read / Edit / Write / Grep / Glob: they run "
+    "on the user's computer, where the files are — one round trip each, fast even on big projects and weak "
+    "internet; use them (same arguments as Claude's own), not cat/grep/find/sed in Bash. Every Bash command is "
     "run on the user's computer automatically (in the same folder there) — so tools, node, git, docker "
     "etc. are the ones installed there; if it is Windows the shell is Git Bash. Your own files (~/.claude: "
     "memory, plans, settings; /tmp) are on this server, not there: read and write them with Read/Write/Glob, "
@@ -5529,7 +5591,10 @@ PC_LOCAL_HINT = (
     "to the next command: use `cd dir && command`. Give long builds a long Bash timeout (600000 ms). If a "
     "command says the computer is not connected, stop and tell the user. Dev servers (ng serve, npm start "
     "…): `onpc --bg NAME COMMAND` starts it on the computer and returns at once with its URL; "
-    "`onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never run a dev server in the foreground.")
+    "`onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never run a dev server in the foreground. "
+    "Grep / Glob leave out heavy folders (node_modules, .venv, venv, __pycache__, .next, .gradle …) and .git; "
+    "mcp__pc__Read can still read a file inside them. git status / log / diff go through Bash (it runs on "
+    "the computer, where the repo is).")
 
 ONPC_PY = r'''#!/usr/bin/env python3
 # onpc — run a command on your own computer instead of this server (Simab Workspace).
@@ -5593,14 +5658,30 @@ def project_on(cwd):
     return "", ""
 
 
-def pinned(cwd):
-    """The computer chosen for this project (Computers → Commands run on), or ""."""
+def pinned(cwd, why=False):
+    """The computer chosen for this chat (its ⚒ chip), else for this project (Computers → Commands run on),
+    else the default of all projects; "" = any connected one. why: → (id, "chat" | "project" | "default" | "")."""
+    key = os.environ.get("SIMAB_CHAT", "")
+    c = load("chatpins.json", {}) if key else {}
+    if isinstance(c, dict) and key in c:            # changed in this chat ("" = back to the project's choice)
+        dev = c[key] if isinstance(c[key], str) else ""
+    else:
+        dev = os.environ.get("SIMAB_PC", "")       # chosen in this chat before Claude started
+    if dev and dev.isalnum():
+        return (dev, "chat") if why else dev
     m = load("pins.json", {})
+    m = m if isinstance(m, dict) else {}
     best, dev = "", ""
-    for p, v in (m.items() if isinstance(m, dict) else []):
-        if (cwd == p or cwd.startswith(p.rstrip("/") + "/")) and len(p) > len(best):
+    for p, v in m.items():
+        if p != "*" and (cwd == p or cwd.startswith(p.rstrip("/") + "/")) and len(p) > len(best):
             best, dev = p, v
-    return dev
+    how = "project" if dev else ""
+    if not dev and isinstance(m.get("*"), str) and m["*"]:
+        dev, how = m["*"], "default"
+    return (dev, how) if why else dev
+
+
+CHOSEN = {"chat": "chosen for this chat", "project": "chosen for this project", "default": "your default computer"}
 
 
 def send(d, cwd, cmd):
@@ -5647,12 +5728,13 @@ def send(d, cwd, cmd):
 
 def run(cmd, on):
     cwd = os.path.realpath(os.getcwd())
-    pin = "" if on else pinned(cwd)
+    pin, how = ("", "") if on else pinned(cwd, True)
     devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id"))) and (not pin or d["id"] == pin)]
     if pin and not devs:
         name = next((d.get("name") for d in devices() if d["id"] == pin), "") or "the chosen computer"
-        sys.stderr.write("onpc: %s (chosen for this project) is not connected — the command was NOT run.\n"
-                         "Do not run it on the server or elsewhere: tell the user to open Simab Workspace there.\n" % name)
+        sys.stderr.write("onpc: %s (%s) is not connected — the command was NOT run.\n"
+                         "Do not run it on the server or elsewhere: tell the user to open Simab Workspace there,\n"
+                         "or to pick another computer (the ⚒ chip of this chat).\n" % (name, CHOSEN.get(how, how)))
         return 255
     if not devs:
         sys.stderr.write("onpc: none of your computers is connected%s — the command was NOT run.\n"
@@ -5832,13 +5914,152 @@ def git_stays_here(cmd, cwd):
         d = up
 
 
+def fs_call(op, args):
+    """One Grep / Glob / Read / Edit / Write of a Local only project, done on the computer → (answer, error)."""
+    cwd = os.path.realpath(os.getcwd())
+    pin = pinned(cwd)
+    devs = [d for d in devices() if d["online"] and (not pin or d["id"] == pin)]
+    if not devs:
+        return {}, ("the user's computer is not connected — nothing was done. Do not work around it on the server: "
+                    "tell the user to open Simab Workspace on their computer.")
+    raw = json.dumps({"cwd": cwd, "op": op, "args": args}).encode()
+    why = ""
+    for d in devs:
+        s = reach(d)
+        if s is None:
+            continue
+        s.settimeout(330)
+        try:
+            s.sendall((("POST /pc/fs HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                        "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(raw))).encode() + raw)
+            data = b""
+            while True:
+                c = s.recv(65536)
+                if not c:
+                    break
+                data += c
+        except OSError as e:
+            why = str(e)
+            continue
+        finally:
+            s.close()
+        head, _, rest = data.partition(b"\r\n\r\n")
+        try:
+            j = json.loads(rest.decode("utf-8", "replace") or "{}")
+        except ValueError:
+            j = {}
+        if b" 200 " in head.split(b"\r\n")[0] + b" ":
+            return j, j.get("error") or ""
+        old = b" 404 " in head[:20] and j.get("error") in (None, "", "not found")
+        why = (j.get("error") if not old else "") or ("Simab Workspace on the computer is too old for this — update it there; until "
+                                 "then search with Bash (grep / find run on the computer)" if old
+                                 else head.split(b"\r\n")[0].decode("latin-1"))
+    return {}, "onpc: " + (why or "the computer did not answer")
+
+
+MCP_TOOLS = [
+    {"name": "Grep", "description": (
+        "Search file contents of this project with a regular expression (ripgrep syntax). It runs on the "
+        "user's computer, where the files are — fast even on big projects; use it instead of grep/rg in Bash. "
+        "output_mode: files_with_matches (default, file paths), content (matching lines; -n, -A/-B/-C, "
+        "head_limit), count. Filter with glob (e.g. \"*.ts\", \"**/*.{ts,tsx}\") or type (js, py, rust, go …). "
+        "Heavy folders (node_modules, .venv …) and .git are not searched."),
+     "inputSchema": {"type": "object", "properties": {
+         "pattern": {"type": "string", "description": "The regular expression to search for"},
+         "path": {"type": "string", "description": "File or folder to search in (default: the project folder)"},
+         "glob": {"type": "string", "description": "Glob of files to search, e.g. \"*.js\""},
+         "type": {"type": "string", "description": "File type (rg --type), e.g. js, py"},
+         "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"]},
+         "-i": {"type": "boolean", "description": "Case insensitive"},
+         "-n": {"type": "boolean", "description": "Line numbers (content mode, default true)"},
+         "-A": {"type": "number"}, "-B": {"type": "number"}, "-C": {"type": "number"},
+         "multiline": {"type": "boolean", "description": "Patterns may span lines; . matches newlines"},
+         "head_limit": {"type": "number", "description": "Only the first N lines / files / counts"},
+         "offset": {"type": "number", "description": "Skip the first N before head_limit"}},
+         "required": ["pattern"]}},
+    {"name": "Glob", "description": (
+        "Find files of this project by name pattern (\"**/*.js\", \"src/**/*.{ts,tsx}\"), newest first, at most "
+        "100. It runs on the user's computer, where the files are — fast even on big projects. .gitignore is "
+        "kept; heavy folders (node_modules, .venv …) and .git are left out."),
+     "inputSchema": {"type": "object", "properties": {
+         "pattern": {"type": "string", "description": "The glob pattern"},
+         "path": {"type": "string", "description": "Folder to search in (default: the project folder)"}},
+         "required": ["pattern"]}},
+    {"name": "Read", "description": (
+        "Read a file of this project (absolute path). It is read on the user's computer, where the files are: "
+        "one round trip. Lines come numbered (\"     1\\tcode\"); up to 2000 lines from offset (1-based) — use "
+        "offset/limit for big files. Images (png, jpg, gif, webp) come as images. Files inside node_modules "
+        "and other heavy folders can be read too."),
+     "inputSchema": {"type": "object", "properties": {
+         "file_path": {"type": "string", "description": "Absolute path of the file"},
+         "offset": {"type": "number", "description": "First line (1-based)"},
+         "limit": {"type": "number", "description": "How many lines"}},
+         "required": ["file_path"]}},
+    {"name": "Edit", "description": (
+        "Replace text in a file of this project, on the user's computer. old_string must match the file "
+        "exactly (without the line-number prefix of Read) and be unique unless replace_all. Windows line ends "
+        "(CRLF) are matched and kept. Read the file first."),
+     "inputSchema": {"type": "object", "properties": {
+         "file_path": {"type": "string", "description": "Absolute path of the file"},
+         "old_string": {"type": "string", "description": "The exact text to replace"},
+         "new_string": {"type": "string", "description": "The new text"},
+         "replace_all": {"type": "boolean", "description": "Replace every match"}},
+         "required": ["file_path", "old_string", "new_string"]}},
+    {"name": "Write", "description": (
+        "Write a whole file of this project on the user's computer (creates folders; replaces the file). "
+        "Prefer Edit for changes to an existing file."),
+     "inputSchema": {"type": "object", "properties": {
+         "file_path": {"type": "string", "description": "Absolute path of the file"},
+         "content": {"type": "string", "description": "The whole new content"}},
+         "required": ["file_path", "content"]}},
+]
+MCP_RO = {"Grep", "Glob", "Read"}
+
+
+def mcp_serve():
+    """MCP server (stdio, JSON lines) Claude starts for a Local only project: Grep and Glob run on the
+    user's computer instead of crawling the sshfs mount one file at a time."""
+    for line in sys.stdin:
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(m, dict) or "id" not in m:
+            continue                                  # notifications (initialized, cancelled …)
+        meth, prm, res = m.get("method"), m.get("params") or {}, None
+        if meth == "initialize":
+            res = {"protocolVersion": prm.get("protocolVersion") or "2024-11-05", "capabilities": {"tools": {}},
+                   "serverInfo": {"name": "pc", "version": "1"}}
+        elif meth == "tools/list":
+            res = {"tools": [dict(t, annotations={"readOnlyHint": t["name"] in MCP_RO}) for t in MCP_TOOLS]}
+        elif meth == "tools/call":
+            name, args = prm.get("name"), prm.get("arguments") or {}
+            if name not in ("Grep", "Glob", "Read", "Edit", "Write") or not isinstance(args, dict):
+                j, err = {}, "no such tool"
+            else:
+                j, err = fs_call(name.lower(), args)
+            if not err and j.get("image"):
+                res = {"content": [{"type": "image", "data": j["image"], "mimeType": j.get("mime") or "image/png"}]}
+            else:
+                res = {"content": [{"type": "text", "text": err or j.get("text") or ""}], "isError": bool(err)}
+        elif meth == "ping":
+            res = {}
+        if res is None:
+            out = {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "method not found"}}
+        else:
+            out = {"jsonrpc": "2.0", "id": m["id"], "result": res}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
 def bg(body):
     """Dev servers on the computer, kept by the app there: --bg NAME CMD | --logs NAME | --stop NAME | --ps"""
-    pin = pinned(os.path.realpath(os.getcwd())) if body.get("op") == "start" else ""
+    pin, how = pinned(os.path.realpath(os.getcwd()), True) if body.get("op") == "start" else ("", "")
     devs = [d for d in devices() if d["online"] and (not pin or d["id"] == pin)]
     if not devs:
         sys.stderr.write("onpc: %s is not connected — nothing was started or stopped.\n"
-                         % ("the computer chosen for this project" if pin else "none of your computers"))
+                         % ("the computer " + CHOSEN.get(how, "chosen") if pin else "none of your computers"))
         return 255
     body["cwd"] = os.path.realpath(os.getcwd())
     body["chat"] = os.environ.get("SIMAB_CHAT", "")[:64]
@@ -5902,9 +6123,19 @@ def main(a):
         if on == "local" and not os.path.ismount(root):
             return 3
         me = shlex.quote(sys.executable) + " " + shlex.quote(os.path.realpath(os.path.abspath(sys.argv[0])))
-        sys.stdout.write(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
-            {"type": "command", "command": me + " --hook"}]}]}}))
+        st = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": me + " --hook"}]}]}}
+        if on == "local":       # Grep / Glob of the computer (--mcp): read-only, never asked; the mount's own are off
+            st["permissions"] = {"allow": ["mcp__pc__Grep", "mcp__pc__Glob", "mcp__pc__Read"], "deny": ["Grep", "Glob"]}
+        sys.stdout.write(json.dumps(st))
         return 0
+    if a[:1] == ["--mcp"]:            # Local only: the MCP config of Grep / Glob on the computer
+        on = project_on(os.path.realpath(os.getcwd()))[0]
+        if on == "local":
+            sys.stdout.write(json.dumps({"mcpServers": {"pc": {"type": "stdio", "command": sys.executable,
+                                         "args": [os.path.realpath(os.path.abspath(sys.argv[0])), "--mcp-serve"]}}}))
+        return 0
+    if a[:1] == ["--mcp-serve"]:
+        return mcp_serve()
     if a[:1] == ["--list"]:
         ds = devices()
         for d in ds:
@@ -6005,7 +6236,8 @@ if op == "list":
         r = os.path.realpath(os.path.expanduser(p)) if isinstance(p, str) and p else ""
         if r and isinstance(pins, dict) and pins.get(r):
             pinned[name] = pins[r]
-    print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {}), "pins": pinned}))
+    print(json.dumps({"devices": devs, "builds": builds_of(cfg.get("paths") or {}), "pins": pinned,
+                      "default": pins.get("*") or "" if isinstance(pins, dict) else ""}))
 elif op == "link":                     # Share on your domain: the web version forwards to this socket
     i = os.path.basename(sys.argv[2])
     d = load(i + ".json", None)
@@ -6045,6 +6277,26 @@ elif op == "builds":
         json.dump(pins, f)
     os.replace(os.path.join(D, "pins.json.tmp"), os.path.join(D, "pins.json"))
     print(json.dumps({"path": r, "on": sys.argv[3]}))
+elif op in ("default", "chatpin"):     # default DEV | chatpin CHAT-KEY DEV ("" = any / back to the project's choice)
+    os.makedirs(D, exist_ok=True)
+    os.chmod(D, 0o700)
+    name = "pins.json" if op == "default" else "chatpins.json"
+    m = load(name, {})
+    m = m if isinstance(m, dict) else {}
+    k, dev = ("*", sys.argv[2]) if op == "default" else (sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
+    dev = dev if dev.isalnum() else ""
+    if op == "default" and not dev:
+        m.pop("*", None)
+    else:
+        m.pop(k, None)
+        m[k] = dev
+        while op == "chatpin" and len(m) > 300:       # old chats: the oldest go first
+            m.pop(next(iter(m)))
+    fd = os.open(os.path.join(D, name + ".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(m, f)
+    os.replace(os.path.join(D, name + ".tmp"), os.path.join(D, name))
+    print("{}")
 '''
 
 # mount | umount; stdin {"dev": computer id, "mounts": [{"name", "path"}]} → {name: "ok" | why not}
@@ -6055,6 +6307,12 @@ cfg = json.loads(sys.stdin.read() or "{}")
 op = sys.argv[1]
 LIB = os.path.expanduser("~/.local/lib/simabworkspace/sshfs")
 ONPC = os.path.expanduser("~/.local/bin/onpc")
+# 4 parallel lines (a slow read no longer holds up every stat) + folder lists kept 20 s, symlinks 60 s;
+# file sizes/times stay 3 s (Bash changes files on the computer, behind sshfs' back). An older sshfs
+# that refuses an option gets the next, plainer set.
+SSHFS_OPTS = ["reconnect,ServerAliveInterval=15,dir_cache=yes,dcache_timeout=3,dcache_dir_timeout=20,"
+              "dcache_link_timeout=60,max_conns=4",
+              "reconnect,ServerAliveInterval=15,dir_cache=yes,dcache_timeout=3,max_conns=1"]
 def sshfs():
     p = shutil.which("sshfs")
     if p:
@@ -6108,12 +6366,14 @@ if op == "mount":
             if os.listdir(path):
                 out[name] = "the server folder " + path + " is not empty — it must stay empty"
                 continue
-            with tempfile.TemporaryFile() as ef:
-                r = subprocess.run([exe, "pc:", path, "-o", "ssh_command=" + sys.executable + " " + ONPC + " --sftp " + cfg["dev"] + " " + name,
-                                    "-o", "reconnect,ServerAliveInterval=15,dir_cache=yes,dcache_timeout=3,max_conns=1"],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=ef, timeout=60)
-                ef.seek(0)
-                msg = ef.read().decode("utf-8", "replace").strip()
+            for opts in SSHFS_OPTS:
+                with tempfile.TemporaryFile() as ef:
+                    r = subprocess.run([exe, "pc:", path, "-o", "ssh_command=" + sys.executable + " " + ONPC + " --sftp " + cfg["dev"] + " " + name,
+                                        "-o", opts], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=ef, timeout=60)
+                    ef.seek(0)
+                    msg = ef.read().decode("utf-8", "replace").strip()
+                if r.returncode == 0 and os.path.ismount(path):
+                    break
             out[name] = "ok" if r.returncode == 0 and os.path.ismount(path) else (msg.splitlines() or ["mounting failed"])[-1][:300]
         except (OSError, subprocess.SubprocessError) as e:
             out[name] = str(e)[:300]
@@ -6469,7 +6729,8 @@ def pc_link_argv(conf: ServerConf, sock: str, port: int) -> list:
     ("remote port forwarding failed for listen port 47123", a user's Mac) would end OUR link too.
     ClearAllForwardings would also drop our -R. So the link is checked on the server instead (_verify)."""
     return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
-        "-N", "-T", "-o", "StreamLocalBindUnlink=yes", "-R", f"{sock}:127.0.0.1:{port}", conf.target]
+        "-N", "-T", "-o", "StreamLocalBindUnlink=yes", "-o", "Compression=yes",     # weak lines: text shrinks 3-5x
+        "-R", f"{sock}:127.0.0.1:{port}", conf.target]
 
 
 def pc_shell_argv(cmd: str) -> list:
@@ -6512,6 +6773,7 @@ class PcHub:
         self.runs = collections.deque(maxlen=20)
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
         self.meter = [0, 0]            # bytes over the link: [from the server (down), to the server (up)]
+        self.fsstats = sftp_stats()    # Local only: file requests from the server (all mounts together)
         self.bg = {}                   # dev servers here (onpc --bg): name -> info; kept when the link drops
         self.net = {"rtt": None, "down": 0.0, "up": 0.0}
         self._net_thread = None
@@ -6677,6 +6939,7 @@ class PcHub:
     # the link's quality: round trip to the server (TCP connect to its ssh port) + traffic per second
     def _net_loop(self, tick=1.0):
         last, t0, n, rtts = list(self.meter), time.time(), 0, []
+        lastn = self.fsstats["n"]
         while self.wanted:
             if self.wake.wait(tick):
                 if not self.wanted:
@@ -6686,17 +6949,22 @@ class PcHub:
             cur = list(self.meter)
             self.net["down"], self.net["up"] = (cur[0] - last[0]) / dt, (cur[1] - last[1]) / dt
             last, t0 = cur, now
+            self.net["ops"], lastn = (self.fsstats["n"] - lastn) / dt, self.fsstats["n"]
             if n % 3 == 0:
                 rtts = (rtts + [pc_rtt(self.app.conf.host, self.app.conf.port)])[-3:]
                 ok = [x for x in rtts if x is not None]
                 self.net["rtt"] = sorted(ok)[len(ok) // 2] if ok and rtts[-1] is not None else None
             n += 1
-        self.net.update(rtt=None, down=0.0, up=0.0)
+        self.net.update(rtt=None, down=0.0, up=0.0, ops=0.0)
 
     def net_info(self) -> dict:
         rtt = self.net["rtt"] if self.state == "connected" else None
         bars = 0 if rtt is None else 5 if rtt < 60 else 4 if rtt < 120 else 3 if rtt < 250 else 2 if rtt < 500 else 1
-        return {"state": self.state, "rtt": rtt, "bars": bars, "down": round(self.net["down"]), "up": round(self.net["up"])}
+        st = self.fsstats
+        busy = sorted(st["dirs"].items(), key=lambda kv: -kv[1])[:5]
+        return {"state": self.state, "rtt": rtt, "bars": bars, "down": round(self.net["down"]), "up": round(self.net["up"]),
+                "ops": round(self.net.get("ops", 0.0)), "files": {"n": st["n"], "hidden": st["hidden"],
+                "ms": round(st["ms"] / st["n"], 2) if st["n"] else 0, "busy": [["/" + k, v] for k, v in busy]}}
 
     # Local only projects: their folders mounted on the server --------------------
     def local_projects(self) -> list:
@@ -6743,7 +7011,39 @@ class PcHub:
         h.end_headers()
         h.wfile.flush()
         h.close_connection = True
-        SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid"), meter=self.meter).serve()
+        SftpServer(p["local"], h.rfile, h.wfile, uid=b.get("uid"), gid=b.get("gid"), meter=self.meter, stats=self.fsstats).serve()
+
+    def serve_fs(self, h):
+        """POST /pc/fs {cwd, op: grep|glob, args} from onpc --mcp-serve: Claude's Grep / Glob of a Local
+        only project, run on this computer → {text}; only the answer goes back over the internet."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        n = int(h.headers.get("Content-Length") or 0)          # a Write may carry a big file (not _body's 1 MB)
+        if n > 30_000_000:
+            return h._json(413, {"error": "over 30 MB — write it with Bash"})
+        try:
+            b = json.loads(h.rfile.read(n).decode("utf-8")) if n else {}
+        except ValueError:
+            return h._json(400, {"error": "bad request"})
+        cwd, op, args = b.get("cwd"), b.get("op"), b.get("args")
+        if not isinstance(cwd, str) or not cwd.startswith("/") or op not in PCFS_OPS or not isinstance(args, dict):
+            return h._json(400, {"error": "bad request"})
+        hit = self.map_path(cwd)
+        if not hit or not hit[0].get("localOnly"):
+            return h._json(404, {"error": f"{cwd} is not a Local only project of {c['name']}"})
+        project, _, root = hit
+        t0 = time.perf_counter()
+        try:
+            res = PCFS_OPS[op](project["local"], root, args)
+        except (OSError, ValueError) as e:
+            return h._json(200, {"error": str(e)[:1000]})
+        finally:
+            self.fsstats["n"] += 1
+            self.fsstats["ms"] += (time.perf_counter() - t0) * 1000
+        return h._json(200, res)
 
     # dev servers (onpc --bg) -------------------------------------------------------
     def serve_bg(self, h):
@@ -7667,14 +7967,335 @@ def pc_kill(p):
 # which serves ONLY that project's folder (nothing else of the computer).
 SFTP_EXT = {"posix-rename@openssh.com": "1", "fsync@openssh.com": "1", "hardlink@openssh.com": "1"}
 SFTP_OK, SFTP_EOF, SFTP_NOFILE, SFTP_PERM, SFTP_FAIL, SFTP_UNSUP = 0, 1, 2, 3, 4, 8
+# Heavy folders the server never sees (Claude's own scans of a big project would cross the internet
+# for every file in them); Bash runs on the computer, so commands still see them. ".git" shows as an
+# empty folder: git (and Claude's start-up git scan) finds no repo on the mount, ripgrep still keeps
+# to .gitignore; git itself runs on the computer through Bash.
+SFTP_HIDE = {"node_modules", "__pycache__", ".venv", "venv", ".gradle", ".next", ".nuxt", ".angular", ".turbo",
+             ".parcel-cache", ".pytest_cache", ".mypy_cache", ".tox", ".dart_tool", ".pub-cache"}
+
+
+def sftp_hidden(parts) -> bool:
+    """parts = the path's components below the project folder."""
+    low = [x.lower() for x in parts]
+    return any(x in SFTP_HIDE for x in low) or ".git" in low[:-1]
+
+
+# Grep / Glob of a Local only project, done HERE on the computer (onpc --mcp-serve on the server
+# sends one request; only the answer crosses the internet) — like VS Code Remote: the work runs
+# where the files are. ripgrep when the computer has it, else git ls-files / a walk + Python re.
+PCFS_MAX = 200_000                     # characters of one answer (a weak line must not choke on it)
+
+
+def glob_regex(pat: str) -> "re.Pattern":
+    """Glob → regex on /-paths: ** any folders, * and ? inside one name, {a,b}, [..]."""
+    out, i, n = "", 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if pat.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pat.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif c == "*":
+            out, i = out + "[^/]*", i + 1
+        elif c == "?":
+            out, i = out + "[^/]", i + 1
+        elif c == "{" and "}" in pat[i:]:
+            j = pat.index("}", i)
+            out, i = out + "(?:" + "|".join(re.escape(x) for x in pat[i + 1:j].split(",")) + ")", j + 1
+        elif c == "[" and "]" in pat[i + 1:]:
+            j = pat.index("]", i + 1)
+            body = pat[i + 1:j]
+            out, i = out + "[" + ("^" + body[1:] if body[:1] == "!" else body).replace("\\", "\\\\") + "]", j + 1
+        else:
+            out, i = out + re.escape(c), i + 1
+    return re.compile(out + r"\Z")
+
+
+def _rg() -> str:
+    return shutil.which("rg") or ""
+
+
+def pc_files(base: str) -> list:
+    """Files under base, /-relative to it: ripgrep's list (.gitignore kept), else git's, else a walk —
+    heavy folders (SFTP_HIDE) and .git never."""
+    def ok(rel):
+        parts = rel.split("/")
+        return not any(x.lower() in SFTP_HIDE or x == ".git" for x in parts)
+    for argv in ([_rg(), "--files", "--hidden", "--path-separator", "/", "-g", "!.git"] if _rg() else None,
+                 ["git", "ls-files", "-co", "--exclude-standard", "-z"] if shutil.which("git") else None):
+        if not argv:
+            continue
+        try:
+            r = subprocess.run(argv, cwd=base, capture_output=True, timeout=120, **NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode in (0, 1) and (r.stdout or argv[0] != "git"):
+            sep = b"\0" if argv[0] == "git" else b"\n"
+            return [x for x in (y.decode("utf-8", "surrogateescape").replace("\\", "/") for y in r.stdout.split(sep)) if x and ok(x)]
+    out = []
+    for d, dirs, files in os.walk(base):
+        dirs[:] = [x for x in dirs if x.lower() not in SFTP_HIDE and x != ".git"]
+        rel = os.path.relpath(d, base).replace(os.sep, "/")
+        out += [f if rel == "." else rel + "/" + f for f in files]
+    return out
+
+
+def pcfs_base(local_root: str, server_root: str, path, heavy_ok=False) -> tuple:
+    """Claude's path (server form, or relative) → (folder or file here, its server form); never outside.
+    heavy_ok: one file (Read / Edit / Write) may be inside node_modules & co — only searches skip them."""
+    p = (path or "").strip() or server_root
+    if not p.startswith("/"):
+        p = server_root.rstrip("/") + "/" + p
+    p = os.path.normpath(p).replace("\\", "/")
+    sr = server_root.rstrip("/")
+    if p != sr and not p.startswith(sr + "/"):
+        raise PermissionError(f"{path} is outside the project ({server_root})")
+    rel = p[len(sr):].strip("/")
+    if not heavy_ok and (sftp_hidden(rel.split("/") if rel else []) or rel.split("/")[-1].lower() in SFTP_HIDE):
+        raise FileNotFoundError(f"{path}: a heavy folder, not searched — use Bash (it runs on the computer)")
+    return os.path.join(local_root, *rel.split("/")) if rel else local_root, p
+
+
+def _cut(text: str) -> str:
+    return text if len(text) <= PCFS_MAX else text[:PCFS_MAX] + "\n… (answer cut: narrow the path or pattern)"
+
+
+def pc_glob(local_root: str, server_root: str, a: dict) -> str:
+    pat = str(a.get("pattern") or "").strip()
+    if not pat:
+        raise ValueError("pattern is required")
+    base, sbase = pcfs_base(local_root, server_root, a.get("path"))
+    if pat.startswith("/"):
+        pat = pat[len(sbase.rstrip("/")) + 1:] if pat.startswith(sbase.rstrip("/") + "/") else pat.lstrip("/")
+    rx = glob_regex(pat)
+    hits = []
+    for rel in pc_files(base):
+        if rx.match(rel):
+            try:
+                hits.append((os.path.getmtime(os.path.join(base, rel)), rel))
+            except OSError:
+                pass
+    hits.sort(key=lambda x: -x[0])
+    if not hits:
+        return "No files found"
+    lines = [sbase.rstrip("/") + "/" + r for _, r in hits[:100]]
+    more = "\n(Results are truncated. Consider using a more specific path or pattern.)" if len(hits) > 100 else ""
+    return _cut("\n".join(lines) + more)
+
+
+def pc_grep(local_root: str, server_root: str, a: dict) -> str:
+    pat = a.get("pattern")
+    if not isinstance(pat, str) or not pat:
+        raise ValueError("pattern is required")
+    base, sbase = pcfs_base(local_root, server_root, a.get("path"))
+    mode = a.get("output_mode") if a.get("output_mode") in ("content", "files_with_matches", "count") else "files_with_matches"
+    head = a.get("head_limit") if isinstance(a.get("head_limit"), int) and a.get("head_limit") > 0 else 0
+    skip = a.get("offset") if isinstance(a.get("offset"), int) and a.get("offset") > 0 else 0
+    ci, ml = bool(a.get("-i")), bool(a.get("multiline"))
+    ctx = {k: a.get(k) for k in ("-A", "-B", "-C", "context") if isinstance(a.get(k), int) and a.get(k) >= 0}
+    num = a.get("-n", True) is not False
+    single = os.path.isfile(base)
+    prefix = sbase.rstrip("/") + ("" if single else "/")
+    lines = []
+    if _rg():
+        argv = [_rg(), "--hidden", "--no-messages", "--path-separator", "/", "--max-columns", "500", "-g", "!.git"]
+        for h_ in SFTP_HIDE:
+            argv += ["-g", "!" + h_]
+        if ci:
+            argv.append("-i")
+        if ml:
+            argv += ["-U", "--multiline-dotall"]
+        if isinstance(a.get("type"), str) and re.fullmatch(r"[\w+-]+", a["type"]):
+            argv += ["--type", a["type"]]
+        if isinstance(a.get("glob"), str) and a["glob"].strip():
+            argv += ["-g", a["glob"].strip()]
+        if mode == "files_with_matches":
+            argv.append("-l")
+        elif mode == "count":
+            argv.append("-c")
+        else:
+            argv += (["-n"] if num else []) + ["--no-heading", "--with-filename"]
+            for k, flag in (("-A", "-A"), ("-B", "-B"), ("-C", "-C"), ("context", "-C")):
+                if k in ctx:
+                    argv += [flag, str(ctx[k])]
+        argv += ["-e", pat, "--", os.path.basename(base) if single else "."]
+        try:
+            r = subprocess.run(argv, cwd=os.path.dirname(base) if single else base, capture_output=True, timeout=300, **NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            raise OSError("the search took over 5 minutes — narrow the path or pattern")
+        if r.returncode not in (0, 1):
+            raise ValueError((r.stderr.decode("utf-8", "replace").strip() or "ripgrep failed")[:500])
+        for x in r.stdout.decode("utf-8", "replace").splitlines():
+            if x == "--":
+                lines.append(x)
+                continue
+            x = x[2:] if x.startswith("./") else x
+            if single:
+                x = x[len(os.path.basename(base)):] if x.startswith(os.path.basename(base)) else x
+            lines.append(prefix + x if not single else sbase + (x if x[:1] in (":", "-") else (":" + x if x else "")))
+    else:
+        try:
+            rx = re.compile(pat, (re.I if ci else 0) | (re.S | re.M if ml else re.M))
+        except re.error as e:
+            raise ValueError(f"bad pattern: {e}")
+        grx = glob_regex(a["glob"].strip() if "/" in a.get("glob", "") else "**/" + a["glob"].strip()) \
+            if isinstance(a.get("glob"), str) and a["glob"].strip() else None
+        files = [""] if single else pc_files(base)
+        for rel in files:
+            if grx and not grx.match(rel):
+                continue
+            fp = base if single else os.path.join(base, rel)
+            try:
+                with open(fp, "rb") as f:
+                    raw = f.read(20_000_000)
+            except OSError:
+                continue
+            if b"\0" in raw[:8000]:
+                continue
+            text = raw.decode("utf-8", "replace")
+            shown = sbase if single else prefix + rel
+            if mode != "content":
+                n = sum(1 for ln in text.splitlines() if rx.search(ln)) if mode == "count" else (1 if rx.search(text) else 0)
+                if n:
+                    lines.append(shown if mode == "files_with_matches" else f"{shown}:{n}")
+                continue
+            for i, ln in enumerate(text.splitlines(), 1):
+                if rx.search(ln):
+                    lines.append(f"{shown}:{i}:{ln[:500]}" if num else f"{shown}:{ln[:500]}")
+    if mode == "files_with_matches":
+        lines.sort()
+    lines = lines[skip:]
+    total = len(lines)
+    if head:
+        lines = lines[:head]
+    if not lines:
+        return "No matches found" if mode == "content" else "No files found"
+    if mode == "files_with_matches":
+        return _cut(f"Found {total} file{'s' if total != 1 else ''}\n" + "\n".join(lines))
+    return _cut("\n".join(lines))
+
+
+PCFS_IMAGES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _file_of(local_root, server_root, a):
+    fp = a.get("file_path")
+    if not isinstance(fp, str) or not fp.strip():
+        raise ValueError("file_path is required")
+    return pcfs_base(local_root, server_root, fp, heavy_ok=True)
+
+
+def pc_read(local_root: str, server_root: str, a: dict) -> dict:
+    """Claude's Read, here: {"text"} numbered like Claude's own ("     1\tline"), or {"image", "mime"}."""
+    fp, sp = _file_of(local_root, server_root, a)
+    if os.path.isdir(fp):
+        raise IsADirectoryError(f"{sp} is a folder — use Glob or Bash ls")
+    ext = os.path.splitext(fp)[1].lower()
+    if ext in PCFS_IMAGES:
+        if os.path.getsize(fp) > 3_700_000:
+            raise ValueError(f"{sp}: image over 3.7 MB — make a smaller copy with Bash first")
+        with open(fp, "rb") as f:
+            return {"image": base64.b64encode(f.read()).decode(), "mime": PCFS_IMAGES[ext]}
+    off = a.get("offset") if isinstance(a.get("offset"), int) and a.get("offset") > 0 else 1
+    lim = a.get("limit") if isinstance(a.get("limit"), int) and a.get("limit") > 0 else 2000
+    size = os.path.getsize(fp)
+    if size > 256_000 and not (a.get("offset") or a.get("limit")):
+        raise ValueError(f"{sp} is {size // 1000} KB — read it in parts with offset and limit, or Grep it")
+    out, n = [], 0
+    with open(fp, "rb") as f:
+        head = f.read(8000)
+        if b"\0" in head:
+            raise ValueError(f"{sp} is a binary file{' (PDF: use Bash, e.g. pdftotext)' if ext == '.pdf' else ''}")
+        f.seek(0)
+        for raw in f:
+            n += 1
+            if n < off:
+                continue
+            if n >= off + lim:
+                break
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            out.append(f"{n:>6}\t{line[:2000]}" + ("… (line cut)" if len(line) > 2000 else ""))
+    if not out:
+        return {"text": "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
+                if size == 0 else f"<system-reminder>Warning: the file has only {n} lines; offset {off} is past the end.</system-reminder>"}
+    return {"text": _cut("\n".join(out))}
+
+
+def _text_of(fp, sp) -> str:
+    with open(fp, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{sp} is not UTF-8 text — edit it with Bash")
+
+
+def _put(fp, text):
+    with open(fp, "w", encoding="utf-8", newline="") as f:     # in place: keeps the file's mode, links, owner
+        f.write(text)
+
+
+def pc_edit(local_root: str, server_root: str, a: dict) -> dict:
+    fp, sp = _file_of(local_root, server_root, a)
+    old, new = a.get("old_string"), a.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise ValueError("old_string and new_string are required")
+    if old == new:
+        raise ValueError("old_string and new_string are the same — nothing to change")
+    if old == "":
+        if os.path.exists(fp) and os.path.getsize(fp):
+            raise ValueError("old_string is empty but the file is not — use Write, or give the text to replace")
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        _put(fp, new)
+        return {"text": f"The file {sp} has been updated successfully."}
+    if not os.path.isfile(fp):
+        raise FileNotFoundError(f"{sp} does not exist")
+    text = _text_of(fp, sp)
+    if old not in text and "\r\n" in text and "\n" in old:          # a Windows (CRLF) file: Claude writes \n
+        old, new = old.replace("\r\n", "\n").replace("\n", "\r\n"), new.replace("\r\n", "\n").replace("\n", "\r\n")
+    k = text.count(old)
+    if k == 0:
+        raise ValueError("String to replace not found in file (read it again: it may have changed).")
+    if k > 1 and not a.get("replace_all"):
+        raise ValueError(f"Found {k} matches of the string to replace, but replace_all is false. Give more "
+                         "context to make it unique, or set replace_all.")
+    _put(fp, text.replace(old, new) if a.get("replace_all") else text.replace(old, new, 1))
+    return {"text": f"The file {sp} has been updated successfully." + (f" ({k} replacements)" if k > 1 else "")}
+
+
+def pc_write(local_root: str, server_root: str, a: dict) -> dict:
+    fp, sp = _file_of(local_root, server_root, a)
+    content = a.get("content")
+    if not isinstance(content, str):
+        raise ValueError("content is required")
+    if os.path.isdir(fp):
+        raise IsADirectoryError(f"{sp} is a folder")
+    had = os.path.exists(fp)
+    if had and "\r\n" in _text_of(fp, sp) and "\r\n" not in content:     # keep a Windows file's line ends
+        content = content.replace("\n", "\r\n")
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    _put(fp, content)
+    return {"text": f"The file {sp} has been updated successfully." if had else f"File created successfully at: {sp}"}
+
+
+PCFS_OPS = {"grep": lambda *x: {"text": pc_grep(*x)}, "glob": lambda *x: {"text": pc_glob(*x)},
+            "read": pc_read, "edit": pc_edit, "write": pc_write}
+
+
+def sftp_stats() -> dict:
+    """What the server asked for over the link (Local only): requests, time spent here, busiest folders."""
+    return {"n": 0, "ms": 0.0, "hidden": 0, "dirs": {}}
 
 
 class SftpServer:
     """SFTP version 3 on a pair of binary streams, confined to `root`. Paths are /-separated,
     "/" = root. Symlinks may not lead out of root."""
 
-    def __init__(self, root: str, rfile, wfile, uid=None, gid=None, meter=None):
+    def __init__(self, root: str, rfile, wfile, uid=None, gid=None, meter=None, stats=None):
         self.meter = meter if meter is not None else [0, 0]      # [bytes from the server, bytes to it]
+        self.stats = stats if stats is not None else sftp_stats()
+        self.last = ""
         self.root = os.path.realpath(root)
         self.ids = (uid, gid) if isinstance(uid, int) and isinstance(gid, int) else None   # the server user's
         self.r, self.w = rfile, wfile
@@ -7721,6 +8342,10 @@ class SftpServer:
                     out.pop()
             else:
                 out.append(x)
+        self.last = "/".join(out[:2])
+        if sftp_hidden(out):
+            self.stats["hidden"] += 1
+            raise FileNotFoundError("not shown on the server (heavy folder): use Bash, it runs on the computer")
         full = os.path.join(self.root, *out) if out else self.root
         check = os.path.realpath(full) if follow else os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full)) if out else self.root
         if check != self.root and not check.startswith(self.root.rstrip(os.sep) + os.sep):
@@ -7757,6 +8382,7 @@ class SftpServer:
             return
         rid = struct.unpack(">I", data[:4])[0]
         self.p, self.data = 4, data
+        t0, self.last = time.perf_counter(), ""
         try:
             fn = SFTP_OPS.get(kind)
             if not fn:
@@ -7768,6 +8394,13 @@ class SftpServer:
             self.status(rid, SFTP_PERM, str(e))
         except (OSError, ValueError, KeyError, struct.error) as e:
             self.status(rid, SFTP_FAIL, str(e))
+        finally:
+            st = self.stats
+            st["n"] += 1
+            st["ms"] += (time.perf_counter() - t0) * 1000
+            d = st["dirs"]
+            if self.last in d or len(d) < 500:
+                d[self.last] = d.get(self.last, 0) + 1
 
     def u32(self):
         v = struct.unpack(">I", self.data[self.p:self.p + 4])[0]
@@ -7884,8 +8517,11 @@ class SftpServer:
         self.status(rid, SFTP_OK)
 
     def op_opendir(self, rid):
-        p = self.local(self.path())
-        names = [".", ".."] + os.listdir(p)
+        v = self.path()
+        p = self.local(v)
+        under = [x.lower() for x in v.replace("\\", "/").split("/") if x and x != "."]
+        names = [".", ".."] + ([] if under and under[-1] == ".git" else
+                               [x for x in os.listdir(p) if x.lower() not in SFTP_HIDE])
         self._send(102, rid, self._s(self.new_handle([p, names])))
 
     def op_readdir(self, rid):
@@ -8857,6 +9493,7 @@ class App:
             c = ChatSession(sid, built, on_change=self._changed)
             c.log = self.activity.add
             c.remember = self.store.set_chat_prefs
+            c.remember_pc = self.store.set_chat_pc
             c.on_usage = self.usage.limits
             c.on_cost = self.usage.cost
             c.on_notify = self.push_notify
@@ -10306,6 +10943,14 @@ class App:
             if not self.web:
                 self.pc.trust(p["name"], on == "computers")       # chosen here: its hooked commands follow the chat
             return self.pc_devices()
+        if key == ("POST", "default"):         # the computer of every My computers project without its own choice
+            dev = body.get("dev") or ""
+            if dev and not (isinstance(dev, str) and PC_ID_RE.fullmatch(dev)):
+                raise ApiError(400, "invalid computer")
+            if not self.conf.configured:
+                raise ApiError(400, "the server is not configured")
+            remote_python(self.conf, PC_ADMIN_PY, ["default", dev])
+            return self.pc_devices()
         if self.web:
             raise ApiError(403, "not available in the web version")
         if key == ("POST", "local"):
@@ -10503,6 +11148,7 @@ class App:
         r = remote_python(self.conf, PC_ADMIN_PY, ["list"], stdin=json.dumps({"paths": paths}).encode())
         r = r if isinstance(r, dict) else {}
         out = {"devices": r.get("devices") or [], "builds": r.get("builds") or {}, "pins": r.get("pins") or {},
+               "default": r.get("default") or "",
                "self": "" if self.web else self.pc.cfg()["id"]}
         if not self.web and self.pc.cfg().get("trusted") is None:     # once, from an older version: keep what was chosen
             self.pc.trust([n for n, v in out["builds"].items() if v == "computers"], True)
@@ -12663,6 +13309,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_run(self)
             if method == "POST" and path == "/pc/sftp":        # sshfs on the server: a Local only project's files
                 return self.app.pc.serve_sftp(self)
+            if method == "POST" and path == "/pc/fs":          # Claude's Grep / Glob of a Local only project
+                return self.app.pc.serve_fs(self)
             if method == "POST" and path == "/pc/proxy":       # Share on your domain: one connection to a port here
                 return self.app.pc.serve_proxy(self)
             if method == "POST" and path == "/pc/probe":       # Share on your domain: which shared ports run here

@@ -161,6 +161,7 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc') res = fakePc.me;
   else if (url === '/api/pc/devices' || url === '/api/pc/devices/fresh') { fakePc.devUrl = url; res = fakePc.devs; }
   else if (url === '/api/pc/builds') { fakePc.devs.builds[body.project] = body.on; res = fakePc.devs; }
+  else if (url === '/api/pc/default') { fakePc.devs['default'] = body.dev; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
@@ -1680,6 +1681,15 @@ const tests = {
     fakePc.devs.pins = { cheshmeh: 'b2b2b2b2b2b2' };
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     assert.match(global.SWComputers.buildState('cheshmeh').text, /desk \(chosen for this project\) is not connected/);
+    assert.match(global.SWComputers.buildState('cheshmeh', null, 'a1a1a1a1a1a1').text, /Commands run on laptop \(chosen for this chat/, 'the chat beats the project');
+    delete fakePc.devs.pins; fakePc.devs['default'] = 'b2b2b2b2b2b2';
+    global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
+    assert.match(global.SWComputers.buildState('cheshmeh').text, /desk \(your default computer\)/);
+    const def = q('select', md).find((x) => x.classList.contains('pc-default'));
+    assert.ok(def, 'a default computer for all projects');
+    def.value = 'b2b2b2b2b2b2'; def.dispatch('change'); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/pc/default').pop().body, { dev: 'b2b2b2b2b2b2' });
+    delete fakePc.devs['default'];
     fakePc.devs.devices.pop(); delete fakePc.devs.pins;
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     // the sidebar marks it: works (a computer is connected) / will stop (none)

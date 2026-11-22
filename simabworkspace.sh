@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.0 2026-11-22  Local only projects fast on big projects and weak internet: Claude (still on the server) reads, edits and searches files on your computer in one request each; heavy folders hidden from the mount; compressed link; Computers window never scrolls sideways
 #    1.64.6 2026-11-22  Windows: a ~/.ssh/config with 'bad' owner/permissions no longer stops the connection; git commands of a 'my computers' project run on the server (the copy there may have no .git)
 #    1.64.5 2026-11-22  Files tab: edit the file right where it is shown, with colours and line numbers, like VS Code
 #    1.64.4 2026-11-22  Remove any project from the sidebar (list only / delete folders); Files tab looks like VS Code (icons, guides, code colours)
@@ -384,7 +385,7 @@
 
 set -u -o pipefail
 
-VERSION="1.64.6"
+VERSION="1.65.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

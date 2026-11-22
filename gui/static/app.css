@@ -1196,6 +1196,13 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-dlg { display: flex; flex: 1; min-height: 0; }
 .modal.pcm .set-title { display: flex; align-items: baseline; gap: 8px; }
 .modal.pcm .set-title .muted { font-weight: 400; font-size: 11.5px; }
+/* nothing in Computers may scroll sideways: rows wrap, long text breaks, wide pieces shrink */
+.modal.pcm .set-pane { overflow-x: hidden; overflow-wrap: anywhere; }
+:where(.modal.pcm .set-pane *) { min-width: 0; max-width: 100%; }
+.modal.pcm .pc-dev, .modal.pcm .pc-build, .modal.pcm .pc-actions, .modal.pcm .setup-row { flex-wrap: wrap; }
+.modal.pcm .pc-this-main { min-width: min(200px, 100%); }
+.modal.pcm .btn, .modal.pcm .pc-pill, .modal.pcm .pc-seg, .modal.pcm .pc-tag, .modal.pcm .icon-btn { flex-shrink: 0; }
+.modal.pcm pre, .modal.pcm code, .modal.pcm .mono { white-space: pre-wrap; word-break: break-all; }
 .pc-card { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .pc-card-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; font-size: 13px; }
 .pc-card-h .muted { font-size: 11.5px; }
@@ -1276,6 +1283,8 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-where.lo { color: #7dd3fc; border-color: #7dd3fc44; }
 .pc-where.bd { color: var(--ok); border-color: #22c55e44; }
 .pc-where.bad { color: var(--err); border-color: #ef444444; }
+.pc-where.pick { cursor: pointer; }
+.pc-where.pick:hover { background: var(--line2); }
 .pc-run-live { margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .pc-run-h { font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
 .pc-run-h.run { color: var(--warn); } .pc-run-h.ok { color: var(--ok); } .pc-run-h.err { color: var(--err); }

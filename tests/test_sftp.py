@@ -574,5 +574,23 @@ def time_now():
     return time.time()
 
 
+class MountRecordsTheOwner(unittest.TestCase):
+    """Every connect of the owner app mounts its Local only projects — and pins itself as their owner
+    on the server, so the web version / phone / other computers know it (they showed "PC · off")."""
+    def test_mount_writes_the_pin(self):
+        home = tempfile.mkdtemp()
+        d = os.path.join(home, ".cache/simabworkspace/pc")
+        os.makedirs(d)
+        Path(d, "pins.json").write_text(json.dumps({"/other": "keepme"}))
+        os.makedirs(os.path.join(home, ".simab-mnt", "p1"))
+        Path(home, ".simab-mnt", "p1", "x").write_text("not empty: mount refused, pin still written")
+        env = dict(os.environ, HOME=home, PATH="/nonexistent")
+        r = subprocess.run([sys.executable, "-c", sw.PC_MOUNT_PY, "mount"], env=env, capture_output=True, timeout=30,
+                           input=json.dumps({"dev": "abc123def456", "mounts": [{"name": "p1", "path": "~/.simab-mnt/p1"}]}).encode())
+        pins = json.loads(Path(d, "pins.json").read_text())
+        self.assertEqual(pins, {"/other": "keepme", os.path.realpath(os.path.join(home, ".simab-mnt", "p1")): "abc123def456"},
+                         r.stderr.decode()[-500:])
+
+
 if __name__ == "__main__":
     unittest.main()

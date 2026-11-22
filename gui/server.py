@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.6"
+VERSION = "1.65.7"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -6608,6 +6608,25 @@ if op == "mount":
             out[name] = "ok" if r.returncode == 0 and os.path.ismount(path) else (msg.splitlines() or ["mounting failed"])[-1][:300]
         except (OSError, subprocess.SubprocessError) as e:
             out[name] = str(e)[:300]
+    # the owner of each Local only project, kept on the server (pins.json): the web version, the phone and
+    # my other computers learn from it which computer the project lives on (else they show "PC · off")
+    dev = str(cfg.get("dev") or "")
+    if dev.isalnum():
+        try:
+            D = os.path.expanduser("~/.cache/simabworkspace/pc")
+            try:
+                pins = json.load(open(os.path.join(D, "pins.json")))
+            except (OSError, ValueError):
+                pins = {}
+            pins = pins if isinstance(pins, dict) else {}
+            new = dict(pins, **{os.path.realpath(os.path.expanduser(m["path"])): dev for m in cfg.get("mounts") or []})
+            if new != pins:
+                fd = os.open(os.path.join(D, "pins.json.tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    json.dump(new, f)
+                os.replace(os.path.join(D, "pins.json.tmp"), os.path.join(D, "pins.json"))
+        except OSError:
+            pass
 elif op == "umount":
     for m in cfg.get("mounts") or []:
         path = os.path.expanduser(m["path"])

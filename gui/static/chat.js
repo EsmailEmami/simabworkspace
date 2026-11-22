@@ -369,7 +369,9 @@
           h('button', { class: 'link cb-new', title: 'Start a new conversation in this tab', onclick: function () { self.newChat(); } }, h('span', { class: 'lbl' }, 'new'), h('span', { class: 'ico' }, '✎')),
           this.micBtn, this.actionBtn)));
 
-    this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn);
+    this.linkEl = h('div', { class: 'chat-link hidden' });      // Local only: this chat's line to the computer
+    document.addEventListener('sw-pc-net', function (ev) { self.paintLink(ev.detail); });
+    this.body = h('div', { class: 'pbody chat-body' }, this.scroller, this.jumpBtn, this.linkEl);
     this.pane = h('div', { class: 'pane hidden-pane chat' }, this.body, composer);
     // a narrow chat (tablet split, laptop side pane) gets the phone's one chip instead of three selects
     if (window.ResizeObserver) new window.ResizeObserver(function () { self.fitBar(); }).observe(composer);
@@ -1258,6 +1260,27 @@
         h('span', { class: 'tname' }, name), h('span', { class: 'tsum', dir: 'auto' }, summary), h('i', { class: 'st ok' }, '✓')),
       h('div', { class: 'tool-body' }, content));
     return card;
+  };
+
+  // Local only chat: its connections to the user's computer, its own measured round trip, and a colour
+  // (green fast < 150 ms, yellow slow < 400 ms, red bad / offline). Before its first ping: the link's.
+  P.paintLink = function (n) {
+    var el = this.linkEl, p = SW.project((this.info.spec || {}).project);
+    if (!el) return;
+    var show = !!(n && p && p.localOnly && !(SW.S && SW.S.web));
+    el.classList.toggle('hidden', !show);
+    if (!show) return;
+    var me = (n.chats || {})[(this.info.spec || {}).relay] || { n: 0, rtt: null };
+    var rtt = n.state !== 'connected' ? null : me.rtt != null ? me.rtt : n.rtt;
+    var q = n.state !== 'connected' ? 'off' : rtt == null ? 'wait' : rtt < 150 ? 'fast' : rtt < 400 ? 'slow' : 'bad';
+    var word = { off: 'offline', wait: 'checking', fast: 'fast', slow: 'slow', bad: 'bad' }[q];
+    el.className = 'chat-link q-' + q;
+    el.replaceChildren(h('i', { class: 'dot' }), h('span', null,
+      me.n + (me.n === 1 ? ' conn' : ' conns') + (rtt != null ? ' · ' + rtt + ' ms' : '') + ' · ' + word));
+    el.title = q === 'off' ? 'Your computer is not connected — this chat cannot reach the project files'
+      : 'Connections of this chat to your computer: ' + me.n + ' (opens with the first file tool, stays open)\n'
+        + 'Round trip: ' + (rtt == null ? 'not measured yet' : rtt + ' ms' + (me.rtt != null ? ' (this chat)' : ' (the link)'))
+        + '\nGreen < 150 ms · yellow < 400 ms · red slower';
   };
 
   P.onResult = function (e) {

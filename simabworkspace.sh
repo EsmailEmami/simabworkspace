@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.2 2026-11-22  Each Local only chat shows its line to your computer at the top right: connections, round trip, green / yellow / red
 #    1.65.1 2026-11-22  Local only: one connection per chat kept open, tool calls side by side, heartbeat + fast reconnect + safe retry on weak lines; chat shows the model's share of each answer's time
 #    1.65.0 2026-11-22  Local only projects fast on big projects and weak internet: Claude (still on the server) reads, edits and searches files on your computer in one request each; heavy folders hidden from the mount; compressed link; Computers window never scrolls sideways
 #    1.64.6 2026-11-22  Windows: a ~/.ssh/config with 'bad' owner/permissions no longer stops the connection; git commands of a 'my computers' project run on the server (the copy there may have no .git)
@@ -386,7 +387,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.1"
+VERSION="1.65.2"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

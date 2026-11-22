@@ -465,5 +465,27 @@ class DeadLine(unittest.TestCase):
         self.assertLessEqual(sw.PC_RETRY_MAX, 10)
 
 
+class ChatLinkBadge(unittest.TestCase):
+    def test_computer_counts_connections_and_keeps_the_chats_rtt(self):
+        import time
+        ping = json.dumps({"id": 0, "op": "ping", "rtt": 87}).encode()
+        hub = mock.Mock(meter=[0, 0], chatlinks={})
+        hub.cfg.return_value = {"on": True, "secret": "k", "name": "pc"}
+        hub.app.web = False
+        key = "a" * 16
+        h = mock.Mock(headers={"X-PC": "k", "X-Chat": key}, rfile=io.BytesIO(struct.pack(">I", len(ping)) + ping), wfile=io.BytesIO())
+        sw.PcHub.serve_fsmux(hub, h)
+        link = hub.chatlinks[key]
+        self.assertEqual((link["n"], link["rtt"]), (0, 87))          # closed again, rtt kept
+        self.assertGreater(link["at"], time.time() - 5)
+        self.assertIn(b'"pong": true', h.wfile.getvalue())
+        out = sw.PcHub.chat_links(hub)
+        self.assertEqual(list(out.values()), [{"n": 0, "rtt": 87}])
+
+    def test_old_and_gone_chats_are_forgotten(self):
+        hub = mock.Mock(chatlinks={"x": {"n": 0, "rtt": 50, "at": 1.0}, "y": {"n": 1, "rtt": 50, "at": 1.0}})
+        self.assertEqual(sw.PcHub.chat_links(hub), {"y": {"n": 1, "rtt": None}})     # stale rtt not shown
+
+
 if __name__ == "__main__":
     unittest.main()

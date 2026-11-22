@@ -748,6 +748,8 @@
       + (f.busy && f.busy.length ? '\nBusiest: ' + f.busy.map(function (b) { return b[0] + ' ' + b[1]; }).join(', ') : '');
   }
   function netBox(n) {
+    // each Local only chat paints its own connection badge from this (chat.js paintLink)
+    try { document.dispatchEvent(new CustomEvent('sw-pc-net', { detail: n })); } catch (e) { /* old browser */ }
     var el = document.getElementById('pc-net');
     if (!el) return;
     var show = !S.web && S.pc && S.pc.on && (S.projects || []).some(function (p) { return p.localOnly; });

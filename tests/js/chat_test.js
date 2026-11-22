@@ -172,6 +172,27 @@ const tests = {
     assert.strictEqual(tab.busy, false);
   },
 
+  'Local only chat shows its connections, round trip and colour'() {
+    const old = global.SW.project;
+    global.SW.project = () => ({ remote: '/home/esi/p', localOnly: 'dev1' });
+    try {
+      const { tab } = newTab();
+      tab.info.spec.relay = 'aaaaaaaaaaaaaaaa';
+      tab.paintLink({ state: 'connected', rtt: 300, chats: { aaaaaaaaaaaaaaaa: { n: 1, rtt: 90 } } });
+      assert.strictEqual(tab.linkEl.className, 'chat-link q-fast');
+      assert.match(tab.linkEl.textContent, /1 conn · 90 ms · fast/);
+      tab.paintLink({ state: 'connected', rtt: 500, chats: {} });          // before its first ping: the link's
+      assert.match(tab.linkEl.textContent, /0 conns · 500 ms · bad/);
+      tab.paintLink({ state: 'connected', rtt: 200, chats: {} });
+      assert.strictEqual(tab.linkEl.className, 'chat-link q-slow');
+      tab.paintLink({ state: 'off', rtt: null, chats: {} });
+      assert.match(tab.linkEl.textContent, /offline/);
+      global.SW.project = () => ({ remote: '/home/esi/p' });              // a server project: no badge
+      tab.paintLink({ state: 'connected', rtt: 50, chats: {} });
+      assert.ok(tab.linkEl.classList.contains('hidden'));
+    } finally { global.SW.project = old; }
+  },
+
   'result line shows the model\'s share of the time'() {
     const { tab, feed } = newTab();
     feed({ t: 'e', e: { type: 'result', subtype: 'success', duration_ms: 4200, duration_api_ms: 3600, num_turns: 1 } });

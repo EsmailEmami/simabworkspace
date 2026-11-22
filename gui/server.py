@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.1"
+VERSION = "1.65.2"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5988,8 +5988,9 @@ class Mux:
                 continue
             s.settimeout(15)
             try:
-                s.sendall((("POST /pc/fsmux HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Length: 0\r\n\r\n")
-                           % (int(d.get("port") or 0), d.get("secret") or "")).encode())
+                s.sendall((("POST /pc/fsmux HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nX-Chat: %s\r\nContent-Length: 0\r\n\r\n")
+                           % (int(d.get("port") or 0), d.get("secret") or "",
+                              re.sub(r"[^\w-]", "", os.environ.get("SIMAB_CHAT", ""))[:64])).encode())
                 head = b""
                 while not head.endswith(b"\r\n\r\n") and len(head) < 8192:
                     c = s.recv(1)
@@ -6031,6 +6032,8 @@ class Mux:
                 except ValueError:
                     continue
                 if j.get("pong"):
+                    if st.get("sent"):
+                        st["rtt"] = int((st["rx"] - st["sent"]) * 1000)     # this chat's real round trip
                     continue
                 with self.lock:
                     w = self.waiting.pop(j.pop("id", None), None)
@@ -6060,7 +6063,8 @@ class Mux:
                 return
             if now - max(sent, st["rx"]) >= (self.ping if busy else self.idle):
                 sent = now if not sent or st["rx"] >= sent else sent
-                raw = json.dumps({"id": 0, "op": "ping"}).encode()
+                st["sent"] = sent
+                raw = json.dumps({"id": 0, "op": "ping", "rtt": st.get("rtt")}).encode()
                 try:
                     with self.send_lock:
                         s.sendall(struct.pack(">I", len(raw)) + raw)
@@ -6966,6 +6970,7 @@ class PcHub:
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
         self.meter = [0, 0]            # bytes over the link: [from the server (down), to the server (up)]
         self.fsstats = sftp_stats()    # Local only: file requests from the server (all mounts together)
+        self.chatlinks = {}            # Local only: chat relay key → {n: open connections, rtt: ms of its ping}
         self.bg = {}                   # dev servers here (onpc --bg): name -> info; kept when the link drops
         self.net = {"rtt": None, "down": 0.0, "up": 0.0}
         self._net_thread = None
@@ -7155,6 +7160,7 @@ class PcHub:
         st = self.fsstats
         busy = sorted(st["dirs"].items(), key=lambda kv: -kv[1])[:5]
         return {"state": self.state, "rtt": rtt, "bars": bars, "down": round(self.net["down"]), "up": round(self.net["up"]),
+                "chats": self.chat_links(),
                 "ops": round(self.net.get("ops", 0.0)), "files": {"n": st["n"], "hidden": st["hidden"],
                 "ms": round(st["ms"] / st["n"], 2) if st["n"] else 0, "busy": [["/" + k, v] for k, v in busy]}}
 
@@ -7251,12 +7257,17 @@ class PcHub:
             return h._json(403, {"error": "this computer is not connected"})
         if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
             return h._json(403, {"error": "this computer does not know this server user"})
+        key = h.headers.get("X-Chat") or ""
+        key = key if RELAY_KEY_RE.fullmatch(key) else "?"
         h.send_response(200)
         h.send_header("Connection", "close")
         h.end_headers()
         h.wfile.flush()
         h.close_connection = True
         lock = threading.Lock()
+        links = getattr(self, "chatlinks", None)
+        link = links.setdefault(key, {"n": 0, "rtt": None, "at": 0.0}) if isinstance(links, dict) else {"n": 0}
+        link["n"] += 1
 
         def one(b):
             res = self.fs_do(b, c)
@@ -7287,6 +7298,8 @@ class PcHub:
                 except ValueError:
                     continue
                 if isinstance(b, dict) and b.get("op") == "ping":       # heartbeat: answered at once
+                    if isinstance(b.get("rtt"), (int, float)) and not isinstance(b.get("rtt"), bool):
+                        link["rtt"], link["at"] = int(b["rtt"]), time.time()    # what the chat measured
                     pong = json.dumps({"id": b.get("id"), "pong": True}).encode()
                     with lock:
                         h.wfile.write(struct.pack(">I", len(pong)) + pong)
@@ -7295,6 +7308,20 @@ class PcHub:
                     threading.Thread(target=one, args=(b,), daemon=True).start()
         except OSError:
             return
+        finally:
+            link["n"] -= 1
+
+    def chat_links(self) -> dict:
+        """Per chat (relay key): open connections + its own measured round trip; link-wide rtt as the
+        fallback before a chat's first ping. Chats gone for 2 minutes are forgotten."""
+        now, out = time.time(), {}
+        for k, v in list(self.chatlinks.items()):
+            if v["n"] <= 0 and now - v.get("at", 0) > 120:
+                self.chatlinks.pop(k, None)
+                continue
+            fresh = v.get("rtt") is not None and now - v.get("at", 0) < 60
+            out[k] = {"n": max(v["n"], 0), "rtt": v["rtt"] if fresh else None}
+        return out
 
     # dev servers (onpc --bg) -------------------------------------------------------
     def serve_bg(self, h):

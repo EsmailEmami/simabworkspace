@@ -14,6 +14,155 @@
   function shownCode(c) { return c === '?' ? 'N' : c; }
   var clip = null;            // { project, path, cut } — copy / cut between Files tabs of the same place
 
+  // ---------------------------------------------------------------- look: file icons + code colours (like VS Code)
+  // [badge, colour] per file extension / exact file name; folders get a coloured folder shape
+  var ICON_EXT = {
+    go: ['GO', '#00add8'], mod: ['GO', '#e06c75'], sum: ['GO', '#e06c75'], ts: ['TS', '#3178c6'], mts: ['TS', '#3178c6'], cts: ['TS', '#3178c6'],
+    tsx: ['⚛', '#61dafb'], jsx: ['⚛', '#61dafb'], js: ['JS', '#f1dd35'], mjs: ['JS', '#f1dd35'], cjs: ['JS', '#f1dd35'],
+    json: ['{}', '#cbcb41'], jsonc: ['{}', '#cbcb41'], py: ['PY', '#4b8bbe'], html: ['<>', '#e44d26'], htm: ['<>', '#e44d26'],
+    css: ['#', '#42a5f5'], scss: ['#', '#cd6799'], sass: ['#', '#cd6799'], less: ['#', '#2a6bb0'], md: ['M↓', '#519aba'], mdx: ['M↓', '#519aba'],
+    yml: ['Y', '#a074c4'], yaml: ['Y', '#a074c4'], toml: ['T', '#9c4221'], ini: ['⚙', '#6d8086'], conf: ['⚙', '#6d8086'], cfg: ['⚙', '#6d8086'],
+    env: ['⚙', '#e5c07b'], sh: ['$', '#89e051'], bash: ['$', '#89e051'], zsh: ['$', '#89e051'], ps1: ['>_', '#3b8eea'], bat: ['>_', '#c1f12e'],
+    sql: ['DB', '#e38c00'], rs: ['RS', '#dea584'], java: ['J', '#e76f00'], kt: ['K', '#a97bff'], c: ['C', '#519aba'], h: ['H', '#a074c4'],
+    cpp: ['C+', '#f34b7d'], cc: ['C+', '#f34b7d'], hpp: ['H+', '#a074c4'], cs: ['C#', '#9b4f96'], php: ['PHP', '#8892bf'], rb: ['RB', '#cc342d'],
+    swift: ['SW', '#f05138'], dart: ['DA', '#00b4ab'], lua: ['LU', '#51a0cf'], vue: ['V', '#41b883'], svelte: ['S', '#ff3e00'],
+    xml: ['<>', '#e37933'], svg: ['◇', '#ffb13b'], png: ['▣', '#a074c4'], jpg: ['▣', '#a074c4'], jpeg: ['▣', '#a074c4'], gif: ['▣', '#a074c4'],
+    webp: ['▣', '#a074c4'], ico: ['▣', '#a074c4'], pdf: ['PDF', '#e5534b'], zip: ['▤', '#c09553'], gz: ['▤', '#c09553'], tar: ['▤', '#c09553'],
+    csv: ['▦', '#89e051'], xlsx: ['▦', '#207245'], txt: ['≡', '#8a93a3'], log: ['≡', '#6d8086'], lock: ['🔒︎', '#8a93a3'], proto: ['PB', '#6d8086'],
+    graphql: ['◈', '#e535ab'], gql: ['◈', '#e535ab'], ttf: ['F', '#8a93a3'], woff: ['F', '#8a93a3'], woff2: ['F', '#8a93a3']
+  };
+  var ICON_NAME = {
+    'package.json': ['N', '#cb3837'], 'package-lock.json': ['N', '#8a93a3'], dockerfile: ['D', '#2496ed'], 'docker-compose.yml': ['D', '#2496ed'],
+    'docker-compose.yaml': ['D', '#2496ed'], makefile: ['M', '#e37933'], license: ['©', '#cbcb41'], '.gitignore': ['◆', '#f14e32'],
+    '.gitattributes': ['◆', '#f14e32'], '.gitmodules': ['◆', '#f14e32'], 'claude.md': ['✳', '#d97757'], 'claude.local.md': ['✳', '#d97757'],
+    'readme.md': ['ℹ', '#42a5f5'], '.editorconfig': ['⚙', '#6d8086'], 'tsconfig.json': ['TS', '#3178c6'], 'go.mod': ['GO', '#e06c75']
+  };
+  var FOLDER = {
+    src: '#42a5f5', app: '#42a5f5', lib: '#42a5f5', '.git': '#f14e32', '.github': '#5c9ded', '.vscode': '#3b8eea', node_modules: '#8bc34a',
+    '.claude': '#d97757', test: '#4caf50', tests: '#4caf50', testing: '#4caf50', e2e: '#4caf50', __tests__: '#4caf50',
+    docs: '#4fc3f7', doc: '#4fc3f7', documents: '#4fc3f7', dist: '#e57373', build: '#e57373', out: '#e57373', bin: '#e57373',
+    assets: '#ffca28', images: '#ffca28', img: '#ffca28', public: '#ffca28', static: '#ffca28', scripts: '#26a69a', docker: '#2496ed',
+    components: '#c0ca33', api: '#ab47bc', controllers: '#ab47bc', models: '#ef5350', services: '#ffa726', core: '#7e57c2',
+    config: '#90a4ae', configs: '#90a4ae', memory: '#d97757', '.agents': '#d97757', '.codex': '#8a93a3', backups: '#90a4ae'
+  };
+  function fileIcon(name, isDir, open) {
+    var low = name.toLowerCase();
+    if (isDir) return h('span', { class: 'ft-ic ft-folder' + (open ? ' open' : ''), style: 'color:' + (FOLDER[low] || '#dcb67a') });
+    var ext = low.slice(low.lastIndexOf('.') + 1);
+    var ic = ICON_NAME[low] || (low.indexOf('.env') === 0 ? ICON_EXT.env : low.indexOf('dockerfile') === 0 ? ICON_NAME.dockerfile
+      : low.lastIndexOf('.') > 0 ? ICON_EXT[ext] : null) || ['≡', '#8a93a3'];
+    return h('span', { class: 'ft-ic ft-file', style: 'color:' + ic[1] }, ic[0]);
+  }
+
+  // A small code colourer: comments, strings, numbers, keywords, function calls, types, keys, markup tags.
+  var C_KW = 'if else for while do switch case default break continue return function var let const new delete typeof instanceof in of class extends super this import export from as async await yield try catch finally throw void null undefined true false static public private protected interface type enum implements readonly abstract declare namespace module get set';
+  var LANGS = {
+    c: { line: '//', block: ['/*', '*/'], q: '"\'`', kw: C_KW + ' int long short char float double unsigned signed struct union typedef sizeof extern auto register goto inline bool string void final package throws boolean byte using fn let mut impl trait pub crate mod use match loop where self Self dyn ref move unsafe val fun object when is lateinit override open data sealed companion init nil' },
+    go: { line: '//', block: ['/*', '*/'], q: '"\'`', kw: 'package import func var const type struct interface map chan go defer select range return if else for switch case default break continue fallthrough goto nil true false iota string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 float32 float64 bool byte rune error any make new len cap append panic recover copy delete close' },
+    py: { line: '#', q: '"\'', kw: 'def class return if elif else for while in not and or is None True False import from as with try except finally raise pass break continue lambda yield global nonlocal async await del assert self print' },
+    sh: { line: '#', q: '"\'`', kw: 'if then else elif fi for while do done case esac in function return local export source echo exit set unset readonly shift cd test true false sudo' },
+    sql: { line: '--', block: ['/*', '*/'], q: '\'"`', ci: true, kw: 'select from where and or not insert into values update set delete create table alter drop index view join left right inner outer full on group by order having limit offset as distinct union all null is in like between exists case when then else end primary key foreign references default unique constraint begin commit rollback returning with if function returns language trigger varchar text integer bigint boolean timestamp serial cascade count sum avg min max' },
+    yaml: { line: '#', q: '"\'', keys: true, kw: 'true false null yes no on off' },
+    json: { q: '"', keys: true, kw: 'true false null' },
+    css: { block: ['/*', '*/'], q: '"\'', keys: true, kw: 'important media import keyframes from to root' },
+    html: { tags: true, q: '"\'' },
+    md: { md: true }
+  };
+  var EXT_LANG = { js: 'c', mjs: 'c', cjs: 'c', jsx: 'c', ts: 'c', tsx: 'c', mts: 'c', java: 'c', kt: 'c', rs: 'c', c: 'c', h: 'c', cpp: 'c', cc: 'c',
+    hpp: 'c', cs: 'c', swift: 'c', dart: 'c', php: 'c', scala: 'c', proto: 'c', graphql: 'c', go: 'go', py: 'py', rb: 'py', sh: 'sh', bash: 'sh', zsh: 'sh',
+    env: 'sh', toml: 'yaml', ini: 'yaml', conf: 'sh', dockerfile: 'sh', makefile: 'sh', mk: 'sh', sql: 'sql', yml: 'yaml', yaml: 'yaml', json: 'json',
+    jsonc: 'c', css: 'css', scss: 'css', less: 'css', html: 'html', htm: 'html', xml: 'html', svg: 'html', vue: 'html', svelte: 'html', md: 'md', mdx: 'md' };
+  function langOf(path) {
+    var low = baseOf(path).toLowerCase(), ext = low.slice(low.lastIndexOf('.') + 1);
+    if (low.indexOf('dockerfile') === 0 || low === 'makefile' || low.indexOf('.env') === 0) return LANGS.sh;
+    var k = low.lastIndexOf('.') >= 0 ? EXT_LANG[ext] : null;
+    if (!k) return null;
+    var L = LANGS[k];
+    if (L.kw && !L.set) { L.set = {}; L.kw.split(' ').forEach(function (w) { L.set[w] = 1; }); }
+    return L;
+  }
+  var CTRL = { if: 1, else: 1, elif: 1, for: 1, while: 1, do: 1, switch: 1, case: 1, default: 1, break: 1, continue: 1, return: 1, try: 1, catch: 1,
+    except: 1, finally: 1, throw: 1, raise: 1, import: 1, export: 1, from: 1, package: 1, go: 1, defer: 1, select: 1, range: 1, yield: 1, await: 1,
+    then: 1, fi: 1, done: 1, esac: 1, goto: 1, fallthrough: 1, match: 1, loop: 1, with: 1, pass: 1, use: 1 };
+  // -> [[cls, text], ...]; cls '' = plain. Text joined back is exactly the input.
+  function tokenize(text, L) {
+    var out = [], n = text.length, i = 0, plain = '', inTag = false, lineStart = true;
+    function push(cls, s) { if (!s) return; if (plain) { out.push(['', plain]); plain = ''; } out.push([cls, s]); }
+    function upto(end, from) { var j = text.indexOf(end, from); return j < 0 ? n : j + end.length; }
+    while (i < n) {
+      var c = text[i], j;
+      if (c === '\n') { plain += c; i++; lineStart = true; continue; }
+      if (L.md) {
+        if (lineStart && c === '#') { j = upto('\n', i); if (text[j - 1] === '\n') j--; push('t-h', text.slice(i, j)); i = j; lineStart = false; continue; }
+        if (text.substr(i, 3) === '```') { j = upto('```', i + 3); push('t-s', text.slice(i, j)); i = j; lineStart = false; continue; }
+        if (c === '`') { j = text.indexOf('`', i + 1); var nl = text.indexOf('\n', i + 1); if (j > 0 && (nl < 0 || j < nl)) { push('t-s', text.slice(i, j + 1)); i = j + 1; lineStart = false; continue; } }
+        if (c === '*' && text[i + 1] === '*') { j = text.indexOf('**', i + 2); if (j > 0 && text.slice(i, j).indexOf('\n') < 0) { push('t-b', text.slice(i, j + 2)); i = j + 2; lineStart = false; continue; } }
+        if (c === '[') { var m0 = /^\[[^\]\n]*\]\([^)\n]*\)/.exec(text.slice(i, i + 400)); if (m0) { push('t-f', m0[0]); i += m0[0].length; lineStart = false; continue; } }
+        if (lineStart && /[-*>]/.test(c) && /[ \t]/.test(text[i + 1] || '')) { push('t-x', c); i++; lineStart = false; continue; }
+        if (c !== ' ' && c !== '\t') lineStart = false;
+        plain += c; i++; continue;
+      }
+      if (c !== ' ' && c !== '\t') lineStart = false;
+      if (L.tags) {
+        if (text.substr(i, 4) === '<!--') { j = upto('-->', i + 4); push('t-c', text.slice(i, j)); i = j; continue; }
+        if (!inTag && c === '<' && /[A-Za-z\/!?]/.test(text[i + 1] || '')) {
+          var m1 = /^<[\/!?]?[A-Za-z][\w:.-]*/.exec(text.slice(i, i + 80));
+          if (m1) { var p = m1[0].match(/^<[\/!?]?/)[0]; push('t-p', p); push('t-k', m1[0].slice(p.length)); i += m1[0].length; inTag = true; continue; }
+        }
+        if (inTag) {
+          if (c === '>' || (c === '/' && text[i + 1] === '>')) { j = c === '>' ? i + 1 : i + 2; push('t-p', text.slice(i, j)); i = j; inTag = false; continue; }
+          if (c === '"' || c === "'") { j = text.indexOf(c, i + 1); j = j < 0 ? n : j + 1; push('t-s', text.slice(i, j)); i = j; continue; }
+          var m2 = /^[A-Za-z_:@#.\-][\w:.\-]*/.exec(text.slice(i, i + 80));
+          if (m2) { push('t-a', m2[0]); i += m2[0].length; continue; }
+        }
+        plain += c; i++; continue;
+      }
+      if (L.line && text.substr(i, L.line.length) === L.line) {
+        j = text.indexOf('\n', i); j = j < 0 ? n : j; push('t-c', text.slice(i, j)); i = j; continue;
+      }
+      if (L.block && text.substr(i, 2) === L.block[0]) { j = upto(L.block[1], i + 2); push('t-c', text.slice(i, j)); i = j; continue; }
+      if (L.q && L.q.indexOf(c) >= 0) {
+        var tri = c !== '`' && text.substr(i, 3) === c + c + c;
+        j = i + (tri ? 3 : 1);
+        while (j < n) {
+          if (text[j] === '\\') { j += 2; continue; }
+          if (tri ? text.substr(j, 3) === c + c + c : text[j] === c) { j += tri ? 3 : 1; break; }
+          if (text[j] === '\n' && !tri && c !== '`') break;
+          j++;
+        }
+        j = Math.min(j, n);
+        var key = L.keys && /^\s*:/.test(text.slice(j, j + 20));
+        push(key ? 't-a' : 't-s', text.slice(i, j)); i = j; continue;
+      }
+      if (/[0-9]/.test(c) && !/[\w$]/.test(text[i - 1] || '')) {
+        var m3 = /^(0[xX][\da-fA-F_]+|\d[\d_]*(\.\d+)?([eE][+-]?\d+)?)[a-zA-Z]*/.exec(text.slice(i, i + 40));
+        push('t-n', m3[0]); i += m3[0].length; continue;
+      }
+      if (/[A-Za-z_$@]/.test(c)) {
+        var m4 = /^[@$]?[A-Za-z_$][\w$-]*/.exec(text.slice(i, i + 200)), w = m4[0];
+        if (w.indexOf('-') > 0 && !L.keys && L !== LANGS.sh) w = w.slice(0, w.indexOf('-'));
+        var lw = L.ci ? w.toLowerCase() : w, after = text.slice(i + w.length, i + w.length + 20);
+        var cls = '';
+        if (L.keys && /^\s*:(?!:)/.test(after) && !(L === LANGS.css && /^\s*:[a-z-]+\s*[{,(]/.test(after))) cls = 't-a';
+        else if (L.set && L.set[lw]) cls = CTRL[lw] ? 't-x' : 't-k';
+        else if (/^\s*\(/.test(after) && L !== LANGS.yaml) cls = 't-f';
+        else if (/^[A-Z][a-z]/.test(w) && L !== LANGS.yaml && L !== LANGS.sh) cls = 't-t';
+        else if (c === '@' || c === '$') cls = 't-a';
+        push(cls, w); i += w.length; continue;
+      }
+      plain += c; i++;
+    }
+    if (plain) out.push(['', plain]);
+    return out;
+  }
+  function highlight(text, path) {
+    var L = text.length <= 300000 ? langOf(path) : null;
+    if (!L) return [text];
+    return tokenize(text, L).map(function (t) { return t[0] ? h('span', { class: t[0] }, t[1]) : t[1]; });
+  }
+  SW.fileIcon = fileIcon;
+  SW.codeTokens = function (text, path) { var L = langOf(path); return L ? tokenize(text, L) : [['', text]]; };
+
   function FilesTab(info) {
     var self = this;
     this.id = info.id;
@@ -174,8 +323,12 @@
     var ch = this.changes[path], inside = e.dir ? this.changedDirs[path] : 0;
     var cls = 'ft-row' + (e.dir ? ' dir' : '') + (e.ignored ? ' ignored' : '') + (this.sel === path ? ' sel' : '')
       + (ch ? ' changed c' + ch.code : inside ? ' changed-in' : '');
+    var open = e.dir && this.isOpen(path), guides = [];
+    for (var g = 0; g < depth; g++) guides.push(h('span', { class: 'ft-guide', style: 'left:' + (13 + g * 14) + 'px' }));
     var row = h('div', { class: cls, style: 'padding-left:' + (6 + depth * 14) + 'px', title: path + (ch ? ' · ' + ch.code : '') },
-      h('span', { class: 'ft-caret' }, e.dir ? (this.isOpen(path) ? '▾' : '▸') : ''),
+      guides,
+      h('span', { class: 'ft-caret' + (e.dir ? ' d' : '') + (open ? ' open' : '') }),
+      fileIcon(e.name, e.dir, open),
       h('span', { class: 'ft-name', dir: 'auto' }, e.name + (e.link ? ' ↗' : '')),
       ch ? h('span', { class: 'gcode c' + ch.code }, ch.code) : inside ? h('span', { class: 'ft-dot', title: inside + ' changed inside' }, '•') : null,
       TOUCH && this.sel === path ? h('button', { class: 'icon-btn ft-more', title: 'More', onclick: function (ev) {
@@ -255,7 +408,7 @@
     this.tree.replaceChildren.apply(this.tree, list.map(function (f, i) {
       var ch = self.changes[f], dir = parentOf(f);
       var row = h('div', { class: 'ft-row match' + (i === self.foundSel ? ' sel' : '') + (ch ? ' changed c' + ch.code : ''), title: f },
-        h('span', { class: 'ft-name', dir: 'auto' }, baseOf(f)), dir ? h('span', { class: 'ft-dir', dir: 'auto' }, dir) : null,
+        fileIcon(baseOf(f), false), h('span', { class: 'ft-name', dir: 'auto' }, baseOf(f)), dir ? h('span', { class: 'ft-dir', dir: 'auto' }, dir) : null,
         ch ? h('span', { class: 'gcode c' + ch.code }, ch.code) : null);
       row.addEventListener('click', function () { self.pickMatch(f); });
       row.addEventListener('contextmenu', function (ev) { ev.preventDefault(); self.rowMenu(f, false, ev.clientX, ev.clientY); });
@@ -354,7 +507,7 @@
     for (var i = 1; i <= lines; i++) nums.push(i);
     return h('div', { class: 'files-code' },
       h('pre', { class: 'ft-nums', 'aria-hidden': 'true' }, nums.join('\n')),
-      h('pre', { class: 'ft-text' }, text.replace(/\n$/, '')));
+      h('pre', { class: 'ft-text' }, highlight(text.replace(/\n$/, ''), d.path || (this.file && this.file.path) || '')));
   };
 
   // ---------------------------------------------------------------- menus

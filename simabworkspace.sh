@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.64.4 2026-11-22  Remove any project from the sidebar (list only / delete folders); Files tab looks like VS Code (icons, guides, code colours)
 #    1.64.3 2026-11-22  Windows: the app runs in Python UTF-8 mode (fixes "'charmap' codec can't decode")
 #    1.64.2 2026-11-21  Share a port from a project lists what it shares already; stop the program on a shared port (■), see its output when the workspace started it
 #    1.64.1 2026-11-21  Share: new tabs stay on the project, link window redesigned, Revoke works at once (also on the computer); question windows close only by their answer; Settings share list cleaned, share a port from the project ⋯ menu
@@ -381,7 +382,7 @@
 
 set -u -o pipefail
 
-VERSION="1.64.3"
+VERSION="1.64.4"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

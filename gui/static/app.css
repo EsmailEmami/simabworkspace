@@ -833,9 +833,24 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .files-filter { height: 26px; font-size: 12px; }
 .files-git { width: auto; padding: 0 6px; font-size: 12px; color: var(--warn); white-space: nowrap; }
 .files-tree { flex: 1; overflow: auto; padding: 4px 0 12px; font-size: 12.5px; }
-.ft-row { display: flex; align-items: center; gap: 4px; height: 24px; padding-right: 8px; cursor: pointer; white-space: nowrap; user-select: none; }
-.ft-row:hover { background: var(--bg3); }
-.ft-row.sel { background: #1b2230; }
+.ft-row { position: relative; display: flex; align-items: center; gap: 5px; height: 22px; padding-right: 8px; cursor: pointer; white-space: nowrap; user-select: none; font-size: 13px; }
+.ft-row:hover { background: #1a1f29; }
+.ft-row.sel { background: #1e2d45; box-shadow: inset 0 0 0 1px #2f5d9a; }
+.ft-guide { position: absolute; top: 0; bottom: 0; width: 1px; background: #262c36; pointer-events: none; }
+.files-tree:hover .ft-guide { background: #39414e; }
+.ft-caret.d::before { content: ""; display: block; width: 5px; height: 5px; margin: 0 auto; border: solid #8a93a3; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform .12s; }
+.ft-caret.d.open::before { transform: rotate(45deg) translate(-1px, -1px); }
+.ft-ic { flex: none; width: 16px; text-align: center; }
+.ft-file { font: 700 9px/16px var(--mono); letter-spacing: -.3px; }
+.ft-folder { position: relative; height: 11px; width: 15px; margin-right: 1px; border-radius: 1px 2px 2px 2px; background: currentColor; opacity: .9; }
+.ft-folder::before { content: ""; position: absolute; left: 0; top: -2px; width: 6px; height: 3px; border-radius: 1px 2px 0 0; background: currentColor; }
+.ft-folder.open { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.ft-folder.open::after { content: ""; position: absolute; left: 2px; right: -2px; bottom: 0; height: 7px; background: currentColor; transform: skewX(-20deg); border-radius: 1px; }
+.ft-row.ignored .ft-ic { opacity: .45; }
+/* code colours (VS Code Dark+) */
+.ft-text .t-c { color: #6a9955; font-style: italic; } .ft-text .t-s { color: #ce9178; } .ft-text .t-n { color: #b5cea8; }
+.ft-text .t-k { color: #569cd6; } .ft-text .t-x { color: #c586c0; } .ft-text .t-f { color: #dcdcaa; } .ft-text .t-t { color: #4ec9b0; }
+.ft-text .t-a { color: #9cdcfe; } .ft-text .t-p { color: #808080; } .ft-text .t-h { color: #569cd6; font-weight: 700; } .ft-text .t-b { font-weight: 700; }
 .ft-row.ft-drop, .files-tree.ft-drop { background: var(--bg3); outline: 1px solid var(--accent); outline-offset: -1px; }
 .ft-row.ignored .ft-name { color: var(--faint); }
 .ft-caret { width: 12px; flex: none; color: var(--faint); font-size: 10px; text-align: center; }
@@ -847,7 +862,7 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .ft-row.changed-in .ft-name { color: #cfb27a; }
 .ft-row .gcode, .ft-row .ft-dot { margin-left: auto; flex: none; }
 .ft-dot { color: var(--warn); width: 12px; text-align: center; }
-.ft-row.match { padding-left: 10px; }
+.ft-row.match { padding-left: 10px; gap: 6px; }
 .ft-dir { color: var(--faint); overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; min-width: 0; flex: 1 1 auto; direction: ltr; }
 .ft-more { flex: none; margin-left: 2px; }
 .files-note { padding: 10px 12px; font-size: 12px; }
@@ -862,7 +877,7 @@ body.compact .agents, body.compact .slash { max-width: calc(100vw - 16px); }
 .files-code { display: flex; align-items: flex-start; min-width: max-content; }
 .files-code pre { margin: 0; padding: 8px 0; font: 12.5px/1.55 var(--mono); }
 .ft-nums { flex: none; text-align: right; color: var(--faint); padding: 8px 10px 8px 12px !important; user-select: none; border-right: 1px solid var(--line); position: sticky; left: 0; background: var(--bg); }
-.ft-text { padding: 8px 14px !important; white-space: pre; unicode-bidi: plaintext; text-align: left; tab-size: 4; }
+.ft-text { padding: 8px 14px !important; white-space: pre; unicode-bidi: plaintext; text-align: left; tab-size: 4; color: #d4d4d4; }
 .files-img { padding: 16px; }
 .files-img img { max-width: 100%; max-height: 70vh; cursor: zoom-in; background: repeating-conic-gradient(#1a1e26 0 25%, #12151b 0 50%) 0 0 / 16px 16px; }
 /* phones: one panel at a time — the tree, or the file with a back arrow */

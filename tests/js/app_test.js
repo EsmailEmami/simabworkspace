@@ -1117,6 +1117,35 @@ const tests = {
     assert.ok(calls.some((c) => c.url === '/api/fs/cheshmeh/read?path=' + encodeURIComponent('cheshmeh-web-app/api/main.go')));
     assert.strictEqual(q('.ft-nums', tab.pane)[0].textContent, '1\n2');
     assert.strictEqual(q('.ft-text', tab.pane)[0].textContent, 'line one\nسلام');
+    // VS Code look: coloured icons (folder shape / badge per type), indent guides, chevrons, coloured code
+    assert.strictEqual(main.querySelector('.ft-file').textContent, 'GO');
+    assert.strictEqual(rows()[0].querySelectorAll('.ft-guide').length, 0);
+    assert.strictEqual(main.querySelectorAll('.ft-guide').length, 2);
+    assert.ok(rows()[0].querySelector('.ft-folder').classList.contains('open'));
+    assert.ok(rows()[4].querySelector('.ft-folder').style.cssText.indexOf('#8bc34a') >= 0);
+    assert.strictEqual(rows()[5].querySelector('.ft-file').textContent, 'ℹ');
+    {
+      const T = global.SW.codeTokens;
+      const go = 'package main\n// hi\nfunc Run(s string) error { return fmt.Errorf("x %d", 42) }';
+      const t = T(go, 'a/b.go');
+      assert.strictEqual(t.map((x) => x[1]).join(''), go);
+      const cls = (w) => (t.find((x) => x[1] === w) || [])[0];
+      assert.deepStrictEqual([cls('package'), cls('// hi'), cls('func'), cls('Run'), cls('string'), cls('"x %d"'), cls('42'), cls('return'), cls('Errorf')],
+        ['t-x', 't-c', 't-k', 't-f', 't-k', 't-s', 't-n', 't-x', 't-f']);
+      const j = T('{"a": "b", "n": 1.5, "t": true}', 'x.json');
+      assert.deepStrictEqual(j.filter((x) => x[0]).map((x) => x[0] + ' ' + x[1]), ['t-a "a"', 't-s "b"', 't-a "n"', 't-n 1.5', 't-a "t"', 't-k true']);
+      const html = '<div class="a">hi<!-- c --></div>';
+      const ht = T(html, 'i.html');
+      assert.strictEqual(ht.map((x) => x[1]).join(''), html);
+      assert.deepStrictEqual(ht.filter((x) => x[0]).map((x) => x[0] + ' ' + x[1]), ['t-p <', 't-k div', 't-a class', 't-s "a"', 't-p >', 't-c <!-- c -->', 't-p </', 't-k div', 't-p >']);
+      const py = 'def f(x):\n    """doc\n"""\n    return x # c';
+      const pt = T(py, 'a.py');
+      assert.strictEqual(pt.map((x) => x[1]).join(''), py);
+      assert.ok(pt.some((x) => x[0] === 't-s' && x[1] === '"""doc\n"""') && pt.some((x) => x[0] === 't-c' && x[1] === '# c'));
+      assert.deepStrictEqual(T('plain', 'notes'), [['', 'plain']]);
+      const md = T('# Title\nsome `code` and **bold**', 'r.md');
+      assert.deepStrictEqual(md.filter((x) => x[0]).map((x) => x[0]), ['t-h', 't-s', 't-b']);
+    }
     assert.ok(tab.body.classList.contains('viewing'));
     // its changes: the diff of the right repository and path
     q('button', tab.vhead).find((b) => b.textContent === 'Changes').click(); await settle();

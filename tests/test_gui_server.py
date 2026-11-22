@@ -2449,7 +2449,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.64.3"', text)
+        self.assertIn('VERSION="1.64.4"', text)
 
 
 if __name__ == "__main__":
@@ -2586,3 +2586,67 @@ class SkillsRegistry(TmpHome):
                 self.app.install_skill("sk-proj2", "../escape.md", "bad")
             with self.assertRaises(sw.ApiError):
                 self.app.install_skill("sk-proj2", "no-extension.txt", "bad")
+
+
+class RemoveProject(TmpHome):
+    """⋯ → Remove…: list only, or also delete the folder on the server and/or this computer."""
+
+    def app(self, p, web=False):
+        calls = []
+        a = mock.Mock(store=self.store, web=web, calls=calls)
+        a.projects.return_value = [p]
+        a.pc_forget_local.side_effect = lambda n: calls.append(("forget", n))
+        return a
+
+    def test_rm_project_dir_refuses_home_root_and_shallow(self):
+        for bad in ("", "/", "~", os.path.dirname(os.path.expanduser("~")), "/tmp"):
+            self.assertIn("error", sw.rm_project_dir(bad), bad)
+        d = Path(self.tmp.name) / "proj"
+        (d / "a").mkdir(parents=True)
+        (d / "a" / "f.txt").write_text("x")
+        self.assertEqual(sw.rm_project_dir(str(d))["deleted"], True)
+        self.assertFalse(d.exists())
+        self.assertEqual(sw.rm_project_dir(str(d))["deleted"], False)   # already gone: no error
+
+    def test_list_only_keeps_files(self):
+        d = Path(self.tmp.name) / "site"; d.mkdir()
+        self.store.add_manual({"name": "site", "local": str(d), "remote": "/srv/site"})
+        self.store.set_color("site", "#112233")
+        self.store.set_project_order(["x", "site"])
+        a = self.app({"name": "site", "source": "manual", "local": str(d), "remote": "/srv/site"})
+        with mock.patch.object(sw, "remote_python") as rp:
+            r = sw.App.remove_project(a, "site")
+        rp.assert_not_called()
+        self.assertTrue(d.exists())
+        self.assertEqual((r["server"], r["local"]), (False, False))
+        self.assertEqual(self.store.manual(), [])
+        self.assertNotIn("site", self.store.data["projects"])
+        self.assertEqual(self.store.project_order(), ["x"])
+
+    def test_synced_stops_sync_first_then_deletes_both(self):
+        d = Path(self.tmp.name) / "shop"; d.mkdir()
+        a = self.app({"name": "shop", "source": "mutagen", "local": str(d), "remote": "/srv/shop"})
+        order = []
+        with mock.patch.object(sw, "which", return_value="mutagen"), \
+             mock.patch.object(sw.subprocess, "run", side_effect=lambda argv, **k: order.append(argv[1:3]) or mock.Mock(returncode=0)), \
+             mock.patch.object(sw, "remote_python", side_effect=lambda conf, code, args, **k: order.append(["rm", args[0]]) or {"deleted": True}):
+            r = sw.App.remove_project(a, "shop", server=True, local=True)
+        self.assertEqual(order, [["sync", "terminate"], ["rm", "/srv/shop"]])
+        self.assertEqual((r["server"], r["local"], r["errors"]), (True, True, []))
+        self.assertFalse(d.exists())
+
+    def test_server_error_reported_not_raised(self):
+        a = self.app({"name": "s", "source": "manual", "local": "", "remote": "/srv/s"})
+        with mock.patch.object(sw, "remote_python", side_effect=sw.ApiError(502, "cannot reach the server")):
+            r = sw.App.remove_project(a, "s", server=True)
+        self.assertEqual(r["server"], False)
+        self.assertIn("cannot reach", r["errors"][0])
+
+    def test_refused_cases(self):
+        lo = {"name": "lo", "source": "manual", "local": "", "remote": "/srv/lo", "localOnly": "pc1"}
+        with self.assertRaises(sw.ApiError):                 # the server folder of Local only is the computer's mount
+            sw.App.remove_project(self.app(lo), "lo", server=True)
+        with self.assertRaises(sw.ApiError):
+            sw.App.remove_project(self.app({"name": "sh", "source": "shared", "local": "", "remote": "/x/y"}), "sh")
+        with self.assertRaises(sw.ApiError):                 # the web has no "this computer"
+            sw.App.remove_project(self.app({"name": "w", "source": "manual", "local": "/a/b", "remote": ""}, web=True), "w", local=True)

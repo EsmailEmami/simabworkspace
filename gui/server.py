@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.3"
+VERSION = "1.64.4"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4421,6 +4421,36 @@ def prune_main(argv):
 if __name__ == "__main__":
     prune_main(sys.argv[1:])
 """
+RMDIR_PY = r"""
+import sys, os, json, shutil
+def rm_project_dir(path):
+    # deletes a whole project folder, refusing anything that looks like a home, a root or a mount
+    if not path:
+        return {"error": "no folder"}
+    p = os.path.realpath(os.path.expanduser(path))
+    home = os.path.realpath(os.path.expanduser("~"))
+    parts = [x for x in p.replace("\\", "/").split("/") if x and not x.endswith(":")]
+    if p == home or home.startswith(p.rstrip(os.sep) + os.sep) or len(parts) < 2 or os.path.ismount(p):
+        return {"error": "refusing to delete " + p}
+    if not os.path.exists(p):
+        return {"deleted": False, "path": p}
+    if not os.path.isdir(p):
+        return {"error": "not a folder: " + p}
+    errs = []
+    shutil.rmtree(p, onerror=lambda f, x, e: errs.append(x + ": " + str(e[1])[:100]))
+    return {"deleted": not os.path.exists(p), "path": p, "errors": errs[:10]}
+if __name__ == "__main__":
+    print(json.dumps(rm_project_dir(sys.argv[1] if len(sys.argv) > 1 else "")))
+"""
+_RMDIR = {}
+
+
+def rm_project_dir(path: str) -> dict:
+    if not _RMDIR:
+        exec(compile(RMDIR_PY, "<rmdir>", "exec"), _RMDIR)
+    return _RMDIR["rm_project_dir"](path)
+
+
 _PRUNE = {}
 
 
@@ -9377,6 +9407,47 @@ class App:
         self.activity.add("sync-stop", name, "stopped syncing (files kept on both sides)")
         return {"ok": True}
 
+    def remove_project(self, name: str, server: bool = False, local: bool = False) -> dict:
+        """Take a project off the list; optionally delete its folder on the server and/or this computer."""
+        p = next((x for x in self.projects(max_age=0) if x["name"] == name), None)
+        if not p:
+            raise ApiError(404, "no such project")
+        if p.get("source") == "shared":
+            raise ApiError(400, "a shared project is removed by its owner")
+        if server and (p.get("localOnly") or not p.get("remote")):
+            raise ApiError(400, "this project has no folder of its own on the server")
+        if local and (self.web or not p.get("local")):
+            raise ApiError(400, "this project has no folder on this computer")
+        if p.get("source") == "mutagen":            # first stop the sync, so a delete does not travel across
+            exe = which("mutagen")
+            r = subprocess.run([exe, "sync", "terminate", name], capture_output=True, text=True, timeout=60, env=dict(os.environ, PATH=tool_path()))
+            if r.returncode != 0:
+                raise ApiError(500, (r.stderr or r.stdout).strip()[-300:] or "could not stop the sync")
+        self.pc_forget_local(name)
+        self.store.remove_manual(name)
+        with self.store.lock:
+            self.store.data["projects"].pop(name, None)
+            self.store.save()
+        self.store.set_project_order([n for n in self.store.project_order() if n != name])
+        self.invalidate()
+        out, errors = {"ok": True, "server": False, "local": False}, []
+        for where, on in (("server", server), ("local", local)):
+            if not on:
+                continue
+            try:
+                res = rm_project_dir(p["local"]) if where == "local" else remote_python(
+                    self._project_conf(p), RMDIR_PY, [p["remote"]], multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=300)
+            except ApiError as e:
+                res = {"error": e.message}
+            res = res if isinstance(res, dict) else {"error": "bad answer"}
+            if res.get("error") or res.get("errors"):
+                errors.append(where + ": " + str(res.get("error") or res["errors"][0]))
+            out[where] = bool(res.get("deleted"))
+        out["errors"] = errors
+        what = " + ".join(w for w in ("server", "local") if out[w]) or "list only"
+        self.activity.add("project-remove", name, "removed (" + what + ")" + ("; " + errors[0] if errors else ""))
+        return out
+
     def git_sync(self, name: str, on: bool) -> dict:
         script = HERE.parent / "simabworkspace.sh"
         script = str(script) if script.is_file() else installed_script()
@@ -12676,6 +12747,9 @@ class Handler(BaseHTTPRequestHandler):
             item = app.store.add_manual(self._body())
             app.invalidate()
             return {"project": item}
+        if route == ("POST", "remove-project") and len(parts) == 2:
+            b = self._body()
+            return app.remove_project(parts[1], server=b.get("server") is True, local=b.get("local") is True)
         if route == ("DELETE", "manual") and len(parts) == 2:
             app.pc_forget_local(parts[1])
             app.store.remove_manual(parts[1])

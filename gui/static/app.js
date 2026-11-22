@@ -400,7 +400,7 @@
           url ? h('div', { class: 'share-acts' },
             h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, 'Open ↗'),
             h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link')) : null),
-        shareProgram(cur, (S.shareSt || {})[shareKey(x)]),
+        shareProgram(cur, (S.shareSt || {})[shareKey(x)]) || '',
         h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg,
           h('div', { class: 'muted share-sub' }, (WHO.filter(function (a) { return a[0] === cur.access; })[0] || WHO[0])[2])),
         section('Asking now', asks.length, asks.map(function (a) {
@@ -2390,16 +2390,41 @@
           if (ok) api('POST', 'sync/' + encodeURIComponent(p.name) + '/stop').then(function () { toast(p.name + ': sync stopped', 'ok'); refreshProjects(); }).catch(fail);
         });
       } } : null,
-      p.source === 'manual' ? '-' : null,
-      p.source === 'manual' ? { label: 'Remove from list', action: function () {
-        confirmDlg('Remove “' + p.name + '” from the list? Files are not touched.', 'Remove', true).then(function (ok) {
-          if (ok) api('DELETE', 'manual/' + encodeURIComponent(p.name)).then(refreshProjects).catch(fail);
-        });
-      } } : null
+      p.source !== 'shared' ? '-' : null,
+      p.source !== 'shared' ? { label: 'Remove…', action: function () { removeProjectDialog(p); } } : null
     ]), { star: 'menu' });
   }
 
 
+
+  // remove a project: from the list only, or also delete its folder on the server and/or this computer
+  function removeProjectDialog(p) {
+    var sides = [];
+    if (p.remote && !p.localOnly) sides.push(['server', 'Delete the folder on the server too', p.remote]);
+    if (!S.web && p.localExists) sides.push(['local', 'Delete the folder on this computer too', fullLocal(p.local)]);
+    var boxes = {}, go, md;
+    function picked() { return sides.filter(function (x) { return boxes[x[0]].checked; }).map(function (x) { return x[0]; }); }
+    function upd() { var n = picked().length; go.textContent = n ? 'Remove and delete' : 'Remove from list'; }
+    go = h('button', { class: 'btn danger', onclick: function () {
+      var w = picked(), body = { server: w.indexOf('server') >= 0, local: w.indexOf('local') >= 0 };
+      go.disabled = true;
+      api('POST', 'remove-project/' + encodeURIComponent(p.name), body).then(function (r) {
+        md.close();
+        if (r.errors && r.errors.length) toast(p.name + ': ' + r.errors.join('; '), 'err');
+        else toast(p.name + ' removed' + (w.length ? ' and deleted' : ''), 'ok');
+        refreshProjects();
+      }).catch(function (e) { go.disabled = false; fail(e); });
+    } }, 'Remove from list');
+    var body = h('div', null,
+      h('div', null, 'Remove “' + (p.title || p.name) + '” from the list?' + (p.source === 'mutagen' ? ' Its sync stops.' : '')),
+      sides.map(function (x) {
+        var cb = boxes[x[0]] = h('input', { type: 'checkbox', onchange: upd });
+        return h('label', { class: 'check', style: 'margin:8px 0 0', title: x[2] }, cb, x[1]);
+      }),
+      h('div', { class: 'muted', style: 'margin-top:8px' }, sides.length ? 'Nothing ticked: files stay where they are. Deleting cannot be undone.' : 'Files are not touched.'));
+    md = openModal({ title: 'Remove project', size: 'sm', body: body,
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
+  }
 
   // ------------------------------------------------------------------ image preview
   function viewImage(src) {
@@ -2418,7 +2443,8 @@
     'docker-logs': ['▣', 'logs'], 'docker-shell': ['▣', 'container shell'], 'docker-rebuild': ['▣', 'rebuild'],
     'docker-start': ['▣', 'start'], 'docker-stop': ['▣', 'stop'], 'docker-restart': ['▣', 'restart'], 'docker-crash': ['▣', 'crashed'],
     tunnels: ['⇄', 'ports'],
-    vscode: ['◇', 'VS Code'], 'sync-flush': ['⇅', 'sync'], 'sync-pause': ['⇅', 'sync'], 'sync-resume': ['⇅', 'sync']
+    vscode: ['◇', 'VS Code'], 'sync-flush': ['⇅', 'sync'], 'sync-pause': ['⇅', 'sync'], 'sync-resume': ['⇅', 'sync'],
+    'project-remove': ['×', 'removed']
   };
 
   function dayLabel(t) {

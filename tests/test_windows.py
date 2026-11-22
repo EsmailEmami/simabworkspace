@@ -167,6 +167,25 @@ class ConPtyHelpers(WinOn):
             self.assertEqual(sw.detached_kwargs(), {"start_new_session": True})
 
 
+class Utf8Mode(WinOn):
+    def test_serve_restarts_itself_in_utf8_mode(self):
+        # cp1252 open() broke the app on Windows: "'charmap' codec can't decode byte 0x90"
+        with mock.patch.object(sw.sys, "flags", mock.Mock(utf8_mode=0)), \
+             mock.patch.object(sw.subprocess, "call", return_value=0) as call, \
+             mock.patch.object(sw, "serve") as serve:
+            self.assertEqual(sw.main(["server.py", "serve"]), 0)
+        serve.assert_not_called()
+        self.assertEqual(call.call_args[0][0][1:3], ["-X", "utf8"])
+        self.assertEqual(call.call_args[0][0][-1], "serve")
+
+    def test_utf8_mode_serve_runs_directly(self):
+        with mock.patch.object(sw.sys, "flags", mock.Mock(utf8_mode=1)), \
+             mock.patch.object(sw.subprocess, "call") as call, mock.patch.object(sw, "serve") as serve:
+            sw.main(["server.py", "serve"])
+        serve.assert_called_once()
+        call.assert_not_called()
+
+
 class StartMenuAndBrowser(WinOn):
     def test_ico_wraps_the_png(self):
         png = (ROOT / "gui" / "static" / "icon-192.png").read_bytes()

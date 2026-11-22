@@ -48,6 +48,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 IS_WIN = os.name == "nt"          # native Windows (Python for Windows + Git for Windows), not WSL
+if IS_WIN:                        # Windows reads files as cp1252 by default: UTF-8 for every python we start
+    os.environ["PYTHONUTF8"] = "1"
 if not IS_WIN:
     import fcntl
     import termios
@@ -55,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.64.2"
+VERSION = "1.64.3"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -13259,7 +13261,8 @@ def ensure_running(timeout=8.0):
     log = config_dir() / "gui.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as lf:
-        subprocess.Popen([win_python() if IS_WIN else sys.executable, str(Path(__file__).resolve()), "serve"],
+        subprocess.Popen([win_python() if IS_WIN else sys.executable, *(["-X", "utf8"] if IS_WIN else []),
+                          str(Path(__file__).resolve()), "serve"],
                          stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, cwd=os.path.expanduser("~"), **detached_kwargs())
     end = time.time() + timeout
     while time.time() < end:
@@ -13345,6 +13348,8 @@ def open_window(st):
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "open"
     if cmd == "serve":
+        if IS_WIN and not sys.flags.utf8_mode:   # started by hand: open(), subprocess text in UTF-8, not cp1252
+            return subprocess.call([sys.executable, "-X", "utf8", str(Path(__file__).resolve())] + argv[1:])
         serve()
     elif cmd == "open":
         open_window(ensure_running())

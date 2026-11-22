@@ -172,6 +172,12 @@ const tests = {
     assert.strictEqual(tab.busy, false);
   },
 
+  'result line shows the model\'s share of the time'() {
+    const { tab, feed } = newTab();
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', duration_ms: 4200, duration_api_ms: 3600, num_turns: 1 } });
+    assert.match(byClass(tab.msgs, 'result-line')[0].textContent, /4\.2s \(model 3\.6s\)/);
+  },
+
   'text streams in while typing (before the final message)'() {
     const { tab, feed } = newTab();
     const se = (event) => feed({ t: 'e', e: { type: 'stream_event', event, parent_tool_use_id: null } });

@@ -581,6 +581,7 @@
   var S = {
     settings: {}, server: {}, projects: [], projectsKey: '', tabs: [], active: null,
     open: new Set(JSON.parse(localStorage.getItem('sw-open') || '[]')),
+    cmdsOpen: new Set(JSON.parse(localStorage.getItem('sw-cmds-open') || '[]')),   // projects whose folded run commands are shown
     filter: '', status: {}, wsl: false, lastTabs: [], version: '', git: {}, docker: {}, tunnels: [], usage: null
   };
 
@@ -3491,17 +3492,18 @@
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name)),
       h('button', { class: 'act more', title: 'Terminal, VS Code, Docker, ports, history…', onclick: function (e) { e.stopPropagation(); projectMenu(p, e.currentTarget); } }, '⋯')));
     var onPc = (p.buildsOn === 'computers' || p.buildsOn === 'local') && (p.localExists || S.web);   // builds on the user's computer
+    var cmdRows = [];
     p.commands.forEach(function (c0) {
       var c = onPc ? Object.assign({}, c0, { where: 'local' }) : c0;      // its run commands run there too
       if (S.web && c.where !== 'server') {
         // a command of your computer: from here through Computers while it is connected
         var C = window.SWComputers, rx = C && C.remoteRunning(p, c);
         if (!C || !S.remoteOnline) {
-          body.append(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — it is not connected (open Simab Workspace there)' },
+          cmdRows.push(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — it is not connected (open Simab Workspace there)' },
             h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc off')));
           return;
         }
-        body.append(h('div', { class: 'cmd' + (rx ? ' running' : ''), title: c.cmd + '\nruns on your computer' + (rx ? ' (' + (rx.devName || '') + ') — click: output / stop' : ' — click to start it there'),
+        cmdRows.push(h('div', { class: 'cmd' + (rx ? ' running' : ''), title: c.cmd + '\nruns on your computer' + (rx ? ' (' + (rx.devName || '') + ') — click: output / stop' : ' — click to start it there'),
           onclick: function () { C.remoteRun(p, c); } },
           h('span', { class: 'ic' }, rx ? '■' : '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc')));
         return;
@@ -3510,18 +3512,33 @@
       var last = t ? null : lastRun(p.name, c.id);
       var res = last ? (last.exitCode === 0 ? h('span', { class: 'res ok', title: 'last run: finished fine' }, '✓') : h('span', { class: 'res err', title: 'last run: exit code ' + last.exitCode }, '✗' + (last.exitCode != null ? last.exitCode : ''))) : null;
       var link = t && t.foundUrl && c.where !== 'server' ? h('a', { class: 'res link', href: t.foundUrl, target: '_blank', rel: 'noopener', title: 'Open ' + t.foundUrl, onclick: function (e) { e.stopPropagation(); } }, '↗') : null;
-      body.append(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (c.shared ? '\nshared with the project (.simab.json)' : '') + (t ? '\nclick to stop' : ''),
+      cmdRows.push(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (c.shared ? '\nshared with the project (.simab.json)' : '') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
         h('span', { class: 'ic' }, t ? '■' : '▶'), h('span', { class: 'nm' }, c.name), res, link,
         h('span', { class: 'tag' }, (c.shared ? '⇄ ' : '') + (c.where === 'server' ? 'srv' : 'loc'))));
     });
-    if (!p.commands.length) body.append(h('button', { class: 'add-link', onclick: function () { editCommands(p); } }, '+ run command'));
+    // many run commands: the first CMD_LIMIT (and any running one) stay, the rest fold behind "N more"
+    var extra = cmdRows.length > CMD_LIMIT + 1 ? cmdRows.filter(function (row, i) { return i >= CMD_LIMIT && !row.classList.contains('running'); }) : [];
+    extra.forEach(function (row) { row.classList.add('extra'); });
+    cmdRows.forEach(function (row) { body.append(row); });
+    if (S.cmdsOpen.has(p.name)) body.classList.add('all-cmds');
+    if (extra.length) body.append(h('button', { class: 'add-link cmd-more', onclick: function (e) {
+      var on = body.classList.toggle('all-cmds');
+      if (on) S.cmdsOpen.add(p.name); else S.cmdsOpen.delete(p.name);
+      localStorage.setItem('sw-cmds-open', JSON.stringify(Array.from(S.cmdsOpen)));
+      e.currentTarget.textContent = cmdMoreLabel(on, extra.length);
+    } }, cmdMoreLabel(S.cmdsOpen.has(p.name), extra.length)));
+    // "+ run command": always when there is none, otherwise when the pointer is over the project
+    body.append(h('button', { class: 'add-link add-cmd' + (p.commands.length ? ' hov' : ''), onclick: function () { editCommands(p); } }, '+ run command'));
     projectTunnels(p.name).forEach(function (t) { var tl = tunnelLine(t); if (tl) body.append(tl); });
     shareLines(p).forEach(function (row) { body.append(row); });
     if (window.SWComputers) window.SWComputers.devLines(p).forEach(function (row) { body.append(row); });      // dev servers + their ports
     el.append(body);
     return el;
   }
+
+  var CMD_LIMIT = 5;
+  function cmdMoreLabel(on, n) { return on ? '▴ less' : '▾ ' + n + ' more'; }
 
   // ------------------------------------------------------------------ run command editor
   // The folder of a run command: browse the project's folders on the server, keep the path

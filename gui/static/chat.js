@@ -1276,7 +1276,9 @@
     this.turnSpeech = [];
     if (speech.trim()) this.lastSpeech = speech;
     var parts = [];
-    if (e.duration_ms) parts.push((e.duration_ms / 1000).toFixed(1) + 's');
+    // the model's share (duration_api_ms) next to the whole: the rest is tools, the link, start-up
+    if (e.duration_ms) parts.push((e.duration_ms / 1000).toFixed(1) + 's' + (e.duration_api_ms > 0
+      ? ' (model ' + (Math.min(e.duration_api_ms, e.duration_ms) / 1000).toFixed(1) + 's)' : ''));
     if (e.num_turns) parts.push(e.num_turns + (e.num_turns === 1 ? ' turn' : ' turns'));
     if (typeof e.total_cost_usd === 'number') parts.push('$' + e.total_cost_usd.toFixed(3));
     var err = e.is_error || (e.subtype && e.subtype !== 'success');
@@ -1435,7 +1437,7 @@
 
   // Computers (computers.js): where this chat's work runs, shown next to the status
   P.setWhere = function (text, title, cls, onclick) {
-    if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.statusEl.append(this.whereEl); }
+    if (!this.whereEl) { this.whereEl = h('span', { class: 'pc-where' }); this.body.append(this.whereEl); }   // top right of the chat
     this.whereEl.textContent = text || '';
     this.whereEl.title = title || '';
     this.whereEl.onclick = onclick || null;

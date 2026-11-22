@@ -45,7 +45,7 @@
       var pr = (S.projects || []).filter(function (x) { return x.name === name; })[0] || {};
       var dev = ((d.devices) || []).filter(function (x) { return x.id === pr.localOnly; })[0];
       var who = dev ? dev.name : 'its computer';
-      return isOn(dev) ? { on: 'local', ok: true, text: 'Lives on ' + who + ' — Claude works on it there' }
+      return isOn(dev) ? { on: 'local', ok: true, dev: who, text: 'Lives on ' + who + ' — Claude works on it there' }
         : { on: 'local', ok: false, text: 'Lives on ' + who + ', which is not connected — Claude cannot work on it now' };
     }
     if (d.builds[name] !== 'computers') return { on: 'server', ok: true, text: 'Commands run on the server' };
@@ -58,7 +58,7 @@
         : { on: 'computers', ok: false, dev: pn, text: pn + ' (' + why + ') is not connected — Claude cannot run its commands' };
     }
     var on = online(d);
-    return on.length ? { on: 'computers', ok: true, text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
+    return on.length ? { on: 'computers', ok: true, dev: on.map(function (x) { return x.name; }).join(', '), text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
       : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude cannot run its commands' };
   }
 
@@ -589,13 +589,23 @@
       if (!t.setWhere || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
       var st = p ? buildState(p.name, null, t.info.spec.pc) : null;
-      if (!st || st.on === 'server') { t.setWhere(''); return; }
-      if (!infoFresh) { t.setWhere(st.on === 'local' ? '⌂ local …' : '⚒ PC …', 'checking…', ''); return; }
-      var many = st.on === 'computers' && ((info && info.devices) || []).length > 1;
-      t.setWhere(st.on === 'local' ? '⌂ local' + (st.ok ? '' : ' · off') : '⚒ ' + (st.dev || 'runs on PC') + (st.ok ? '' : ' · off') + (many ? ' ▾' : ''),
-        st.text + (many ? '\nclick: choose the computer of this chat' : ''), st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad',
-        many ? function (ev) { chatPcMenu(t, p.name, ev.currentTarget); } : null);
+      var name = p ? p.name : '';
+      // the badge at the top right of the chat: where its commands run; click → change it
+      if (!st || st.on === 'server') {
+        t.setWhere('▣ server', 'Commands run on the server\nclick: change', 'srv', function (ev) { whereMenu(t, name, ev.currentTarget, st); });
+        return;
+      }
+      if (!infoFresh) { t.setWhere(st.on === 'local' ? '⌂ …' : '⚒ …', 'checking…', ''); return; }
+      t.setWhere((st.on === 'local' ? '⌂ ' : '⚒ ') + (st.dev || 'PC') + (st.ok ? '' : ' · off') + ' ▾', st.text + '\nclick: change',
+        st.ok ? (st.on === 'local' ? 'lo' : 'bd') : 'bad', function (ev) { whereMenu(t, name, ev.currentTarget, st); });
     });
+  }
+
+  function whereMenu(t, name, el, st) {
+    if (st && st.on === 'computers') { chatPcMenu(t, name, el); return; }
+    var r = el.getBoundingClientRect();
+    SW.showMenu(r.left, r.bottom + 2, [{ header: st && st.on === 'local' ? 'Lives on ' + st.dev : 'Commands run on the server' },
+      { label: name ? 'Run on my computers… (Computers settings)' : 'Computers settings…', action: function () { open(name || undefined); } }]);
   }
 
   // the ⚒ chip of a My computers chat: which computer runs this chat's commands
@@ -607,6 +617,7 @@
     (info.devices || []).forEach(function (x) {
       items.push({ label: (cur === x.id ? '✓ ' : '   ') + x.name + (isOn(x) ? '' : ' (not connected)'), action: function () { pick(x.id); } });
     });
+    items.push('-', { label: 'Project setting… (Computers)', action: function () { open(name); } });
     function pick(id) {
       if (id === cur) return;
       t.send({ t: 'pc', pc: id });

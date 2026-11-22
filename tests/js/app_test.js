@@ -1681,7 +1681,7 @@ const tests = {
     fakePc.devs.pins = { cheshmeh: 'b2b2b2b2b2b2' };
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     assert.match(global.SWComputers.buildState('cheshmeh').text, /desk \(chosen for this project\) is not connected/);
-    assert.match(global.SWComputers.buildState('cheshmeh', null, 'a1a1a1a1a1a1').text, /Commands run on laptop \(chosen for this chat/, 'the chat beats the project');
+    assert.match(global.SWComputers.buildState('cheshmeh', null, 'a1b2c3d4e5f6').text, /Commands run on laptop \(chosen for this chat/, 'the chat beats the project');
     delete fakePc.devs.pins; fakePc.devs['default'] = 'b2b2b2b2b2b2';
     global.SWComputers._setInfo(JSON.parse(JSON.stringify(fakePc.devs)));
     assert.match(global.SWComputers.buildState('cheshmeh').text, /desk \(your default computer\)/);
@@ -1830,7 +1830,18 @@ const tests = {
     await SW.openSession({ kind: 'chat', project: 'cheshmeh' }); await settle();
     const chat = S.active;
     global.SWComputers.decorate();
-    assert.strictEqual(chat.whereEl.textContent, '⌂ local');
+    assert.strictEqual(chat.whereEl.textContent, '⌂ laptop ▾', 'top right of the chat: which computer');
+    assert.strictEqual(chat.whereEl.parentNode, chat.body, 'at the top of the chat, not in the status line');
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'server', shop: 'server' } }));
+    assert.strictEqual(chat.whereEl.textContent, '▣ server');
+    chat.whereEl.onclick({ currentTarget: chat.whereEl });
+    assert.ok(q('.menu').some((m) => /Run on my computers/.test(m.textContent)), 'click: change where it runs');
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'computers', shop: 'server' } }));
+    assert.strictEqual(chat.whereEl.textContent, '⚒ laptop ▾');
+    chat.whereEl.onclick({ currentTarget: chat.whereEl });
+    const it = q('.menu').pop();
+    assert.match(it.textContent, /Project setting \(laptop\)/, 'the chat can pick its computer');
+    global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { self: 'a1b2c3d4e5f6', builds: { cheshmeh: 'local', shop: 'server' } }));
     assert.match(chat.whereEl.getAttribute('title') || chat.whereEl.title, /Lives on laptop/);
     chat.onEvent({ type: 'assistant', message: { id: 'm9', content: [{ type: 'tool_use', id: 'tb1', name: 'Bash', input: { command: 'npm run build' } }] } });
     assert.strictEqual(q('.where-tag', chat.cards.tb1)[0].textContent, 'PC', 'a tiny tag: ran on the computer');
@@ -2198,6 +2209,41 @@ const tests = {
     assert.strictEqual(S.active, files);
     assert.strictEqual(files.file.path, 'cheshmeh-web-app/api/main.go');
     SW.closeTab(files, true); await settle();
+  }
+  ,
+  async 'run commands: "+ run command" on hover, many fold behind "N more"'() {
+    await settle();
+    const SW = global.SW, S = SW.S;
+    const pr = S.projects.find((x) => x.name === 'cheshmeh'), keep = pr.commands;
+    const projEl = () => q('.proj').find((e) => e.dataset.proj === 'cheshmeh');
+    const add = () => q('.add-cmd', projEl())[0];
+    const bodyOf = () => q('.proj-body', projEl())[0];
+    SW.renderProjects();
+    assert.ok(add().classList.contains('hov'), 'with commands: shown only on hover');
+    pr.commands = Array.from({ length: 9 }, (_, i) => ({ id: 'k' + i, name: 'job' + i, cmd: 'echo ' + i, where: 'server', cwd: '', url: '' }));
+    S.cmdsOpen.delete('cheshmeh');
+    SW.renderProjects();
+    const body = bodyOf();
+    const extra = q('.cmd.extra', body);
+    assert.strictEqual(extra.length, 4);
+    assert.strictEqual(extra[0].querySelector('.nm').textContent, 'job5');
+    const more = q('.cmd-more', body)[0];
+    assert.strictEqual(more.textContent, '▾ 4 more');
+    assert.ok(!body.classList.contains('all-cmds'));
+    more.dispatch('click');
+    assert.ok(body.classList.contains('all-cmds'));
+    assert.strictEqual(more.textContent, '▴ less');
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-cmds-open')), ['cheshmeh']);
+    SW.renderProjects();
+    assert.ok(bodyOf().classList.contains('all-cmds'), 'stays open after a re-render');
+    S.cmdsOpen.delete('cheshmeh');
+    pr.commands = pr.commands.slice(0, 6);           // one over the limit: no fold for a single row
+    SW.renderProjects();
+    assert.strictEqual(q('.cmd.extra', bodyOf()).length, 0);
+    pr.commands = [];
+    SW.renderProjects();
+    assert.ok(!add().classList.contains('hov'), 'no commands: always shown');
+    pr.commands = keep; SW.renderProjects();
   }
 };
 

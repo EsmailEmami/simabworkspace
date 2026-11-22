@@ -99,6 +99,10 @@ textarea.inp { height: auto; padding: 7px 9px; resize: vertical; }
 .cmd .tag { font-size: 10px; color: var(--faint); }
 .add-link { border: none; background: none; padding: 2px 4px; color: var(--faint); font-size: 11.5px; }
 .add-link:hover { color: var(--text); }
+.proj-body:not(.all-cmds) .cmd.extra { display: none; }
+.add-cmd.hov { display: none; }
+.proj:hover .add-cmd.hov { display: inline-block; }
+@media (hover: none) { .add-cmd.hov { display: inline-block; } }
 .side-note { padding: 14px 8px; color: var(--faint); font-size: 12px; line-height: 1.6; }
 .side-note code { font-family: var(--mono); color: var(--muted); }
 #show-side { display: none; position: fixed; left: 0; bottom: 10px; z-index: 30; width: 16px; height: 34px; border: 1px solid var(--line2); border-left: none; border-radius: 0 6px 6px 0; background: var(--bg3); color: var(--faint); padding: 0; }
@@ -1279,7 +1283,7 @@ body.compact .snd-name { flex-basis: 140px; }
 .pc-mode-l .mini-sel { font-size: 11px; }
 .seg.seg4 { grid-template-columns: repeat(4, 1fr); }
 @media (max-width: 640px) { .seg.seg4 { grid-template-columns: 1fr 1fr; } }
-.pc-where { margin-left: 8px; font-size: 11px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line2); }
+.pc-where { position: absolute; top: 6px; right: 14px; z-index: 4; font: 10.5px var(--mono); line-height: 16px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--line2); background: var(--bg2); color: var(--muted); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-where.lo { color: #7dd3fc; border-color: #7dd3fc44; }
 .pc-where.bd { color: var(--ok); border-color: #22c55e44; }
 .pc-where.bad { color: var(--err); border-color: #ef444444; }

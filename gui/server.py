@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.0"
+VERSION = "1.65.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2744,10 +2744,10 @@ class ChatSession:
 
     def _connect(self, how="start"):
         if self.relay_key:
-            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, pc=self.spec.get("pc") or "",
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, **self._pc_arg(),
                                            relay=(how, self.relay_key, self.relay_off, self.session_id or ""))
         else:
-            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, pc=self.spec.get("pc") or "")
+            argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, **self._pc_arg())
         env = dict(os.environ, PATH=tool_path())
         try:
             proc = subprocess.Popen(argv, cwd=self.built["cwd"], env=env, stdin=subprocess.PIPE,
@@ -3058,6 +3058,9 @@ class ChatSession:
             self._log({"type": "_effort", "effort": self.effort})
         elif t == "pc" and isinstance(m.get("pc"), str) and (m["pc"] == "" or PC_ID_RE.fullmatch(m["pc"])):
             self.set_pc(m["pc"])
+
+    def _pc_arg(self) -> dict:
+        return {"pc": self.spec["pc"]} if self.spec.get("pc") else {}
 
     def set_pc(self, dev: str):
         """The computer of this chat ("" = the project's / default choice): onpc reads it at once
@@ -5957,6 +5960,170 @@ def fs_call(op, args):
     return {}, "onpc: " + (why or "the computer did not answer")
 
 
+class Mux:
+    """ONE connection to the computer, open for the whole chat (POST /pc/fsmux): requests carry an id,
+    so many go at once and the answers come back in any order. Quality on any line:
+    - heartbeat: a ping every 5 s while something waits (20 s idle); no answer in 12 s → the line is
+      dead: closed at once, opened again (not ssh's own minute, nor the 330 s of a request);
+    - lost on the way → read / grep / glob / write are tried once more on a new connection (doing
+      them twice is harmless); an edit is not (it could be done twice) — Claude is told to read again;
+    - big ones (a Write over 1 MB, images) go alone (fs_call), so they never hold up the small ones;
+    - a computer whose app is older (no /pc/fsmux) → each call alone."""
+    SAFE = {"grep", "glob", "read", "write"}
+    IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+    def __init__(self, ping=5.0, idle=20.0, dead=12.0):
+        import threading, time
+        self.T, self.time = threading, time
+        self.lock, self.send_lock, self.open_lock = threading.Lock(), threading.Lock(), threading.Lock()
+        self.sock, self.next, self.waiting, self.old = None, 0, {}, False
+        self.ping, self.idle, self.dead = ping, idle, dead
+
+    def _open(self):
+        cwd = os.path.realpath(os.getcwd())
+        pin = pinned(cwd)
+        for d in [x for x in devices() if x["online"] and (not pin or x["id"] == pin)]:
+            s = reach(d)
+            if s is None:
+                continue
+            s.settimeout(15)
+            try:
+                s.sendall((("POST /pc/fsmux HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Length: 0\r\n\r\n")
+                           % (int(d.get("port") or 0), d.get("secret") or "")).encode())
+                head = b""
+                while not head.endswith(b"\r\n\r\n") and len(head) < 8192:
+                    c = s.recv(1)
+                    if not c:
+                        break
+                    head += c
+            except OSError:
+                s.close()
+                continue
+            if b" 200 " in head.split(b"\r\n")[0] + b" ":
+                s.settimeout(None)
+                return s
+            if b" 404 " in head.split(b"\r\n")[0] + b" ":
+                self.old = True
+            s.close()
+        return None
+
+    def _kill(self, s):
+        with self.lock:
+            if self.sock is s:
+                self.sock = None
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        s.close()
+
+    def _reader(self, s, st):
+        f = s.makefile("rb")
+        try:
+            while True:
+                head = f.read(4)
+                if len(head) < 4:
+                    break
+                raw = f.read(struct.unpack(">I", head)[0])
+                st["rx"] = self.time.time()
+                try:
+                    j = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if j.get("pong"):
+                    continue
+                with self.lock:
+                    w = self.waiting.pop(j.pop("id", None), None)
+                if w:
+                    w[1].append(j)
+                    w[0].set()
+        except (OSError, ValueError):
+            pass
+        st["gone"] = True
+        with self.lock:                                # the line dropped: whoever still waits is told now
+            if self.sock is s:
+                self.sock = None
+            lost = [k for k, w in self.waiting.items() if w[2] is s]
+            ws = [self.waiting.pop(k) for k in lost]
+        for w in ws:
+            w[0].set()
+
+    def _heart(self, s, st):
+        sent = 0.0
+        while not st.get("gone"):
+            self.time.sleep(min(self.ping, 1.0))
+            now = self.time.time()
+            with self.lock:
+                busy = any(w[2] is s for w in self.waiting.values())
+            if sent and st["rx"] < sent and now - sent > self.dead:
+                self._kill(s)                          # no answer, not even to a ping: the line is dead
+                return
+            if now - max(sent, st["rx"]) >= (self.ping if busy else self.idle):
+                sent = now if not sent or st["rx"] >= sent else sent
+                raw = json.dumps({"id": 0, "op": "ping"}).encode()
+                try:
+                    with self.send_lock:
+                        s.sendall(struct.pack(">I", len(raw)) + raw)
+                except OSError:
+                    self._kill(s)
+                    return
+
+    def _conn(self):
+        with self.open_lock:                           # calls at the same moment: one opens, the rest use it
+            with self.lock:
+                s = self.sock
+            if s is None and not self.old:
+                s = self._open()
+                if s is not None:
+                    with self.lock:
+                        self.sock = s
+                    st = {"rx": self.time.time()}
+                    self.T.Thread(target=self._reader, args=(s, st), daemon=True).start()
+                    self.T.Thread(target=self._heart, args=(s, st), daemon=True).start()
+            return s
+
+    def _once(self, op, args):
+        """→ (answer, error, lost: the line dropped while it was out)"""
+        s = self._conn()
+        if s is None:
+            j, err = fs_call(op, args)                 # old app on the computer, or none connected (it says so)
+            return j, err, False
+        ev, box = self.T.Event(), []
+        with self.lock:
+            self.next += 1
+            rid = self.next
+            self.waiting[rid] = (ev, box, s)
+        raw = json.dumps({"id": rid, "cwd": os.path.realpath(os.getcwd()), "op": op, "args": args}).encode()
+        try:
+            with self.send_lock:
+                s.sendall(struct.pack(">I", len(raw)) + raw)
+        except OSError:
+            with self.lock:
+                self.waiting.pop(rid, None)
+            self._kill(s)
+            return {}, "onpc: the connection to the computer was lost — try again", True
+        ev.wait(330)
+        with self.lock:
+            self.waiting.pop(rid, None)
+        if not box:
+            return {}, ("onpc: the connection to the computer was lost — it may or may not have been done "
+                        "there; read the file again before retrying"), True
+        return box[0], box[0].get("error") or "", False
+
+    def big(self, op, args):
+        if op == "write":
+            return len(str(args.get("content") or "")) > 1_000_000
+        return op == "read" and str(args.get("file_path") or "").lower().endswith(self.IMAGES)
+
+    def call(self, op, args):
+        if self.big(op, args):
+            return fs_call(op, args)
+        j, err, lost = self._once(op, args)
+        if lost and op in self.SAFE:
+            j, err, _ = self._once(op, args)           # a new connection; harmless to do it again
+        return j, err
+
+
 MCP_TOOLS = [
     {"name": "Grep", "description": (
         "Search file contents of this project with a regular expression (ripgrep syntax). It runs on the "
@@ -6017,8 +6184,31 @@ MCP_RO = {"Grep", "Glob", "Read"}
 
 
 def mcp_serve():
-    """MCP server (stdio, JSON lines) Claude starts for a Local only project: Grep and Glob run on the
-    user's computer instead of crawling the sshfs mount one file at a time."""
+    """MCP server (stdio, JSON lines) Claude starts for a Local only project: its file tools run on the
+    user's computer instead of crawling the sshfs mount one file at a time. Tool calls run side by
+    side (Claude often sends 5 Reads at once: one round trip, not five)."""
+    import threading
+    lock = threading.Lock()
+    mux = Mux()
+
+    def reply(out):
+        with lock:
+            sys.stdout.write(json.dumps(out) + "\n")
+            sys.stdout.flush()
+
+    def call(mid, prm):
+        name, args = prm.get("name"), prm.get("arguments") or {}
+        if name not in ("Grep", "Glob", "Read", "Edit", "Write") or not isinstance(args, dict):
+            j, err = {}, "no such tool"
+        else:
+            j, err = mux.call(name.lower(), args)
+        if not err and j.get("image"):
+            res = {"content": [{"type": "image", "data": j["image"], "mimeType": j.get("mime") or "image/png"}]}
+        else:
+            res = {"content": [{"type": "text", "text": err or j.get("text") or ""}], "isError": bool(err)}
+        reply({"jsonrpc": "2.0", "id": mid, "result": res})
+
+    workers = []
     for line in sys.stdin:
         try:
             m = json.loads(line)
@@ -6033,23 +6223,19 @@ def mcp_serve():
         elif meth == "tools/list":
             res = {"tools": [dict(t, annotations={"readOnlyHint": t["name"] in MCP_RO}) for t in MCP_TOOLS]}
         elif meth == "tools/call":
-            name, args = prm.get("name"), prm.get("arguments") or {}
-            if name not in ("Grep", "Glob", "Read", "Edit", "Write") or not isinstance(args, dict):
-                j, err = {}, "no such tool"
-            else:
-                j, err = fs_call(name.lower(), args)
-            if not err and j.get("image"):
-                res = {"content": [{"type": "image", "data": j["image"], "mimeType": j.get("mime") or "image/png"}]}
-            else:
-                res = {"content": [{"type": "text", "text": err or j.get("text") or ""}], "isError": bool(err)}
+            t = threading.Thread(target=call, args=(m["id"], prm), daemon=True)
+            t.start()
+            workers = [w for w in workers if w.is_alive()] + [t]
+            continue
         elif meth == "ping":
             res = {}
         if res is None:
             out = {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "method not found"}}
         else:
             out = {"jsonrpc": "2.0", "id": m["id"], "result": res}
-        sys.stdout.write(json.dumps(out) + "\n")
-        sys.stdout.flush()
+        reply(out)
+    for w in workers:                                 # stdin closed: let the last answers out
+        w.join(330)
     return 0
 
 
@@ -6724,11 +6910,17 @@ def pc_decide(c: dict, project: str, cmd: str, hour: dict, now: float):
     return "ask", ""
 
 
+PC_RETRY_MAX = 10        # the computer's link comes back within 10 s of the line (Local only lives on it)
+
+
 def pc_link_argv(conf: ServerConf, sock: str, port: int) -> list:
     """No ExitOnForwardFailure: a RemoteForward in the user's ~/.ssh/config that fails on the server
     ("remote port forwarding failed for listen port 47123", a user's Mac) would end OUR link too.
     ClearAllForwardings would also drop our -R. So the link is checked on the server instead (_verify)."""
-    return ssh_base(conf, multiplex=False, batch=True, forwards=True) + [
+    # a dead line is noticed in ~15 s, not ssh_base's 60 (everything of Local only hangs meanwhile);
+    # replaced in place: for ssh the FIRST value of an option wins, a later -o would be ignored
+    fast = {"ServerAliveInterval=15": "ServerAliveInterval=5", "ServerAliveCountMax=4": "ServerAliveCountMax=3"}
+    return [fast.get(x, x) for x in ssh_base(conf, multiplex=False, batch=True, forwards=True)] + [
         "-N", "-T", "-o", "StreamLocalBindUnlink=yes", "-o", "Compression=yes",     # weak lines: text shrinks 3-5x
         "-R", f"{sock}:127.0.0.1:{port}", conf.target]
 
@@ -6898,7 +7090,7 @@ class PcHub:
                 self.state, self.error = "error", (getattr(e, "message", "") or str(e))[:200] + f" — retrying in {pause}s"
                 if self.wake.wait(pause):
                     return
-                pause = min(pause * 2, 60)
+                pause = min(pause * 2, PC_RETRY_MAX)
                 continue
             while self.wanted and p.poll() is None:
                 if self.state != "connected" and time.time() - started > 2.5:
@@ -6920,7 +7112,7 @@ class PcHub:
             if self.state == "error" and self.wanted:
                 if self.wake.wait(pause):
                     return
-                pause = min(pause * 2, 60)
+                pause = min(pause * 2, PC_RETRY_MAX)
                 continue
             if not self.wanted:
                 return
@@ -6934,7 +7126,7 @@ class PcHub:
             self.error = (last[-1] if last else "the connection closed")[:200] + f" — retrying in {pause}s"
             if self.wake.wait(pause):
                 return
-            pause = min(pause * 2, 60)
+            pause = min(pause * 2, PC_RETRY_MAX)
 
     # the link's quality: round trip to the server (TCP connect to its ssh port) + traffic per second
     def _net_loop(self, tick=1.0):
@@ -7028,22 +7220,81 @@ class PcHub:
             b = json.loads(h.rfile.read(n).decode("utf-8")) if n else {}
         except ValueError:
             return h._json(400, {"error": "bad request"})
+        res = self.fs_do(b, c)
+        return h._json(res.pop("_code", 200), res)
+
+    def fs_do(self, b: dict, c: dict) -> dict:
+        """One file request {cwd, op, args} of a Local only project → its answer ({text} / {image} /
+        {error}; "_code" when it is not even a fair request)."""
         cwd, op, args = b.get("cwd"), b.get("op"), b.get("args")
         if not isinstance(cwd, str) or not cwd.startswith("/") or op not in PCFS_OPS or not isinstance(args, dict):
-            return h._json(400, {"error": "bad request"})
+            return {"_code": 400, "error": "bad request"}
         hit = self.map_path(cwd)
         if not hit or not hit[0].get("localOnly"):
-            return h._json(404, {"error": f"{cwd} is not a Local only project of {c['name']}"})
+            return {"_code": 404, "error": f"{cwd} is not a Local only project of {c['name']}"}
         project, _, root = hit
         t0 = time.perf_counter()
         try:
-            res = PCFS_OPS[op](project["local"], root, args)
+            return PCFS_OPS[op](project["local"], root, args)
         except (OSError, ValueError) as e:
-            return h._json(200, {"error": str(e)[:1000]})
+            return {"error": str(e)[:1000]}
         finally:
             self.fsstats["n"] += 1
             self.fsstats["ms"] += (time.perf_counter() - t0) * 1000
-        return h._json(200, res)
+
+    def serve_fsmux(self, h):
+        """POST /pc/fsmux from onpc --mcp-serve: ONE connection that stays open for the whole chat; on it
+        frames (4-byte length + JSON) {id, cwd, op, args} → {id, …answer}, many at a time (each in its own
+        thread) — one round trip per file request, no channel to open each time."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        h.send_response(200)
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+        lock = threading.Lock()
+
+        def one(b):
+            res = self.fs_do(b, c)
+            res.pop("_code", None)
+            res["id"] = b.get("id")
+            raw = json.dumps(res).encode()
+            try:
+                with lock:
+                    h.wfile.write(struct.pack(">I", len(raw)) + raw)
+                    h.wfile.flush()
+                    self.meter[1] += len(raw) + 4
+            except OSError:
+                pass
+        try:
+            while True:
+                head = h.rfile.read(4)
+                if len(head) < 4:
+                    return
+                n = struct.unpack(">I", head)[0]
+                if n > 30_000_000:
+                    return
+                raw = h.rfile.read(n)
+                if len(raw) < n:
+                    return
+                self.meter[0] += n + 4
+                try:
+                    b = json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    continue
+                if isinstance(b, dict) and b.get("op") == "ping":       # heartbeat: answered at once
+                    pong = json.dumps({"id": b.get("id"), "pong": True}).encode()
+                    with lock:
+                        h.wfile.write(struct.pack(">I", len(pong)) + pong)
+                        h.wfile.flush()
+                elif isinstance(b, dict):
+                    threading.Thread(target=one, args=(b,), daemon=True).start()
+        except OSError:
+            return
 
     # dev servers (onpc --bg) -------------------------------------------------------
     def serve_bg(self, h):
@@ -13311,6 +13562,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_sftp(self)
             if method == "POST" and path == "/pc/fs":          # Claude's Grep / Glob of a Local only project
                 return self.app.pc.serve_fs(self)
+            if method == "POST" and path == "/pc/fsmux":       # the same, on one connection kept open
+                return self.app.pc.serve_fsmux(self)
             if method == "POST" and path == "/pc/proxy":       # Share on your domain: one connection to a port here
                 return self.app.pc.serve_proxy(self)
             if method == "POST" and path == "/pc/probe":       # Share on your domain: which shared ports run here

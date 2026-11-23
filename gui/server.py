@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.10"
+VERSION = "1.65.11"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1905,7 +1905,11 @@ def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "", 
              + " ".join(shlex.quote(x) for x in args) + ' ${H:+--append-system-prompt "$H"} ${L:+--settings "$L"}'
              + ' ${M:+--mcp-config "$M" --disallowedTools Grep,Glob,Read,Edit,Write,MultiEdit}')
     # the login shell gives the user's environment; our part runs with sh (zsh/fish differ)
-    return (f"cd {remote_path_expr(rpath)} || exit 97; "
+    # a Local only project (~/.simab-mnt/x): no folder = the link to the computer, not the server (96)
+    gone = ("{ echo 'simabworkspace: this project lives on your computer and its folder is not reachable from the"
+            " server — the link dropped or the computer is off / asleep / not connected' >&2; exit 96; }"
+            if "/.simab-mnt/" in rpath else "exit 97")
+    return (f"cd {remote_path_expr(rpath)} || {gone}; "
             f'exec "${{SHELL:-/bin/bash}}" -lc {shlex.quote("exec sh -c " + shlex.quote(inner))}')
 
 
@@ -2846,6 +2850,10 @@ class ChatSession:
         self._connect("start")
 
     def _connect(self, how="start"):
+        if how == "start" and self.built.get("prepare"):
+            why = self.built["prepare"](self.exit_code in (96, 97))     # Local only: mount its folder first
+            if why:
+                self._log({"type": "_error", "text": why})
         if self.relay_key:
             argv = self.built["make_argv"](self.mode, self.model, self.session_id, self.effort, **self._pc_arg(),
                                            relay=(how, self.relay_key, self.relay_off, self.session_id or ""))
@@ -7209,6 +7217,7 @@ class PcHub:
         self.hour = {}                 # project -> everything allowed until (time)
         self.runs = collections.deque(maxlen=20)
         self.mounts = {}               # Local only project -> "ok" | why it is not mounted on the server
+        self.mount_lock = threading.Lock()  # connect's mount and a chat's mount at once: one sshfs per folder
         self.meter = [0, 0]            # bytes over the link: [from the server (down), to the server (up)]
         self.fsstats = sftp_stats()    # Local only: file requests from the server (all mounts together)
         self.chatlinks = {}            # Local only: chat relay key → {n: open connections, rtt: ms of its ping}
@@ -7414,6 +7423,10 @@ class PcHub:
         ps = [p for p in self.local_projects() if names is None or p["name"] in names]
         if not ps or self.app.web:
             return {}
+        with self.mount_lock:
+            return self._mount(ps)
+
+    def _mount(self, ps) -> dict:
         try:
             r = self.remote(self.app.conf, PC_MOUNT_PY, ["mount"], multiplex=False, timeout=300,
                             stdin=json.dumps({"dev": self.cfg()["id"], "mounts": [{"name": p["name"], "path": p["remote"]} for p in ps]}).encode())
@@ -7421,6 +7434,32 @@ class PcHub:
             r = {p["name"]: e.message for p in ps}
         self.mounts.update(r if isinstance(r, dict) else {})
         return r if isinstance(r, dict) else {}
+
+    def ensure_mount(self, name: str, force=False) -> str:
+        """Before a chat starts Claude in a Local only project: its folder must be mounted on the server
+        (else `cd ~/.simab-mnt/x` fails, exit 96) — a new project, a mount still running or failed, a
+        folder gone (force: Claude just stopped with 96/97). → "" or a plain reason for the user that
+        says WHOSE problem it is (the link, the computer, the server). Not my project: ""."""
+        if self.app.web or not any(p["name"] == name for p in self.local_projects()):
+            return ""
+        if self.state == "connecting":
+            return ("This project lives on your computer, which is still connecting to the server — "
+                    "wait a moment, then send again.")
+        if self.state != "connected":
+            why = f" ({self.error})" if self.error else ""
+            return ("This project lives on your computer, which is not connected to the server" + why + ": "
+                    "check its internet and that Simab Workspace is open there (⚙ → Computers → Connect this computer).")
+        if self.mounts.get(name) == "ok" and not force:
+            return ""
+        why = self.mount([name]).get(name) or "mounting failed"
+        if why == "ok":
+            return ""
+        if "sshfs" in why:
+            return "The server cannot open folders of your computer: " + why
+        if "not empty" in why:
+            return "The server's side of this project is in the way: " + why
+        return ("The link to your computer failed while opening the project folder (" + why + "): "
+                "check its internet and that Simab Workspace is open there, then send again.")
 
     def unmount(self, projects=None):
         ps = projects if projects is not None else self.local_projects()
@@ -10104,6 +10143,8 @@ class App:
                 except ApiError as e:
                     built["history"] = None
                     built["history_error"] = e.message
+            pn = built["spec"]["project"]
+            built["prepare"] = lambda force=False: self.pc.ensure_mount(pn, force) if pn else None
             c = ChatSession(sid, built, on_change=self._changed)
             c.log = self.activity.add
             c.remember = self.store.set_chat_prefs

@@ -2267,6 +2267,27 @@ const tests = {
     SW.renderProjects();
     assert.ok(!add().classList.contains('hov'), 'no commands: always shown');
     pr.commands = keep; SW.renderProjects();
+  },
+
+  async terminalCopyPasteWithoutShift() {
+    await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();
+    const tab = SW.S.active, term = tab.term;
+    const copied = [];
+    global.navigator.clipboard = { writeText: (t) => { copied.push(t); return Promise.resolve(); }, readText: () => Promise.resolve('') };
+    const key = (code, o) => Object.assign({ type: 'keydown', code, ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, preventDefault() {} }, o);
+    let sel = '';
+    term.hasSelection = () => !!sel; term.getSelection = () => sel; term.clearSelection = () => { sel = ''; };
+    assert.strictEqual(tab.keyFilter(key('KeyC')), true, 'Ctrl+C with nothing selected stays ^C');
+    sel = 'hello';
+    assert.strictEqual(tab.keyFilter(key('KeyC')), false, 'Ctrl+C with a selection copies');
+    assert.deepStrictEqual(copied, ['hello']);
+    assert.strictEqual(sel, '', 'selection cleared, the next Ctrl+C is ^C again');
+    sel = 'two';
+    assert.strictEqual(tab.keyFilter(key('KeyC', { shiftKey: true })), false, 'Ctrl+Shift+C still copies');
+    assert.deepStrictEqual(copied, ['hello', 'two']);
+    assert.strictEqual(tab.keyFilter(key('KeyV')), false, 'Ctrl+V: the browser pastes');
+    assert.strictEqual(tab.keyFilter(key('KeyV', { shiftKey: true })), false);
+    assert.strictEqual(tab.keyFilter(key('KeyC', { altKey: true })), true, 'Ctrl+Alt+C goes to the terminal');
   }
 };
 

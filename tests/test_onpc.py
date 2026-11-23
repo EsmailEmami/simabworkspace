@@ -802,6 +802,51 @@ class LocalOnlyApp(unittest.TestCase):
             self.assertNotIn("localOnly", self.store.data["projects"].get("mine") or {})
         self.assertTrue(os.path.isdir(self.folder), "the files stay on the computer")
 
+    def test_chat_mounts_the_folder_before_claude_starts(self):
+        """A new Local only project: the chat's Claude ran `cd ~/.simab-mnt/x` before the mount. Every failure
+        says whose problem it is (the link, the computer, the server), never a bare "folder not found"."""
+        pc = self.app.pc
+        mine = {"name": "mine", "remote": "~/.simab-mnt/mine", "localOnly": pc.cfg()["id"]}
+        with mock.patch.object(pc, "local_projects", return_value=[mine]), \
+                mock.patch.object(pc, "remote", return_value={"mine": "ok"}) as rem:
+            pc.state = "connecting"
+            self.assertIn("still connecting", pc.ensure_mount("mine"))
+            pc.state, pc.error = "error", "Connection timed out — retrying in 8s"
+            why = pc.ensure_mount("mine")
+            self.assertIn("not connected", why)
+            self.assertIn("Connection timed out", why)
+            self.assertFalse(rem.called)
+            pc.state = "connected"
+            self.assertEqual(pc.ensure_mount("other"), "", "not my Local only project")
+            self.assertEqual(pc.ensure_mount("mine"), "")
+            self.assertEqual(rem.call_count, 1)
+            pc.ensure_mount("mine")
+            self.assertEqual(rem.call_count, 1, "already mounted: no ssh")
+            pc.ensure_mount("mine", force=True)
+            self.assertEqual(rem.call_count, 2, "Claude stopped with 96/97: mounted again")
+            rem.return_value = {"mine": "read: Connection reset by peer"}
+            why = pc.ensure_mount("mine", force=True)
+            self.assertIn("link to your computer failed", why)
+            self.assertIn("Connection reset by peer", why)
+            rem.return_value = {"mine": "sshfs is not on the server — ask its admin"}
+            self.assertIn("The server cannot open folders", pc.ensure_mount("mine", force=True))
+        c = sw.ChatSession.__new__(sw.ChatSession)
+        seen, logged = [], []
+        c.built = {"prepare": lambda force: seen.append(force) or "the link dropped",
+                   "make_argv": mock.Mock(side_effect=RuntimeError("stop"))}
+        c.exit_code, c.relay_key = 96, ""
+        c._pc_arg = lambda: {}
+        c._log = logged.append
+        c.mode = c.model = c.session_id = c.effort = ""
+        with self.assertRaises(RuntimeError):
+            c._connect("start")
+        self.assertEqual(seen, [True], "the chat mounts before Claude starts (forced after exit 96)")
+        self.assertEqual(logged, [{"type": "_error", "text": "the link dropped"}], "the reason is shown in the chat")
+        lo = sw.chat_remote_script("~/.simab-mnt/mine", "claude", [])
+        self.assertIn("exit 96", lo.split(";")[0] + lo)
+        self.assertIn("not reachable from the server", lo)
+        self.assertIn("|| exit 97;", sw.chat_remote_script("/srv/p", "claude", []))
+
     def test_terminal_tab_of_the_computer(self):
         proj = {"name": "p", "remote": "/srv/p", "local": "", "localExists": False, "source": "shared", "endpoint": {}}
         b = sw.build_spec({"kind": "pcterm", "project": "p"}, sw.ServerConf("esi", "h", "22"), self.store, [proj])

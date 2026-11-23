@@ -953,6 +953,7 @@
         if (e.code !== 0 && e.code !== null) {
           var box = this.system('Claude stopped (exit ' + e.code + '). Your next message starts it again and continues the conversation.', 'err');
           if (this.stderr.length) box.append(h('details', null, h('summary', null, 'details'), preBox(this.stderr.slice(-40).join('\n'))));
+          if (e.code === 96) box.append(h('div', null, 'This project lives on your computer and the server cannot reach its folder: the link dropped, or the computer is off, asleep or not connected. Make sure Simab Workspace is open there and connected (⚙ → Computers), then send again.'));
           if (e.code === 97) box.append(h('div', null, 'The project folder was not found on the server.'));
           if (e.code === 98) box.append(h('div', null, 'This project lives on your computer and it is not connected: open Simab Workspace there (⚙ → Computers → Connect this computer).'));
         }

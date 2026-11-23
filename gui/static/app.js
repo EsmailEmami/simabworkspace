@@ -1156,22 +1156,25 @@
   Tab.prototype.keyFilter = function (e) {
     if (e.type !== 'keydown') return true;
     if (isGlobalShortcut(e)) return false;
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
+    var ck = e.ctrlKey && !e.altKey && !e.metaKey;
+    // Ctrl+C copies when text is selected (otherwise it stays ^C for the shell); Ctrl+Shift+C always copies
+    if (ck && e.code === 'KeyC' && (e.shiftKey || this.term.hasSelection())) {
       e.preventDefault();
       var t = this.term.getSelection();
       if (t && navigator.clipboard) navigator.clipboard.writeText(t).catch(fail);
+      if (!e.shiftKey) this.term.clearSelection();
       return false;
     }
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') return false;    // the browser pastes
+    if (ck && e.code === 'KeyV') return false;    // Ctrl+V / Ctrl+Shift+V: the browser pastes
     if (e.ctrlKey && e.shiftKey && e.code === 'KeyF') { e.preventDefault(); this.openSearch(); return false; }
     return true;
   };
 
   Tab.prototype.paste = function () {
     var self = this;
-    if (!navigator.clipboard || !navigator.clipboard.readText) { toast('Use Ctrl+Shift+V to paste', 'warn'); return; }
+    if (!navigator.clipboard || !navigator.clipboard.readText) { toast('Use Ctrl+V to paste', 'warn'); return; }
     navigator.clipboard.readText().then(function (t) { if (t) self.term.paste(t); self.term.focus(); })
-      .catch(function () { toast('Clipboard access denied — use Ctrl+Shift+V', 'warn'); });
+      .catch(function () { toast('Clipboard access denied — use Ctrl+V', 'warn'); });
   };
 
   Tab.prototype.openSearch = function () {
@@ -1927,8 +1930,8 @@
     if (tab.isChat || tab.isFiles) { tab.menu(x, y, layoutItems(tab)); return; }
     var run = tab.info.spec.kind === 'run';
     showMenu(x, y, [
-      { label: 'Copy', k: 'Ctrl+Shift+C', disabled: !tab.term.hasSelection(), action: function () { navigator.clipboard.writeText(tab.term.getSelection()).catch(fail); } },
-      { label: 'Paste', k: 'Ctrl+Shift+V', action: function () { tab.paste(); } },
+      { label: 'Copy', k: 'Ctrl+C', disabled: !tab.term.hasSelection(), action: function () { navigator.clipboard.writeText(tab.term.getSelection()).catch(fail); } },
+      { label: 'Paste', k: 'Ctrl+V', action: function () { tab.paste(); } },
       { label: 'Find', k: 'Ctrl+Shift+F', action: function () { tab.openSearch(); } },
       { label: 'Clear', action: function () { tab.term.clear(); } },
       '-',

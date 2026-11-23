@@ -118,6 +118,7 @@ class Element extends Node {
     return out;
   }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  closest(sel) { for (let e = this; e && e._matches; e = e.parentNode) if (sel.split(',').some((p) => e._matches(p))) return e; return null; }
 }
 
 function install() {

@@ -1289,7 +1289,7 @@ const tests = {
     assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/shop').pop().body, { group: 'Clients' });
     assert.strictEqual(SW.project('shop').group, 'Clients');
     const tabs = q('.pg-tab');
-    assert.deepStrictEqual(tabs.map((t) => t.querySelector('.pg-label').textContent), ['All', 'Clients'], 'All first, then one vertical tab per group');
+    assert.deepStrictEqual(tabs.map((t) => t.querySelector('.pg-label').textContent), ['All', 'Clients', '+'], 'All first, then one vertical tab per group, + at the bottom');
     assert.ok(tabs[0].classList.contains('on'), 'All is the default tab');
     assert.strictEqual(q('.proj').length, 2, 'All shows every project');
     assert.ok(/--gc:#/.test(tabs[1].getAttribute ? tabs[1].getAttribute('style') || tabs[1].style.cssText : tabs[1].style.cssText), 'the group has its own colour');
@@ -1298,7 +1298,46 @@ const tests = {
     assert.deepStrictEqual(q('.proj').map((x) => x.dataset.proj), ['shop'], 'a group tab shows only its projects');
     q('.pg-tab')[0].click(); await settle();
     assert.strictEqual(q('.proj').length, 2);
+    // drag a project between groups: onto a group tab, onto All (out of its group), onto + (a new group)
+    const root = document.body.querySelector('#projects');
+    const tabOf = (label) => q('.pg-tab').find((t) => t.querySelector('.pg-label').textContent === label);
+    const projOf = (name) => q('.proj').find((x) => x.dataset.proj === name);
+    const dt = { setData() {}, effectAllowed: '' };
+    const drag = async (name, onto) => {
+      root.dispatch('dragstart', { target: projOf(name).querySelector('.proj-head'), dataTransfer: dt });
+      root.dispatch('dragover', { target: onto.querySelector('.pg-label') });
+      assert.ok(onto.classList.contains('drop-in'), 'the tab lights up under the dragged project');
+      root.dispatch('drop', { target: onto.querySelector('.pg-label') });
+      root.dispatch('dragend', {});
+      await settle();
+    };
+    const other = q('.proj').map((x) => x.dataset.proj).find((n) => n !== 'shop');
+    await drag(other, tabOf('Clients'));
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/' + other).pop().body, { group: 'Clients' });
+    assert.strictEqual(SW.project(other).group, 'Clients');
+    await drag(other, tabOf('All'));
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/' + other).pop().body, { group: '' }, 'All takes it out of its group');
+    await drag(other, tabOf('+'));
+    let md = q('.modal').pop();
+    md.querySelector('input').value = '  Side   jobs ';
+    q('.btn.primary', md).pop().click(); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/' + other).pop().body, { group: 'Side jobs' }, 'dropped on +: a new group with it');
+    assert.strictEqual(localStorage.getItem('sw-group-tab'), 'Side jobs');
+    // + clicked: an empty group tab (kept in this browser until a project is put in it)
+    tabOf('+').click(); await settle();
+    md = q('.modal').pop();
+    md.querySelector('input').value = 'Later';
+    q('.btn.primary', md).pop().click(); await settle();
+    assert.ok(tabOf('Later'), 'the new empty group has its tab');
+    assert.strictEqual(tabOf('Later').querySelector('.pg-n').textContent, '0');
+    assert.strictEqual(localStorage.getItem('sw-group-tab'), 'Later');
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-new-groups')), ['Later']);
+    tabOf('All').click(); await settle();
+    await drag('shop', tabOf('Later'));
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-new-groups')), [], 'a project in it: no longer kept apart');
+    localStorage.setItem('sw-group-tab', ''); localStorage.setItem('sw-new-groups', '[]');
     state.projects.forEach((p) => { delete p.group; });
+    delete SW.project(other).group;
     delete SW.project('shop').group;
     SW.renderProjects();
     document.body.querySelector('#modal-root').replaceChildren();

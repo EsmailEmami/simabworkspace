@@ -3412,8 +3412,8 @@
     if (root.firstChild !== root._strip) root.replaceChildren(root._strip, root._list);
     var gs = groupNames();
     var cur = groupTab();
-    root.classList.toggle('grouped', gs.length > 0);
-    root._strip.replaceChildren.apply(root._strip, gs.length ? groupTabs(gs, cur) : []);
+    root.classList.add('grouped');                    // always: All, the groups, + (new group)
+    root._strip.replaceChildren.apply(root._strip, groupTabs(gs, cur));
     // a filter searches every project; else the chosen group tab (All = every project)
     var list = S.projects.filter(function (p) {
       if (f) return p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0 || (p.group || '').toLowerCase().indexOf(f) >= 0;
@@ -3428,7 +3428,26 @@
   function groupNames() {
     var out = [];
     S.projects.forEach(function (p) { if (p.group && out.indexOf(p.group) < 0) out.push(p.group); });
+    newGroups().forEach(function (g) { if (out.indexOf(g) < 0) out.push(g); });
     return out;
+  }
+  // a group made with + has no project yet: kept in this browser until a project is put in it
+  function newGroups() {
+    try { var v = JSON.parse(localStorage.getItem('sw-new-groups') || '[]'); return Array.isArray(v) ? v.filter(function (g) { return typeof g === 'string' && g; }) : []; } catch (e) { return []; }
+  }
+  function setNewGroups(list) {
+    var used = {};
+    S.projects.forEach(function (p) { if (p.group) used[p.group] = 1; });
+    localStorage.setItem('sw-new-groups', JSON.stringify(list.filter(function (g, i) { return g && !used[g] && list.indexOf(g) === i; })));
+  }
+  function newGroup(p) {                              // + : a new group (with the project dropped on it)
+    promptDlg('New group', '').then(function (v) {
+      var g = String(v || '').split(/\s+/).filter(Boolean).join(' ').slice(0, 40);
+      if (!g) return;
+      if (p) { localStorage.setItem('sw-group-tab', g); setGroup(p, g); return; }
+      setNewGroups(newGroups().concat([g]));
+      setGroupTab(g);
+    });
   }
   function groupTab() {
     var g = localStorage.getItem('sw-group-tab') || '';
@@ -3452,11 +3471,15 @@
     }
     var count = {};
     S.projects.forEach(function (p) { if (p.group) count[p.group] = (count[p.group] || 0) + 1; });
-    return [tab('', 'All', S.projects.length)].concat(gs.map(function (g) { return tab(g, g, count[g]); }));
+    var add = h('button', { class: 'pg-tab pg-add', title: 'New group — or drop a project here to put it in a new group', onclick: function () { newGroup(null); } },
+      h('span', { class: 'pg-label' }, '+'));
+    add.dataset.add = '1';
+    return [tab('', 'All', S.projects.length)].concat(gs.map(function (g) { return tab(g, g, count[g] || 0); }), [add]);
   }
   function setGroup(p, g) {
     return api('POST', 'group/' + encodeURIComponent(p.name), { group: g }).then(function (d) {
       p.group = d.group;
+      setNewGroups(newGroups());
       renderProjects();
       refreshProjects();
     }).catch(fail);
@@ -3483,6 +3506,7 @@
     return api('POST', 'groups/rename', { from: g, to: to }).then(function () {
       if (groupTab() === g) localStorage.setItem('sw-group-tab', to || '');
       S.projects.forEach(function (p) { if (p.group === g) p.group = to; });
+      setNewGroups(newGroups().map(function (x) { return x === g ? to : x; }));
       renderProjects();
       refreshProjects();
     }).catch(fail);
@@ -3539,7 +3563,7 @@
       if (!gh && (!el || el.dataset.proj === _dragProjName)) return;
       e.preventDefault();
       root.querySelectorAll('.proj, .pg-tab').forEach(function (x) { x.classList.remove('drop-before', 'drop-after', 'drop-in'); });
-      if (gh) { if (gh.dataset.group) gh.classList.add('drop-in'); return; }
+      if (gh) { gh.classList.add('drop-in'); return; }      // All = out of its group, + = a new group
       var r = el.getBoundingClientRect();
       var before = e.clientY < r.top + r.height / 2;
       el.classList.toggle('drop-before', before);
@@ -3560,7 +3584,11 @@
       root.querySelectorAll('.proj, .pg-tab').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging', 'drop-in'); });
       var moved = S.projects.filter(function (p) { return p.name === _dragProjName; })[0];
       if (!moved) return;
-      if (gh) { if (gh.dataset.group && (moved.group || '') !== gh.dataset.group) setGroup(moved, gh.dataset.group); return; }
+      if (gh) {
+        if (gh.dataset.add) newGroup(moved);
+        else if ((moved.group || '') !== (gh.dataset.group || '')) setGroup(moved, gh.dataset.group || '');
+        return;
+      }
       var to = S.projects.filter(function (p) { return p.name === target.dataset.proj; })[0];
       if (!to || to === moved) return;
       // reorder the whole list (projects of other group tabs keep their place), optimistic

@@ -82,6 +82,7 @@ textarea.inp { height: auto; padding: 7px 9px; resize: vertical; }
 .pg-tab.on { background: var(--gc); color: #0d1117; }
 .pg-tab[data-group=""].on { background: var(--bg3); color: var(--text); }
 .pg-tab.drop-in { box-shadow: inset 0 0 0 2px var(--accent); }
+.pg-tab.pg-add { writing-mode: horizontal-tb; transform: none; justify-content: center; max-height: none; padding: 4px 0; border-left-color: transparent; border-radius: 6px; font-size: 14px; }
 .pg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pg-n { font: 10px var(--mono); opacity: .75; }
 .pgroup-pick { display: flex; flex-wrap: wrap; gap: 6px; }

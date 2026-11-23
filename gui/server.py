@@ -22,6 +22,7 @@ import collections
 import errno
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -57,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.18"
+VERSION = "1.65.19"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5111,13 +5112,72 @@ for t in op.get("remove") or []:
         closed[k] = {"at": now, "by": me, "keep": bool(t.get("keep"))}
 while len(tabs) > 60:
     tabs.pop(min(tabs, key=lambda k: tabs[k].get("at") or 0))
-data = {"devices": devs, "tabs": tabs, "closed": closed}
+lay = data.get("layout") if isinstance(data.get("layout"), dict) else {}
+groups = {k: v for k, v in (lay.get("groups") or {}).items() if isinstance(v, list) and len(v) == 2}
+colors = {k: v for k, v in (lay.get("colors") or {}).items() if isinstance(v, list) and len(v) == 2}
+order = lay.get("order") if isinstance(lay.get("order"), list) and len(lay.get("order")) == 2 else None
+for ch in op.get("layout") or []:      # newest change wins; at 0 = a device's first list, only where nothing is yet
+    if not isinstance(ch, dict):
+        continue
+    at, k, v = float(ch.get("at") or 0), ch.get("k"), ch.get("v")
+    if k == "g" and isinstance(ch.get("r"), str) and ch["r"] and isinstance(v, str):
+        cur = groups.get(ch["r"])
+        if cur is None or at > float(cur[1] or 0):
+            groups[ch["r"]] = [v[:40], at]
+    elif k == "c" and isinstance(ch.get("g"), str) and ch["g"] and isinstance(v, str):
+        cur = colors.get(ch["g"])
+        if cur is None or at > float(cur[1] or 0):
+            colors[ch["g"]] = [v[:7], at]
+    elif k == "o" and isinstance(v, list):
+        if order is None or at > float(order[1] or 0):
+            order = [[str(x) for x in v if x][:2000], at]
+data = {"devices": devs, "tabs": tabs, "closed": closed,
+        "layout": {"groups": groups, "colors": colors, "order": order}}
 tmp = f + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False)
 os.replace(tmp, f)
 print(json.dumps(data))
 """
+
+
+def lan_ips() -> list:
+    """This computer's address(es) on the local network (Wi-Fi / LAN), main one first: a phone on the same
+    network opens http://IP:PORT. The UDP connect sends nothing; it only asks which interface would be used."""
+    out = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            out.append(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            out.append(info[4][0])
+    except OSError:
+        pass
+    res = []
+    for ip in out:
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if a.is_private and not a.is_loopback and not a.is_link_local and ip not in res:
+            res.append(ip)
+    return res[:4]
+
+
+def layout_key(remote) -> str:
+    """Groups / order are shared by the project's server folder: devices may name the same folder differently."""
+    r = str(remote or "").strip().rstrip("/")
+    if r.startswith("~/"):
+        r = r[2:]
+    elif r.startswith("/home/") and r.count("/") >= 3:
+        r = r.split("/", 3)[3]          # /home/esi/x and ~/x are the same folder
+    return r
 
 
 def share_tab_key(spec: dict) -> str:
@@ -9789,6 +9849,8 @@ class App:
         self._share_seen = None                  # tab keys the shared set and this device agree on
         self._share_projects = []                # projects of the other devices
         self._share_gone = {}                    # session id -> closed because another device closed it
+        self._layout_out = []                    # group / group colour / order changes not yet on the server
+        self._layout_lock = threading.Lock()
         self._copies_checked = False
         self.pc = PcHub(self)                    # builds on this computer (onpc)
         self._pc_unlock = {}                     # web: computer id -> (MFA unlock token, until) — memory only
@@ -9814,7 +9876,8 @@ class App:
                       "endpoint": {}, "sync": None, "commands": list(own.get("commands") or []),
                       "color": own.get("color") or str(sp.get("color") or "")[:20],
                       "starter": own.get("starter") or str(sp.get("starter") or "")[:2000],
-                      "title": own.get("title") or str(sp.get("title") or "")[:80], "sharedFrom": sp.get("sharedFrom") or ""})
+                      "title": own.get("title") or str(sp.get("title") or "")[:80], "group": own.get("group") or "",
+                      "sharedFrom": sp.get("sharedFrom") or ""})
         pci = (getattr(self, "_pc_cache", None) or (0, {}))[1]
         for x in p:                   # the owner of a Local only project, as the server knows it (any computer)
             own = (pci.get("pins") or {}).get(x["name"])
@@ -10028,13 +10091,22 @@ class App:
             # only tabs the user closed here (quitting / a restart closes nothing elsewhere)
             keep = dict(self._share_keep)
             remove = [] if first else [{"key": k, "keep": bool(v)} for k, v in keep.items() if k not in mine]
+            with self._layout_lock:
+                lay_out, self._layout_out = self._layout_out, []
+            lay_send = (self._layout_seed() if first else []) + lay_out
             op = {"device": self.device_id(), "name": self.device_name(), "projects": self._share_projects_mine(),
-                  "add": add, "remove": remove}
-            res = remote_python(self.conf, SHARE_PY, [], stdin=json.dumps(op).encode(),
-                                multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30)
+                  "add": add, "remove": remove, "layout": lay_send}
+            try:
+                res = remote_python(self.conf, SHARE_PY, [], stdin=json.dumps(op).encode(),
+                                    multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30)
+            except Exception as e:
+                log_line(f"share: {e}")
+                res = None
             if not isinstance(res, dict) or "tabs" not in res:
+                with self._layout_lock:
+                    self._layout_out = lay_out + self._layout_out      # sent again next round
                 return {}
-            seen = (seen | {t["key"] for t in add}) - {t["key"] for t in remove}
+            seen =(seen | {t["key"] for t in add}) - {t["key"] for t in remove}
             for k in keep:
                 self._share_keep.pop(k, None)
             if first:
@@ -10050,7 +10122,11 @@ class App:
             if others != self._share_projects:
                 self._share_projects = others
                 self._projects_cache = (0.0, [])
-            names = {p["name"] for p in self.projects(max_age=0)}
+            with self._layout_lock:
+                busy = bool(self._layout_out)       # changed here meanwhile: the next round brings it back
+            if not busy:
+                self._layout_apply(res.get("layout"))
+            names ={p["name"] for p in self.projects(max_age=0)}
             opened, closed = [], []
             for k, c in (res.get("closed") or {}).items():
                 s = mine.get(k)
@@ -10086,6 +10162,84 @@ class App:
             if first and any(k not in seen for k in self._share_tabs_mine()):
                 self._share_kick.set()
             return {"opened": opened, "closed": closed}
+
+    # project groups, group colours and the project order: the same on every device (SHARE_PY "layout")
+    def _layout_remotes(self) -> dict:
+        return {x["name"]: layout_key(x.get("remote")) for x in self.projects(max_age=10) if layout_key(x.get("remote"))}
+
+    def _layout_order(self, rm: dict) -> list:
+        out = []
+        for n in self.store.project_order():
+            if rm.get(n) and rm[n] not in out:
+                out.append(rm[n])
+        return out
+
+    def _layout_seed(self) -> list:
+        """This device's list, at 0: kept only where no device has set anything yet."""
+        rm, sp = self._layout_remotes(), self.store.data["projects"]
+        ch = [{"k": "g", "r": r, "v": (sp.get(n) or {}).get("group"), "at": 0}
+              for n, r in rm.items() if (sp.get(n) or {}).get("group")]
+        ch += [{"k": "c", "g": g, "v": c, "at": 0} for g, c in self.store.group_colors().items() if c]
+        o = self._layout_order(rm)
+        return ch + ([{"k": "o", "v": o, "at": 0}] if o else [])
+
+    def layout_changed(self, names=(), colors=(), order=False):
+        """A group / group colour / order change made here: on the server at the next share round (now)."""
+        if not self.share_on():
+            return
+        now, rm, ch = time.time(), self._layout_remotes(), []
+        for n in names:
+            if rm.get(n):
+                ch.append({"k": "g", "r": rm[n], "v": (self.store.data["projects"].get(n) or {}).get("group") or "", "at": now})
+        gc = self.store.group_colors()
+        ch += [{"k": "c", "g": g, "v": gc.get(g, ""), "at": now} for g in colors if g]
+        if order:
+            ch.append({"k": "o", "v": self._layout_order(rm), "at": now})
+        if ch:
+            with self._layout_lock:
+                self._layout_out += ch
+            self._share_kick.set()
+
+    def _layout_apply(self, lay) -> bool:
+        """The shared groups / colours / order → this device's list. True = something changed."""
+        if not isinstance(lay, dict):
+            return False
+        ps, changed = self.projects(max_age=0), False
+        groups = lay.get("groups") if isinstance(lay.get("groups"), dict) else {}
+        by = {}
+        for x in ps:
+            r = layout_key(x.get("remote"))
+            if r:
+                by.setdefault(r, []).append(x["name"])
+        with self.store.lock:
+            for r, names in by.items():
+                v = groups.get(r)
+                if not (isinstance(v, list) and v and isinstance(v[0], str)):
+                    continue
+                for n in names:
+                    rec = self.store.data["projects"].setdefault(n, {})
+                    if (rec.get("group") or "") != v[0][:40]:
+                        rec["group"], changed = v[0][:40], True
+            cols = {g: v[0] for g, v in (lay.get("colors") or {}).items()
+                    if isinstance(v, list) and v and isinstance(v[0], str) and re.fullmatch(r"#[0-9a-f]{6}", v[0])}
+            if isinstance(lay.get("colors"), dict) and cols != self.store.group_colors():
+                self.store.db.put("groupColors", cols)
+                changed = True
+            o = lay.get("order")
+            if isinstance(o, list) and o and isinstance(o[0], list):
+                want = []
+                for r in o[0]:
+                    want += [n for n in by.get(r, []) if n not in want]
+                cur = self.store.project_order()
+                new = want + [n for n in cur if n not in want]
+                if new != cur:
+                    self.store.db.put("projectOrder", new[:2000])
+                    changed = True
+            if changed:
+                self.store.save()
+        if changed:
+            self._projects_cache = (0.0, [])
+        return changed
 
     def share_loop(self):
         while not self._share_stop:
@@ -14254,16 +14408,21 @@ class Handler(BaseHTTPRequestHandler):
             app._project(parts[1])
             g = app.store.set_group(parts[1], self._body().get("group"))
             app.invalidate()
+            app.layout_changed(names=[parts[1]])
             return {"group": g}
         if route == ("POST", "groups") and parts[1:] == ["rename"]:
             b = self._body() or {}
+            old = " ".join(str(b.get("from") or "").split())
+            moved = [k for k, v in app.store.data["projects"].items() if isinstance(v, dict) and old and v.get("group") == old]
             n = app.store.rename_group(b.get("from"), b.get("to"))
             app.invalidate()
+            app.layout_changed(names=moved, colors=[old, " ".join(str(b.get("to") or "").split())])
             return {"moved": n}
         if route == ("POST", "groups") and parts[1:] == ["color"]:
             b = self._body() or {}
             c = app.store.set_group_color(b.get("group"), b.get("color"))
             app.invalidate()
+            app.layout_changed(colors=[" ".join(str(b.get("group") or "").split())])
             return {"color": c}
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
@@ -14517,6 +14676,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.server_ls((query.get("path") or [""])[0], (query.get("project") or [""])[0])
         if route == ("GET", "browse"):
             return app.browse((query.get("path") or [""])[0])
+        if route == ("GET", "lan-ip"):
+            return {"ips": [] if app.web else lan_ips()}       # the web version: the server's own network, useless
         if route == ("GET", "server-folders"):
             return {"folders": app.server_folders()}
         if route == ("POST", "add-project"):
@@ -14527,6 +14688,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "bad request")
             app.store.set_project_order(order)
             app.invalidate()
+            app.layout_changed(order=True)
             return {"ok": True}
         if route == ("GET", "git-summary"):
             return {"summary": app.git_summary((query.get("project") or [""])[0], (query.get("force") or ["0"])[0] == "1")}

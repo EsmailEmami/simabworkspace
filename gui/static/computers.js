@@ -785,6 +785,28 @@
   var netEl = document.getElementById('pc-net');
   if (netEl) { netEl.style.cursor = 'pointer'; netEl.addEventListener('click', function () { speedTest(); }); }
 
+  // this computer's address on the Wi-Fi / LAN (installed app): a phone on the same network opens IP:PORT
+  var lanEl = document.getElementById('lan-ip');
+  function pollLan() {
+    if (!lanEl || S.web || document.hidden) return;
+    api('GET', 'lan-ip').then(function (d) {
+      var ips = (d && d.ips) || [];
+      lanEl.classList.toggle('hidden', !ips.length);
+      lanEl.textContent = ips[0] || '';
+      lanEl.title = 'This computer on your Wi-Fi / local network' + (ips.length > 1 ? ' (also ' + ips.slice(1).join(', ') + ')' : '')
+        + '\nOn a phone on the same network open http://' + (ips[0] || '') + ':PORT'
+        + '\n(the app must listen on 0.0.0.0, not only 127.0.0.1)\nClick to copy';
+    }).catch(function () { /* next time */ });
+  }
+  if (lanEl) {
+    lanEl.addEventListener('click', function () {
+      var t = lanEl.textContent;
+      if (t && navigator.clipboard) navigator.clipboard.writeText(t).then(function () { toast('Copied ' + t); }, function () {});
+    });
+    setTimeout(pollLan, 2000);
+    setInterval(pollLan, 60000);
+  }
+
   var webNetAt = 0;
   function pollNet() {
     var lo = (S.projects || []).some(function (p) { return p.localOnly; });

@@ -122,6 +122,47 @@ class Devices(base.TmpHome):
         self.assertEqual(self.web.share_sync()["opened"], [])
         self.assertEqual(self.web.sessions, {})
 
+    def proj(self, app, name):
+        return next(p for p in app.projects(max_age=0) if p["name"] == name)
+
+    def test_groups_colours_and_order_are_the_same_on_every_device(self):
+        self.laptop.store.set_group("shop", "Work")           # set before sharing: the first round seeds it
+        self.laptop.share_sync()
+        self.web.share_sync()
+        self.assertEqual(self.proj(self.web, "shop")["group"], "Work")
+        # changed on the web: the laptop follows
+        self.web.store.set_group("blog", "Work")
+        self.web.store.set_group_color("Work", "#112233")
+        self.web.layout_changed(names=["blog"], colors=["Work"])
+        self.web.store.set_project_order(["far", "blog", "shop"])
+        self.web.layout_changed(order=True)
+        self.web.share_sync()
+        self.laptop.share_sync()
+        self.assertEqual(self.proj(self.laptop, "blog")["group"], "Work")
+        self.assertEqual(self.proj(self.laptop, "shop")["groupColor"], "#112233")
+        self.assertEqual([p["name"] for p in self.laptop.projects(max_age=0)], ["far", "blog", "shop"])
+        # ungrouped on the laptop: the web follows, and the web's older first list does not undo it
+        self.laptop.store.set_group("shop", "")
+        self.laptop.layout_changed(names=["shop"])
+        self.laptop.share_sync()
+        self.web.share_sync()
+        self.assertEqual(self.proj(self.web, "shop")["group"], "")
+
+    def test_the_same_folder_under_another_name_shares_its_group(self):
+        self.web.store.add_manual({"name": "shop-web", "remote": "/home/esi/shop/"})
+        self.web.share_sync()
+        self.web.store.set_group("shop-web", "Shops")
+        self.web.layout_changed(names=["shop-web"])
+        self.web.share_sync()
+        self.laptop.share_sync()
+        self.assertEqual(self.proj(self.laptop, "shop")["group"], "Shops")
+        self.assertEqual(sw.layout_key("~/shop"), sw.layout_key("/home/esi/shop/"))
+
+    def test_lan_address(self):
+        for ip in sw.lan_ips():
+            self.assertFalse(ip.startswith("127."))
+        self.assertEqual(self.web._layout_apply(None), False)
+
     def test_which_tabs_are_shared(self):
         k = sw.share_tab_key
         self.assertEqual(k({"kind": "chat", "where": "server", "resume": CONV, "project": "a"}), "chat:" + CONV)

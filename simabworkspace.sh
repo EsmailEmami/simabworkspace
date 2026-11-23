@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.13 2026-11-23  Projects can sit under groups in the sidebar (rename a group, drag order really saved); the app no longer fails with "Cannot reach the app" when a script loads slowly
 #    1.65.12 2026-11-23  Chat survives a shaky internet: a frozen link to the server is dropped and attached again within ~20 s, and a failed retry is tried again instead of ending the chat
 #    1.65.11 2026-11-23  Local only: a chat mounts the project folder before Claude starts, and says whether the link, your computer or the server is the problem; terminal Ctrl+C / Ctrl+V copy and paste without Shift
 #    1.65.10 2026-11-22  Share pages get a real design; deny list asks you instead of refusing; "onserver " runs a command on the server
@@ -397,7 +398,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.12"
+VERSION="1.65.13"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

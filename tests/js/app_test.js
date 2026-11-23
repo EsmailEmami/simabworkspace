@@ -112,6 +112,10 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/pc/webruns/')) res = global.fakeWebRuns || { runs: [] };
   else if (url.startsWith('/api/color/')) res = { color: body.color };
   else if (url.startsWith('/api/title/')) res = { title: body.title };
+  else if (url.startsWith('/api/group/')) {
+    res = { group: (body.group || '').trim() };
+    state.projects.forEach((p) => { if (p.name === decodeURIComponent(url.slice(11))) p.group = res.group; });
+  }
   else if (url.startsWith('/api/starter/')) res = { starter: (body.text || '').trim() };
   else if (url.startsWith('/api/git-summary')) res = { summary: { cheshmeh: { changes: 3, ahead: 1, behind: 2, conflicts: 0, repos: 2, branch: 'main', branches: 1, repo: null, where: 'local' }, shop: { changes: 0, ahead: 0, behind: 0, conflicts: 0, repos: 1, branch: 'dev', branches: 1, repo: '', where: 'server' } } };
   else if (url === '/api/connection') res = { user: 'esi', host: 'h', port: '225', key: '', keys: [{ path: '/home/me/.ssh/id_ed25519', type: 'ed25519', comment: 'me' }], autostart: true, daemon: true };
@@ -237,13 +241,21 @@ const q = (sel, root) => (root || document.body).querySelectorAll(sel);
 const byText = (sel, text) => q(sel).find((e) => e.textContent.trim() === text);
 
 require(path.join(ROOT, 'gui/static/sounds.js'));
+// the page is still loading its other scripts (a slow files.js): app.js must not start before they ran
+let domReady = null;
+document.readyState = 'loading';
+document.addEventListener = (t, fn) => { if (t === 'DOMContentLoaded') domReady = fn; };
 require(path.join(ROOT, 'gui/static/app.js'));
-global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
-global.SW && require(path.join(ROOT, 'gui/static/files.js'));
-global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
-localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
-global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
-global.SW && require(path.join(ROOT, 'gui/static/prompts.js'));
+function loadRest() {
+  global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
+  global.SW && require(path.join(ROOT, 'gui/static/files.js'));
+  global.SW && require(path.join(ROOT, 'gui/static/tasks.js'));
+  localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
+  global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
+  global.SW && require(path.join(ROOT, 'gui/static/prompts.js'));
+  document.readyState = 'interactive';
+  domReady();
+}
 const freshMarks = () => global.SWComputers && global.SWComputers._fresh(true);      // as after the first answer
 
 const tests = {
@@ -1264,6 +1276,32 @@ const tests = {
     assert.ok(q('.proj-head').some((x) => /name: shop/.test(x.getAttribute('title') || x.title || '')), 'the real name in the tooltip');
     delete shop.title;
     global.SW.renderProjects();
+  },
+
+  async 'project groups: ⋯ → Group… puts it under a folding header; the header folds'() {
+    const SW = global.SW;
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.act.more')[1].click();                             // shop's ⋯
+    q('button').find((b) => b.textContent.trim().indexOf('Group…') === 0).click(); await settle();
+    const modal = q('.modal').pop();
+    modal.querySelector('input').value = 'Clients';
+    q('.btn.primary', modal).pop().click(); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/shop').pop().body, { group: 'Clients' });
+    assert.strictEqual(SW.project('shop').group, 'Clients');
+    const head = q('.pgroup-head')[0];
+    assert.ok(head && /Clients/.test(head.textContent), 'group header shown');
+    assert.strictEqual(q('.proj', q('.pgroup')[0]).length, 1, 'shop sits in the group');
+    assert.strictEqual(q('.proj').length, 2, 'cheshmeh stays, without a group');
+    head.click(); await settle();
+    assert.strictEqual(q('.proj').length, 1, 'folded group hides its projects');
+    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-groups-closed')), ['Clients']);
+    q('.pgroup-head')[0].click(); await settle();
+    assert.strictEqual(q('.proj').length, 2);
+    localStorage.setItem('sw-groups-closed', '[]');
+    state.projects.forEach((p) => { delete p.group; });
+    delete SW.project('shop').group;
+    SW.renderProjects();
+    document.body.querySelector('#modal-root').replaceChildren();
   },
 
   async 'closing a working chat: close only the tab, or stop it'() {
@@ -2293,6 +2331,10 @@ const tests = {
 
 (async () => {
   let failed = 0;
+  await settle();
+  assert.ok(domReady, 'app.js waits for DOMContentLoaded');
+  assert.ok(!calls.some((c) => /state/.test(c.url)), 'app.js asked /api/state before files.js had loaded');
+  loadRest();
   for (const [name, fn] of Object.entries(tests)) {
     try { await fn(); console.log('ok   ' + name); } catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String(e.stack || e).split('\n').slice(0, 5).join('\n     ')); }
   }

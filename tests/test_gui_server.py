@@ -96,6 +96,23 @@ class StoreTests(TmpHome):
         with self.assertRaises(sw.ApiError):
             self.store.set_starter("p", 5)
 
+    def test_project_group(self):
+        # many projects: each can sit under a sidebar group; renaming a group moves all of its projects
+        self.assertEqual(self.store.set_group("p", "  Client   work "), "Client work")
+        self.store.set_group("q", "Client work")
+        self.store.set_group("r", "Mine")
+        ps = sw.merge_projects([], [{"name": n, "local": "/tmp", "remote": ""} for n in "pqrs"], self.store.data["projects"])
+        self.assertEqual({x["name"]: x["group"] for x in ps}, {"p": "Client work", "q": "Client work", "r": "Mine", "s": ""})
+        self.assertEqual(self.store.rename_group("Client work", "Clients"), 2)
+        self.assertEqual(self.store.data["projects"]["q"]["group"], "Clients")
+        self.assertEqual(self.store.rename_group("Mine", ""), 1)          # Ungroup
+        self.assertEqual(self.store.data["projects"]["r"]["group"], "")
+        self.assertEqual(self.store.set_group("p", None), "")
+        with self.assertRaises(sw.ApiError):
+            self.store.set_group("p", "x" * 41)
+        with self.assertRaises(sw.ApiError):
+            self.store.rename_group("", "a")
+
     def test_project_title(self):
         # the user can rename a project in the list; its real name (sync session, tabs) stays
         self.assertEqual(self.store.set_title("p", "  My   shop فروشگاه "), "My shop فروشگاه")
@@ -711,6 +728,21 @@ class HttpServer(TmpHome):
             return r.status, json.loads(raw)
         except ValueError:
             return r.status, raw
+
+    def test_project_group_and_order_routes(self):
+        self.store.add_manual({"name": "a", "local": "/tmp", "remote": ""})
+        self.store.add_manual({"name": "b", "local": "/tmp", "remote": ""})
+        st, d = self.req("POST", "/api/group/a", {"group": "Work"})
+        self.assertEqual((st, d), (200, {"group": "Work"}))
+        self.assertEqual(self.req("POST", "/api/group/nope", {"group": "Work"})[0], 404)
+        st, d = self.req("POST", "/api/groups/rename", {"from": "Work", "to": "Jobs"})
+        self.assertEqual((st, d), (200, {"moved": 1}))
+        # the drag order is really saved (the route never matched before 1.65.13)
+        st, d = self.req("POST", "/api/projects/order", {"order": ["b", "a"]})
+        self.assertEqual((st, d), (200, {"ok": True}))
+        self.assertEqual(self.store.project_order(), ["b", "a"])
+        ps = {p["name"]: p["group"] for p in self.req("GET", "/api/projects")[1]["projects"]}
+        self.assertEqual(ps, {"a": "Jobs", "b": ""})
 
     def test_browser_errors_go_to_the_log(self):
         lines = []
@@ -2449,7 +2481,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.65.12"', text)
+        self.assertIn('VERSION="1.65.13"', text)
 
 
 if __name__ == "__main__":

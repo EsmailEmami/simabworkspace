@@ -2,7 +2,7 @@
    Network first (a new version is used at once); the saved copy only when offline.
    Never touches /api or /ws. */
 'use strict';
-var CACHE = 'simab-shell-10';
+var CACHE = 'simab-shell-11';
 var SHELL = ['/', '/app.css', '/voice.js', '/sounds.js', '/qr.js', '/app.js', '/chat.js', '/files.js', '/tasks.js', '/computers.js', '/prompts.js', '/icon.svg', '/manifest.webmanifest', '/vendor/xterm.css', '/vendor/xterm.js',
   '/vendor/addon-fit.js', '/vendor/addon-web-links.js', '/vendor/addon-search.js', '/vendor/addon-unicode11.js', '/vendor/addon-webgl.js'];
 
@@ -27,7 +27,7 @@ self.addEventListener('fetch', function (e) {
     }
     return res;
   }).catch(function () {
-    return caches.match(req).then(function (hit) { return hit || caches.match('/'); });
+    return caches.match(req).then(function (hit) { return hit || (req.mode === 'navigate' ? caches.match('/') : Response.error()); });
   }));
 });
 

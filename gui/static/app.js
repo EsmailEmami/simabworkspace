@@ -2373,6 +2373,7 @@
       { label: 'Port forwarding…', disabled: !r, k: tunnelCount(p.name), action: function () { tunnelsDialog(p); } },
       { label: 'Share a port on your domain…', k: shareCount(p.name), action: function () { shareAddDialog(p.name); } },
       { label: 'Rename…', action: function () { renameProject(p); } },
+      { label: 'Group…', k: p.group || '', action: function () { groupDialog(p); } },
       { label: 'Colour…', action: function () { colorDialog(p); } },
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
@@ -3401,9 +3402,88 @@
         ' — from the server, from this machine, or a server folder.'));
       return;
     }
-    var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0; });
-    root.replaceChildren.apply(root, list.map(projEl).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
-    setupProjDrag(root);
+    var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0 || (p.group || '').toLowerCase().indexOf(f) >= 0; });
+    root.replaceChildren.apply(root, projGroups(list, !!f).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
+    if (!root._drag) { root._drag = true; setupProjDrag(root); }
+  }
+
+  // ---- project groups: projects without a group first, then one folding header per group
+  // (groups in the order their first project has; drag a project onto a group to move it there)
+  function groupNames() {
+    var out = [];
+    S.projects.forEach(function (p) { if (p.group && out.indexOf(p.group) < 0) out.push(p.group); });
+    return out;
+  }
+  function closedGroups() {
+    try { return new Set(JSON.parse(localStorage.getItem('sw-groups-closed') || '[]')); } catch (e) { return new Set(); }
+  }
+  function projGroups(list, filtering) {
+    var by = {}, names = [], out = [];
+    list.forEach(function (p) {
+      var g = p.group || '';
+      if (!by[g]) { by[g] = []; if (g) names.push(g); }
+      by[g].push(p);
+    });
+    if (by['']) out = out.concat(by[''].map(projEl));
+    var closed = closedGroups();
+    names.forEach(function (g) {
+      var shut = !filtering && closed.has(g);
+      var items = by[g];
+      var busy = items.filter(function (p) { return S.tabs.some(function (t) { return t.info.spec.project === p.name && !t.gone; }); }).length;
+      var more = h('button', { class: 'icon-btn', title: 'Group', onclick: function (e) { e.stopPropagation(); groupMenu(g, more); } }, '⋯');
+      var head = h('div', { class: 'pgroup-head', title: shut ? 'Show the projects of ' + g : 'Hide the projects of ' + g, onclick: function () {
+        var c = closedGroups();
+        if (c.has(g)) c.delete(g); else c.add(g);
+        localStorage.setItem('sw-groups-closed', JSON.stringify(Array.from(c)));
+        renderProjects();
+      } }, h('span', { class: 'caret' }, shut ? '▸' : '▾'), h('span', { class: 'pgroup-name', dir: 'auto' }, g),
+        busy ? h('span', { class: 'count', title: plural(busy, 'project') + ' with open tabs' }, '●' + busy) : null,
+        h('span', { class: 'count' }, String(items.length)), more);
+      head.dataset.group = g;
+      out.push(h('div', { class: 'pgroup' + (shut ? ' shut' : '') }, head, shut ? null : h('div', { class: 'pgroup-body' }, items.map(projEl))));
+    });
+    return out;
+  }
+  function setGroup(p, g) {
+    return api('POST', 'group/' + encodeURIComponent(p.name), { group: g }).then(function (d) {
+      p.group = d.group;
+      renderProjects();
+      refreshProjects();
+    }).catch(fail);
+  }
+  function groupDialog(p) {
+    var gs = groupNames();
+    var inp = h('input', { class: 'inp', placeholder: 'New group name', maxlength: 40 });
+    function pick(g) { md.close(); setGroup(p, g); }
+    function add() { if (inp.value.trim()) pick(inp.value); }
+    inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') add(); });
+    var md = openModal({
+      title: 'Group — ' + pTitle(p), size: 'sm',
+      body: [gs.length ? h('div', { class: 'pgroup-pick' }, gs.map(function (g) {
+        return h('button', { class: 'btn' + (g === p.group ? ' primary' : ''), dir: 'auto', onclick: function () { pick(g); } }, g);
+      })) : null,
+        h('div', { class: 'row', style: 'gap:6px;margin-top:10px' },
+          inp, h('button', { class: 'btn primary', onclick: add }, 'Add'))].filter(Boolean),
+      foot: [p.group ? h('button', { class: 'btn', onclick: function () { pick(''); } }, 'No group') : null, h('span', { class: 'grow' }),
+        h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel')].filter(Boolean)
+    });
+    setTimeout(function () { inp.focus(); }, 40);
+  }
+  function renameGroup(g, to) {
+    return api('POST', 'groups/rename', { from: g, to: to }).then(function () {
+      var c = closedGroups();
+      if (c.delete(g) && to) c.add(to);
+      localStorage.setItem('sw-groups-closed', JSON.stringify(Array.from(c)));
+      S.projects.forEach(function (p) { if (p.group === g) p.group = to; });
+      renderProjects();
+      refreshProjects();
+    }).catch(fail);
+  }
+  function groupMenu(g, anchor) {
+    menuAt(anchor, [
+      { label: 'Rename group…', action: function () { promptDlg('Rename group “' + g + '”', g).then(function (v) { if (v !== null && v.trim()) renameGroup(g, v); }); } },
+      { label: 'Ungroup', action: function () { renameGroup(g, ''); } }
+    ]);
   }
 
   var _dragProjName = null;
@@ -3418,46 +3498,51 @@
     });
     root.addEventListener('dragend', function (e) {
       _dragProjName = null;
-      root.querySelectorAll('.proj').forEach(function (el) {
-        el.classList.remove('dragging', 'drop-before', 'drop-after');
+      root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) {
+        el.classList.remove('dragging', 'drop-before', 'drop-after', 'drop-in');
       });
     });
     root.addEventListener('dragover', function (e) {
       if (!_dragProjName) return;
-      var el = e.target.closest('.proj');
-      if (!el || el.dataset.proj === _dragProjName) return;
+      var gh = e.target.closest('.pgroup-head');
+      var el = gh ? null : e.target.closest('.proj');
+      if (!gh && (!el || el.dataset.proj === _dragProjName)) return;
       e.preventDefault();
+      root.querySelectorAll('.proj, .pgroup-head').forEach(function (x) { x.classList.remove('drop-before', 'drop-after', 'drop-in'); });
+      if (gh) { gh.classList.add('drop-in'); return; }
       var r = el.getBoundingClientRect();
       var before = e.clientY < r.top + r.height / 2;
-      root.querySelectorAll('.proj').forEach(function (x) { x.classList.remove('drop-before', 'drop-after'); });
       el.classList.toggle('drop-before', before);
       el.classList.toggle('drop-after', !before);
     });
     root.addEventListener('dragleave', function (e) {
       if (!e.relatedTarget || !root.contains(e.relatedTarget)) {
-        root.querySelectorAll('.proj').forEach(function (el) { el.classList.remove('drop-before', 'drop-after'); });
+        root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'drop-in'); });
       }
     });
     root.addEventListener('drop', function (e) {
       if (!_dragProjName) return;
-      var target = e.target.closest('.proj');
-      if (!target) return;
+      var gh = e.target.closest('.pgroup-head');
+      var target = gh ? null : e.target.closest('.proj');
+      if (!gh && !target) return;
       e.preventDefault();
-      var before = target.classList.contains('drop-before');
-      root.querySelectorAll('.proj').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging'); });
-      var names = Array.from(root.querySelectorAll('.proj')).map(function (el) { return el.dataset.proj; }).filter(Boolean);
-      var from = names.indexOf(_dragProjName);
-      var to = names.indexOf(target.dataset.proj);
-      if (from < 0 || to < 0 || from === to) return;
-      names.splice(from, 1);
-      names.splice(before ? to : to + (from < to ? 0 : 1), 0, _dragProjName);
-      // reorder S.projects immediately (optimistic)
-      var byName = {};
-      S.projects.forEach(function (p) { byName[p.name] = p; });
-      S.projects = names.map(function (n) { return byName[n]; }).filter(Boolean);
-      S.projects = S.projects.concat(Object.values(byName).filter(function (p) { return names.indexOf(p.name) < 0; }));
+      var before = target && target.classList.contains('drop-before');
+      root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging', 'drop-in'); });
+      var moved = S.projects.filter(function (p) { return p.name === _dragProjName; })[0];
+      if (!moved) return;
+      if (gh) { if ((moved.group || '') !== gh.dataset.group) setGroup(moved, gh.dataset.group); return; }
+      var to = S.projects.filter(function (p) { return p.name === target.dataset.proj; })[0];
+      if (!to || to === moved) return;
+      // reorder the whole list (projects of folded groups keep their place), optimistic
+      var rest = S.projects.filter(function (p) { return p !== moved; });
+      var i = rest.indexOf(to);
+      rest.splice(before ? i : i + 1, 0, moved);
+      S.projects = rest;
+      var names = rest.map(function (p) { return p.name; });
+      var regroup = (moved.group || '') !== (to.group || '');
+      if (regroup) moved.group = to.group || '';
       renderProjects();
-      api('PUT', 'projects/order', { order: names }).catch(fail);
+      api('POST', 'projects/order', { order: names }).then(function () { if (regroup) setGroup(moved, moved.group); }).catch(fail);
     });
   }
 
@@ -5386,5 +5471,11 @@
   var fonts = document.fonts && document.fonts.load
     ? Promise.all(['13px "JetBrains Mono"', 'bold 13px "JetBrains Mono"', '13px Inter', '13px Vazirmatn'].map(function (f) { return document.fonts.load(f).catch(function () {}); }))
     : Promise.resolve();
-  fonts.then(boot);
+  // start only after every <script> has run: while the page waits for a slow chat.js / files.js the answer to
+  // /api/state can already come back, and its tabs then need window.SWChat / SWFiles
+  function scriptsLoaded() {
+    return document.readyState !== 'loading' ? Promise.resolve()
+      : new Promise(function (res) { document.addEventListener('DOMContentLoaded', res, { once: true }); });
+  }
+  Promise.all([fonts, scriptsLoaded()]).then(boot);
 })();

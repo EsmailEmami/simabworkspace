@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.12"
+VERSION = "1.65.13"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -570,6 +570,31 @@ class Store:
             self.save()
         return title
 
+    def set_group(self, project: str, group) -> str:
+        """The sidebar group the project is listed under ("" = no group)."""
+        group = " ".join(clean_str(group, 200, "group").split())
+        if len(group) > 40:
+            raise ApiError(400, "the group name is too long (40 characters at most)")
+        with self.lock:
+            self.data["projects"].setdefault(project, {})["group"] = group
+            self.save()
+        return group
+
+    def rename_group(self, old, new) -> int:
+        """Rename a group (new "" = ungroup its projects); returns how many projects moved."""
+        old = " ".join(clean_str(old, 200, "group", required=True).split())
+        new = " ".join(clean_str(new, 200, "group").split())
+        if len(new) > 40:
+            raise ApiError(400, "the group name is too long (40 characters at most)")
+        n = 0
+        with self.lock:
+            for v in self.data["projects"].values():
+                if isinstance(v, dict) and v.get("group") == old:
+                    v["group"] = new
+                    n += 1
+            self.save()
+        return n
+
     def set_starter(self, project: str, text) -> str:
         """The text every new Claude chat of this project starts with (the user adds their request)."""
         if text is None:
@@ -618,7 +643,7 @@ class Store:
 
     def set_project_order(self, order: list) -> None:
         with self.lock:
-            self.db.put("projectOrder", [str(n) for n in order if n][:200])
+            self.db.put("projectOrder", [str(n) for n in order if n][:2000])
 
     def set_last_tabs(self, specs: list):
         with self.lock:
@@ -876,6 +901,7 @@ def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
         p["color"] = (store_projects.get(p["name"]) or {}).get("color") or ""
         p["starter"] = (store_projects.get(p["name"]) or {}).get("starter") or ""
         p["title"] = (store_projects.get(p["name"]) or {}).get("title") or ""
+        p["group"] = (store_projects.get(p["name"]) or {}).get("group") or ""
         lo = (store_projects.get(p["name"]) or {}).get("localOnly") or ""
         if lo and p.get("source") == "manual":
             p["localOnly"] = lo                 # id of the computer it lives on (files never on the server)
@@ -14187,6 +14213,16 @@ class Handler(BaseHTTPRequestHandler):
             t = app.store.set_title(parts[1], self._body().get("title"))
             app.invalidate()
             return {"title": t}
+        if route == ("POST", "group") and len(parts) == 2:
+            app._project(parts[1])
+            g = app.store.set_group(parts[1], self._body().get("group"))
+            app.invalidate()
+            return {"group": g}
+        if route == ("POST", "groups") and parts[1:] == ["rename"]:
+            b = self._body() or {}
+            n = app.store.rename_group(b.get("from"), b.get("to"))
+            app.invalidate()
+            return {"moved": n}
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
             app.invalidate()
@@ -14443,7 +14479,7 @@ class Handler(BaseHTTPRequestHandler):
             return {"folders": app.server_folders()}
         if route == ("POST", "add-project"):
             return app.add_project(self._body())
-        if route == ("PUT", "projects/order"):
+        if route == ("POST", "projects") and parts[1:] == ["order"]:
             order = (self._body() or {}).get("order")
             if not isinstance(order, list):
                 raise ApiError(400, "bad request")

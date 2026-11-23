@@ -1331,10 +1331,22 @@ const tests = {
     assert.ok(tabOf('Later'), 'the new empty group has its tab');
     assert.strictEqual(tabOf('Later').querySelector('.pg-n').textContent, '0');
     assert.strictEqual(localStorage.getItem('sw-group-tab'), 'Later');
-    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-new-groups')), ['Later']);
+    assert.ok(JSON.parse(localStorage.getItem('sw-new-groups')).includes('Later'), 'kept in this browser');
     tabOf('All').click(); await settle();
     await drag('shop', tabOf('Later'));
-    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-new-groups')), [], 'a project in it: no longer kept apart');
+    assert.strictEqual(SW.project('shop').group, 'Later');
+    // shop was the last one of Clients: the group stays (empty), it never vanishes by itself
+    assert.ok(tabOf('Clients'), 'Clients is still there after its last project moved out');
+    assert.strictEqual(tabOf('Clients').querySelector('.pg-n').textContent, '0');
+    // a refresh that comes back with an older list (no group yet) does not make Later vanish
+    const was = SW.project('shop').group;
+    delete SW.project('shop').group; SW.renderProjects();
+    assert.ok(tabOf('Later'), 'Later survives a stale list');
+    SW.project('shop').group = was;
+    // Ungroup removes a group for good
+    tabOf('Clients').dispatch('contextmenu', { preventDefault() {} }); await settle();
+    q('button').find((b) => b.textContent.trim() === 'Ungroup').click(); await settle();
+    assert.ok(!tabOf('Clients'), 'Ungroup: gone');
     localStorage.setItem('sw-group-tab', ''); localStorage.setItem('sw-new-groups', '[]');
     state.projects.forEach((p) => { delete p.group; });
     delete SW.project(other).group;

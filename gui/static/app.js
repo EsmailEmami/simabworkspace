@@ -3431,14 +3431,14 @@
     newGroups().forEach(function (g) { if (out.indexOf(g) < 0) out.push(g); });
     return out;
   }
-  // a group made with + has no project yet: kept in this browser until a project is put in it
+  // groups this browser knows besides the ones its projects name (made with +, or emptied by a move)
   function newGroups() {
     try { var v = JSON.parse(localStorage.getItem('sw-new-groups') || '[]'); return Array.isArray(v) ? v.filter(function (g) { return typeof g === 'string' && g; }) : []; } catch (e) { return []; }
   }
+  // kept until Ungroup / rename, even while it has projects: a refresh that comes back with an older list
+  // (or the last project moved out) never makes the group vanish
   function setNewGroups(list) {
-    var used = {};
-    S.projects.forEach(function (p) { if (p.group) used[p.group] = 1; });
-    localStorage.setItem('sw-new-groups', JSON.stringify(list.filter(function (g, i) { return g && !used[g] && list.indexOf(g) === i; })));
+    localStorage.setItem('sw-new-groups', JSON.stringify(list.filter(function (g, i) { return g && list.indexOf(g) === i; })));
   }
   function newGroup(p) {                              // + : a new group (with the project dropped on it)
     promptDlg('New group', '').then(function (v) {
@@ -3477,9 +3477,11 @@
     return [tab('', 'All', S.projects.length)].concat(gs.map(function (g) { return tab(g, g, count[g] || 0); }), [add]);
   }
   function setGroup(p, g) {
+    var old = p.group || '';
     return api('POST', 'group/' + encodeURIComponent(p.name), { group: g }).then(function (d) {
+      // a group never vanishes because its last project moved out: only Ungroup removes it
+      if (old && old !== d.group) setNewGroups(newGroups().concat([old]));
       p.group = d.group;
-      setNewGroups(newGroups());
       renderProjects();
       refreshProjects();
     }).catch(fail);

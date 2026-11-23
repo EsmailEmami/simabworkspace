@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.16 2026-11-23  A project group never vanishes by itself (last project moved out, or a refresh with an older list); only Ungroup removes it
 #    1.65.15 2026-11-23  Project groups: drag a project onto a group tab, onto All (out of its group) or onto + (a new group); + at the bottom of the strip makes a group
 #    1.65.14 2026-11-23  Windows: a script whose download broke is fetched again (no more "reading 'FilesTab'"); project groups as vertical tabs with a colour each; Claude's "API Error" shown once with a plain reason and Retry
 #    1.65.13 2026-11-23  Projects can sit under groups in the sidebar (rename a group, drag order really saved); the app no longer fails with "Cannot reach the app" when a script loads slowly
@@ -400,7 +401,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.15"
+VERSION="1.65.16"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -3,6 +3,7 @@ The relay runs here for real: `sh -c` stands in for ssh."""
 import json
 import os
 import shlex
+import signal
 import sys
 import tempfile
 import time
@@ -133,6 +134,46 @@ class ChatRelay(unittest.TestCase):
         s.kill()
         self.assertTrue(wait_for(lambda: not alive(pid)))
         self.assertTrue(wait_for(lambda: not (self.home / ".cache/simabworkspace/chats/0123456789abcdef").exists()))
+
+    def test_frozen_link_is_dropped_and_attached_again(self):
+        # bad internet: the SSH link stays open but nothing comes through any more
+        fast = mock.patch.object(sw, "CHAT_RELAY_PY", sw.CHAT_RELAY_PY.replace("HB = 5\n", "HB = 0.3\n"))
+        fast.start()
+        self.addCleanup(fast.stop)
+        s = self.make("0123456789abcdef")
+        self.addCleanup(s.kill, True)
+        s.LINK_DEAD = 2
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        self.assertTrue(wait_for(lambda: s._hb))                     # the relay beats while quiet
+        s.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: "step1" in self.texts(s)))
+        os.kill(s.proc.pid, signal.SIGSTOP)                         # frozen, not closed
+        self.assertTrue(wait_for(lambda: any(e.get("type") == "_reconnect" for e in s.events)))
+        self.assertTrue(wait_for(lambda: "result" in [e.get("type") for e in s.events]))
+        self.assertEqual(self.texts(s), ["step1", "step2"])
+        self.assertEqual(len(self.claude_pids()), 1)
+
+    def test_a_failed_reconnect_is_tried_again(self):
+        # the line is still down on the first try: the chat must not give up
+        s = self.make("0123456789abcdef")
+        self.addCleanup(s.kill, True)
+        real, fails = s.built["make_argv"], [1]
+
+        def flaky(mode, model, resume, effort="", relay=None):
+            if relay and relay[0] == "attach" and fails[0]:
+                fails[0] -= 1
+                return ["sh", "-c", "exit 255"]
+            return real(mode, model, resume, effort, relay=relay)
+        s.built["make_argv"] = flaky
+        self.assertTrue(wait_for(lambda: s.init is not None))
+        s.handle({"t": "send", "content": "hi"})
+        self.assertTrue(wait_for(lambda: "step1" in self.texts(s)))
+        s.proc.kill()
+        self.assertTrue(wait_for(lambda: "result" in [e.get("type") for e in s.events]))
+        self.assertEqual(fails[0], 0)
+        self.assertIsNone(s.exit_code)
+        self.assertFalse(any(e.get("type") == "_exit" for e in s.events))
+        self.assertEqual(self.texts(s), ["step1", "step2"])
 
     def test_app_restart_attaches_to_the_running_claude(self):
         s = self.make("fedcba9876543210")

@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.11"
+VERSION = "1.65.12"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -2011,6 +2011,7 @@ def touch(n):
             os.utime(P(n), None)
     except OSError:
         pass
+HB = 5
 def say(o):
     sys.stdout.buffer.write((json.dumps(o) + "\n").encode())
     sys.stdout.buffer.flush()
@@ -2230,13 +2231,17 @@ if state != "replay":
 
 f = open(P("out.log"), "rb")
 f.seek(off)
-beat = 0
+beat = sent = 0
 while True:
     b = f.read(65536)
     if b:
         sys.stdout.buffer.write(b)
         sys.stdout.buffer.flush()
+        sent = time.time()
         continue
+    if time.time() - sent > HB:          # a sign of life: the app drops a link that stays silent
+        say({"type": "_sw_relay", "state": "hb"})
+        sent = time.time()
     if not pid_alive():
         time.sleep(0.2)
         b = f.read()
@@ -2822,6 +2827,7 @@ class ChatSession:
         if self.relay_key:
             self.spec["relay"] = self.relay_key
         self.relay_off = -1 if built.get("relay_restored") else 0    # bytes of Claude's output read so far
+        self._hb, self._rx_at = False, time.time()       # relay heartbeat seen / last byte from it
         self.relay_on = False         # this connection goes through the relay
         self.linking = False          # connecting to the relay; not known yet whether Claude still works
         self.relay_exit = None        # Claude's exit code, reported by the relay
@@ -2869,6 +2875,7 @@ class ChatSession:
             again = how == "attach"
             self.proc, self.exit_code = proc, None
             self.relay_on, self.relay_exit = False, None
+            self._hb, self._rx_at = False, time.time()
             self.linking = bool(self.relay_key)
             if not again:
                 self.busy = False
@@ -2878,7 +2885,23 @@ class ChatSession:
                 self._cost_seen = 0.0
         threading.Thread(target=self._read_out, args=(proc,), daemon=True).start()
         threading.Thread(target=self._read_err, args=(proc,), daemon=True).start()
+        threading.Thread(target=self._watch_link, args=(proc,), daemon=True).start()
         self._request({"subtype": "initialize", "hooks": None})
+
+    LINK_DEAD = 20          # s without a byte (the relay beats every 5 s) → the link is dead
+
+    def _watch_link(self, proc):
+        """A bad internet can freeze the SSH link without closing it (ssh notices after a minute or
+        more). The relay beats every few seconds; when nothing arrives the link is dropped, and the
+        usual reconnect attaches again to the Claude still working on the server."""
+        while proc.poll() is None and self.proc is proc and not self.closed:
+            time.sleep(2)
+            if self._hb and self.relay_on and time.time() - self._rx_at > self.LINK_DEAD:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
 
     @property
     def alive(self) -> bool:
@@ -2904,6 +2927,9 @@ class ChatSession:
 
     def _relay_marker(self, ev: dict):
         st = ev.get("state")
+        if st == "hb":                            # the relay sends these: a silent link is a dead one
+            self._hb = True
+            return
         if st == "pending":                       # an unanswered question from before the app was reopened
             if isinstance(ev.get("event"), dict):
                 self._handle_event(ev["event"])
@@ -2940,6 +2966,7 @@ class ChatSession:
 
     def _read_out(self, proc):
         for raw in proc.stdout:
+            self._rx_at = time.time()
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -2969,7 +2996,8 @@ class ChatSession:
         with self.lock:
             if self.proc is not proc:
                 return
-            if self.relay_on and self.relay_exit is None and not self.closed:
+            # a failed try (the line is still down) does not end the chat: it is tried again
+            if (self.relay_on or self.reconnecting) and self.relay_exit is None and not self.closed:
                 # the connection dropped, Claude is still working on the server: attach again
                 self.reconnecting += 1
                 if self.reconnecting == 1:
@@ -3501,7 +3529,8 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
         script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "", pc)
         if relay:
             script = chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")
-        return ssh_base(c, multiplex=multiplex and not relay) + ["-T", c.target, script]
+        ext = ["-o", "ConnectTimeout=15"] if relay else []      # a dead line fails fast and is tried again
+        return ssh_base(c, multiplex=multiplex and not relay) + ext + ["-T", c.target, script]
 
     relay = spec.get("relay") if isinstance(spec.get("relay"), str) and RELAY_KEY_RE.fullmatch(spec.get("relay")) else ""
 

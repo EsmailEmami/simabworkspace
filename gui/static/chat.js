@@ -1078,6 +1078,11 @@
     var self = this;
     var msg = e.message || {};
     if (e.parent_tool_use_id) { this.subagent(e.parent_tool_use_id, msg); return; }
+    // Claude's own "API Error: …" stand-in answer: the result line under it says it once, with a hint and Retry
+    if (msg.model === '<synthetic>' && (msg.content || []).some(function (b) { return b.type === 'text' && /^API Error/.test(b.text || ''); })) {
+      (msg.content || []).forEach(function (b) { var d = self.takeDraft(msg.id, b.type); if (d) d.remove(); });
+      return;
+    }
     var g = this.msgGroup(msg.id);
     (msg.content || []).forEach(function (b) {
       var final = self.renderBlock(b);
@@ -1312,7 +1317,17 @@
     var err = e.is_error || (e.subtype && e.subtype !== 'success');
     var line = this.add(h('div', { class: 'result-line' + (err ? ' err' : '') }, (err ? '✗ ' : '✓ ') + parts.join(' · ')));
     if (speech.trim() && window.SWSound && window.speechSynthesis) line.append(this.readBtn(speech));
-    if (err && e.result) line.append(h('div', { dir: 'auto' }, String(e.result).slice(0, 500)));
+    if (err && e.result) {
+      var hint = apiErrorHint(String(e.result));
+      line.append(h('div', { dir: 'auto' }, String(e.result).slice(0, 500)));
+      if (hint) line.append(h('div', { class: 'rl-hint' }, hint));
+      var again = (this.history || [])[this.history.length - 1];
+      if (hint && again && !this.replaying) {
+        var rb = h('button', { class: 'rl-retry', title: 'Send your last message again' }, '↻ Retry');
+        rb.onclick = function () { rb.remove(); self.resend(again); };
+        line.append(rb);
+      }
+    }
     this.turnFilesLine();
     if (!Object.keys(this.perms).length) this.el.classList.remove('bell');      // nothing waits for you any more
     if (this.mark('done')) {
@@ -1321,6 +1336,30 @@
       SW.notify('Claude finished', this.info.title);
       if (SW.sound) SW.sound(err ? 'error' : 'done', this);
     }
+  };
+
+  // a short plain reason for Claude's "API Error: …" — whose link broke and what to do
+  function apiErrorHint(t) {
+    if (!/^API Error/.test(t)) return '';
+    if (/EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach|Connection error|fetch failed|socket hang up/i.test(t))
+      return 'The server could not reach Claude (its internet or DNS, not your computer). Claude retried for a while, then gave up. Nothing was lost — Retry when it is back.';
+    if (/overloaded|529/i.test(t)) return 'Claude is overloaded right now. Nothing was lost — Retry in a minute.';
+    if (/rate.?limit|429/i.test(t)) return 'Usage limit reached. Retry after it resets.';
+    if (/401|403|auth|log ?in/i.test(t)) return 'Claude on the server is not logged in — run "claude" in a terminal there and log in, then Retry.';
+    if (/5\d\d|timeout|timed out/i.test(t)) return 'Claude\'s service had a problem. Nothing was lost — Retry.';
+    return '';
+  }
+  P.apiErrorHint = apiErrorHint;
+
+  // send a message again (Retry after an API error); what you were typing stays in the box
+  P.resend = function (text) {
+    var keep = this.ta.value, att = this.attachments;
+    this.attachments = [];
+    this.ta.value = text;
+    this.submit();
+    if (this.ta.value !== text || keep) this.ta.value = keep;   // not sent (offline) and box was empty: your text waits there
+    this.attachments = att;
+    this.renderAttach();
   };
 
   // ▶ read: Claude's answer of this turn read aloud (text to speech); again = stop

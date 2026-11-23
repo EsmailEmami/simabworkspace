@@ -47,6 +47,30 @@ function newTab() {
 const byClass = (el, c) => el.querySelectorAll('.' + c);
 
 const tests = {
+  'API error: shown once (no duplicate synthetic answer), with a plain reason and a Retry that resends the last message'() {
+    const { tab, feed, ws } = newTab();
+    const sent = [];
+    ws.readyState = 1; ws.send = (m) => sent.push(JSON.parse(m));
+    feed({ t: 's', state: { alive: true }, events: [] });
+    tab.conn = 'online';
+    tab.ta.value = 'fix windows';
+    tab.submit();
+    feed({ t: 'e', e: { type: 'user', message: { role: 'user', content: 'fix windows' } } });
+    const err = "API Error: Can't reach the API server — check your internet or DNS (EAI_AGAIN)";
+    feed({ t: 'e', e: { type: 'assistant', message: { id: 'x1', model: '<synthetic>', content: [{ type: 'text', text: err }] } } });
+    feed({ t: 'e', e: { type: 'result', subtype: 'success', is_error: true, result: err, duration_ms: 1000 } });
+    assert.strictEqual(byClass(tab.msgs, 'amsg').length, 0, 'the synthetic answer is not shown');
+    const line = byClass(tab.msgs, 'result-line')[0];
+    assert.match(line.textContent, /server could not reach Claude/);
+    tab.ta.value = 'half typed';
+    sent.length = 0;
+    line.querySelector('.rl-retry').onclick();
+    assert.strictEqual(sent[0].t, 'send');
+    assert.strictEqual(sent[0].content[0].text, 'fix windows');
+    assert.strictEqual(tab.ta.value, 'half typed', 'what you were typing stays');
+    assert.strictEqual(tab.apiErrorHint('API Error: 529 overloaded').slice(0, 6), 'Claude');
+    assert.strictEqual(tab.apiErrorHint('some other failure'), '');
+  },
   'read aloud: ▶ read under an answer reads that turn (no tools, no code); again = stop; menu reads a message'() {
     const read = [];
     let stopped = 0, onEnd = null;

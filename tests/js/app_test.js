@@ -1278,7 +1278,7 @@ const tests = {
     global.SW.renderProjects();
   },
 
-  async 'project groups: ⋯ → Group… puts it under a folding header; the header folds'() {
+  async 'project groups: ⋯ → Group… a vertical tab beside the list, All by default'() {
     const SW = global.SW;
     document.body.querySelector('#modal-root').replaceChildren();
     q('.act.more')[1].click();                             // shop's ⋯
@@ -1288,16 +1288,16 @@ const tests = {
     q('.btn.primary', modal).pop().click(); await settle();
     assert.deepStrictEqual(calls.filter((c) => c.url === '/api/group/shop').pop().body, { group: 'Clients' });
     assert.strictEqual(SW.project('shop').group, 'Clients');
-    const head = q('.pgroup-head')[0];
-    assert.ok(head && /Clients/.test(head.textContent), 'group header shown');
-    assert.strictEqual(q('.proj', q('.pgroup')[0]).length, 1, 'shop sits in the group');
-    assert.strictEqual(q('.proj').length, 2, 'cheshmeh stays, without a group');
-    head.click(); await settle();
-    assert.strictEqual(q('.proj').length, 1, 'folded group hides its projects');
-    assert.deepStrictEqual(JSON.parse(localStorage.getItem('sw-groups-closed')), ['Clients']);
-    q('.pgroup-head')[0].click(); await settle();
+    const tabs = q('.pg-tab');
+    assert.deepStrictEqual(tabs.map((t) => t.querySelector('.pg-label').textContent), ['All', 'Clients'], 'All first, then one vertical tab per group');
+    assert.ok(tabs[0].classList.contains('on'), 'All is the default tab');
+    assert.strictEqual(q('.proj').length, 2, 'All shows every project');
+    assert.ok(/--gc:#/.test(tabs[1].getAttribute ? tabs[1].getAttribute('style') || tabs[1].style.cssText : tabs[1].style.cssText), 'the group has its own colour');
+    tabs[1].click(); await settle();
+    assert.strictEqual(localStorage.getItem('sw-group-tab'), 'Clients');
+    assert.deepStrictEqual(q('.proj').map((x) => x.dataset.proj), ['shop'], 'a group tab shows only its projects');
+    q('.pg-tab')[0].click(); await settle();
     assert.strictEqual(q('.proj').length, 2);
-    localStorage.setItem('sw-groups-closed', '[]');
     state.projects.forEach((p) => { delete p.group; });
     delete SW.project('shop').group;
     SW.renderProjects();
@@ -2326,7 +2326,28 @@ const tests = {
     assert.strictEqual(tab.keyFilter(key('KeyV')), false, 'Ctrl+V: the browser pastes');
     assert.strictEqual(tab.keyFilter(key('KeyV', { shiftKey: true })), false);
     assert.strictEqual(tab.keyFilter(key('KeyC', { altKey: true })), true, 'Ctrl+Alt+C goes to the terminal');
-  }
+  },
+  async 'a script whose download broke is fetched again before the app starts'() {
+    const keep = global.SWFiles, body = document.body, add = body.appendChild, asked = [];
+    global.SWFiles = undefined;
+    body.appendChild = function (el) {
+      if (el.tagName && /script/i.test(el.tagName)) {
+        asked.push(el.src);
+        if (asked.length === 2) global.SWFiles = keep;            // the second try gets through
+        setTimeout(() => el.onload && el.onload(), 0);
+        return el;
+      }
+      return add.call(this, el);
+    };
+    try {
+      assert.deepStrictEqual(await global.SW._missingParts(3), []);
+      assert.strictEqual(asked.length, 2);
+      assert.ok(/^files\.js\?r=\d+$/.test(asked[0]), asked[0]);
+      global.SWFiles = undefined;
+      assert.deepStrictEqual(await global.SW._missingParts(1), ['files.js']);    // gives up: said by name
+    } finally { body.appendChild = add; global.SWFiles = keep; }
+  },
+
 };
 
 (async () => {

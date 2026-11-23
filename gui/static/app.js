@@ -3395,6 +3395,7 @@
     if (!root) return;
     var f = S.filter.trim().toLowerCase();
     if (!S.projects.length) {
+      root.classList.remove('grouped');
       root.replaceChildren(S.web
         ? h('div', { class: 'side-note' }, 'No projects yet. ', h('button', { class: 'add-link', onclick: addManualProject }, '+ add a project'), ' — pick its folder on the server.')
         : h('div', { class: 'side-note' },
@@ -3402,47 +3403,56 @@
         ' — from the server, from this machine, or a server folder.'));
       return;
     }
-    var list = S.projects.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0 || (p.group || '').toLowerCase().indexOf(f) >= 0; });
-    root.replaceChildren.apply(root, projGroups(list, !!f).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
-    if (!root._drag) { root._drag = true; setupProjDrag(root); }
+    // the strip and the list stay the same elements (the list keeps its scroll on every repaint)
+    if (!root._list) {
+      root._strip = h('div', { class: 'pg-strip' });
+      root._list = h('div', { class: 'pg-list' });
+      setupProjDrag(root);
+    }
+    if (root.firstChild !== root._strip) root.replaceChildren(root._strip, root._list);
+    var gs = groupNames();
+    var cur = groupTab();
+    root.classList.toggle('grouped', gs.length > 0);
+    root._strip.replaceChildren.apply(root._strip, gs.length ? groupTabs(gs, cur) : []);
+    // a filter searches every project; else the chosen group tab (All = every project)
+    var list = S.projects.filter(function (p) {
+      if (f) return p.name.toLowerCase().indexOf(f) >= 0 || pTitle(p).toLowerCase().indexOf(f) >= 0 || (p.group || '').toLowerCase().indexOf(f) >= 0;
+      return !cur || p.group === cur;
+    });
+    root._list.style.setProperty('--gc', cur ? groupColor(cur) : 'transparent');
+    root._list.replaceChildren.apply(root._list, list.map(projEl).concat([h('button', { class: 'add-link', style: 'margin:6px 2px', onclick: addManualProject }, '+ add project')]));
   }
 
-  // ---- project groups: projects without a group first, then one folding header per group
-  // (groups in the order their first project has; drag a project onto a group to move it there)
+  // ---- project groups: a vertical tab strip beside the list — All (every project) + one tab per group
+  // (groups in the order their first project has; each group has its own colour; drop a project on a tab to move it there)
   function groupNames() {
     var out = [];
     S.projects.forEach(function (p) { if (p.group && out.indexOf(p.group) < 0) out.push(p.group); });
     return out;
   }
-  function closedGroups() {
-    try { return new Set(JSON.parse(localStorage.getItem('sw-groups-closed') || '[]')); } catch (e) { return new Set(); }
+  function groupTab() {
+    var g = localStorage.getItem('sw-group-tab') || '';
+    return g && groupNames().indexOf(g) >= 0 ? g : '';
   }
-  function projGroups(list, filtering) {
-    var by = {}, names = [], out = [];
-    list.forEach(function (p) {
-      var g = p.group || '';
-      if (!by[g]) { by[g] = []; if (g) names.push(g); }
-      by[g].push(p);
-    });
-    if (by['']) out = out.concat(by[''].map(projEl));
-    var closed = closedGroups();
-    names.forEach(function (g) {
-      var shut = !filtering && closed.has(g);
-      var items = by[g];
-      var busy = items.filter(function (p) { return S.tabs.some(function (t) { return t.info.spec.project === p.name && !t.gone; }); }).length;
-      var more = h('button', { class: 'icon-btn', title: 'Group', onclick: function (e) { e.stopPropagation(); groupMenu(g, more); } }, '⋯');
-      var head = h('div', { class: 'pgroup-head', title: shut ? 'Show the projects of ' + g : 'Hide the projects of ' + g, onclick: function () {
-        var c = closedGroups();
-        if (c.has(g)) c.delete(g); else c.add(g);
-        localStorage.setItem('sw-groups-closed', JSON.stringify(Array.from(c)));
-        renderProjects();
-      } }, h('span', { class: 'caret' }, shut ? '▸' : '▾'), h('span', { class: 'pgroup-name', dir: 'auto' }, g),
-        busy ? h('span', { class: 'count', title: plural(busy, 'project') + ' with open tabs' }, '●' + busy) : null,
-        h('span', { class: 'count' }, String(items.length)), more);
-      head.dataset.group = g;
-      out.push(h('div', { class: 'pgroup' + (shut ? ' shut' : '') }, head, shut ? null : h('div', { class: 'pgroup-body' }, items.map(projEl))));
-    });
-    return out;
+  function setGroupTab(g) { localStorage.setItem('sw-group-tab', g || ''); renderProjects(); }
+  function groupColor(g) {
+    var p = S.projects.filter(function (x) { return x.group === g && x.groupColor; })[0];
+    return (p && p.groupColor) || autoColor('group:' + g);
+  }
+  function groupTabs(gs, cur) {
+    function tab(g, label, n) {
+      var c = g ? groupColor(g) : 'var(--faint)';
+      var el = h('button', { class: 'pg-tab' + (g === cur ? ' on' : ''), style: '--gc:' + c, dir: 'auto',
+        title: (g ? g : 'All projects') + ' · ' + plural(n, 'project') + (g ? '\nclick again or right-click: rename, colour, ungroup' : ''),
+        onclick: function () { if (g && g === cur) groupMenu(g, el); else setGroupTab(g); },
+        oncontextmenu: function (e) { if (!g) return; e.preventDefault(); groupMenu(g, el); } },
+        h('span', { class: 'pg-label' }, label), h('span', { class: 'pg-n' }, String(n)));
+      el.dataset.group = g;
+      return el;
+    }
+    var count = {};
+    S.projects.forEach(function (p) { if (p.group) count[p.group] = (count[p.group] || 0) + 1; });
+    return [tab('', 'All', S.projects.length)].concat(gs.map(function (g) { return tab(g, g, count[g]); }));
   }
   function setGroup(p, g) {
     return api('POST', 'group/' + encodeURIComponent(p.name), { group: g }).then(function (d) {
@@ -3460,7 +3470,7 @@
     var md = openModal({
       title: 'Group — ' + pTitle(p), size: 'sm',
       body: [gs.length ? h('div', { class: 'pgroup-pick' }, gs.map(function (g) {
-        return h('button', { class: 'btn' + (g === p.group ? ' primary' : ''), dir: 'auto', onclick: function () { pick(g); } }, g);
+        return h('button', { class: 'btn' + (g === p.group ? ' primary' : ''), dir: 'auto', style: 'border-left:3px solid ' + groupColor(g), onclick: function () { pick(g); } }, g);
       })) : null,
         h('div', { class: 'row', style: 'gap:6px;margin-top:10px' },
           inp, h('button', { class: 'btn primary', onclick: add }, 'Add'))].filter(Boolean),
@@ -3471,17 +3481,37 @@
   }
   function renameGroup(g, to) {
     return api('POST', 'groups/rename', { from: g, to: to }).then(function () {
-      var c = closedGroups();
-      if (c.delete(g) && to) c.add(to);
-      localStorage.setItem('sw-groups-closed', JSON.stringify(Array.from(c)));
+      if (groupTab() === g) localStorage.setItem('sw-group-tab', to || '');
       S.projects.forEach(function (p) { if (p.group === g) p.group = to; });
       renderProjects();
       refreshProjects();
     }).catch(fail);
   }
+  function groupColorDialog(g) {
+    var cur = groupColor(g);
+    function save(c) {
+      api('POST', 'groups/color', { group: g, color: c }).then(function () {
+        md.close();
+        S.projects.forEach(function (p) { if (p.group === g) p.groupColor = c; });
+        renderProjects();
+        refreshProjects();
+      }).catch(fail);
+    }
+    var custom = h('input', { type: 'color', value: cur, title: 'Any colour', onchange: function () { save(custom.value); } });
+    var md = openModal({
+      title: 'Colour — ' + g, size: 'sm',
+      body: [h('div', { class: 'swatches' }, PALETTE.map(function (c) {
+        return h('button', { class: 'swatch' + (c === cur ? ' on' : ''), style: 'background:' + c, title: c, onclick: function () { save(c); } });
+      }), h('label', { class: 'swatch custom', title: 'Pick any colour' }, '+', custom))],
+      foot: [h('button', { class: 'btn', onclick: function () { save(''); } }, 'Automatic'),
+        h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')]
+    });
+  }
   function groupMenu(g, anchor) {
     menuAt(anchor, [
+      { header: g },
       { label: 'Rename group…', action: function () { promptDlg('Rename group “' + g + '”', g).then(function (v) { if (v !== null && v.trim()) renameGroup(g, v); }); } },
+      { label: 'Colour…', action: function () { groupColorDialog(g); } },
       { label: 'Ungroup', action: function () { renameGroup(g, ''); } }
     ]);
   }
@@ -3498,18 +3528,18 @@
     });
     root.addEventListener('dragend', function (e) {
       _dragProjName = null;
-      root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) {
+      root.querySelectorAll('.proj, .pg-tab').forEach(function (el) {
         el.classList.remove('dragging', 'drop-before', 'drop-after', 'drop-in');
       });
     });
     root.addEventListener('dragover', function (e) {
       if (!_dragProjName) return;
-      var gh = e.target.closest('.pgroup-head');
+      var gh = e.target.closest('.pg-tab');
       var el = gh ? null : e.target.closest('.proj');
       if (!gh && (!el || el.dataset.proj === _dragProjName)) return;
       e.preventDefault();
-      root.querySelectorAll('.proj, .pgroup-head').forEach(function (x) { x.classList.remove('drop-before', 'drop-after', 'drop-in'); });
-      if (gh) { gh.classList.add('drop-in'); return; }
+      root.querySelectorAll('.proj, .pg-tab').forEach(function (x) { x.classList.remove('drop-before', 'drop-after', 'drop-in'); });
+      if (gh) { if (gh.dataset.group) gh.classList.add('drop-in'); return; }
       var r = el.getBoundingClientRect();
       var before = e.clientY < r.top + r.height / 2;
       el.classList.toggle('drop-before', before);
@@ -3517,32 +3547,30 @@
     });
     root.addEventListener('dragleave', function (e) {
       if (!e.relatedTarget || !root.contains(e.relatedTarget)) {
-        root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'drop-in'); });
+        root.querySelectorAll('.proj, .pg-tab').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'drop-in'); });
       }
     });
     root.addEventListener('drop', function (e) {
       if (!_dragProjName) return;
-      var gh = e.target.closest('.pgroup-head');
+      var gh = e.target.closest('.pg-tab');
       var target = gh ? null : e.target.closest('.proj');
       if (!gh && !target) return;
       e.preventDefault();
       var before = target && target.classList.contains('drop-before');
-      root.querySelectorAll('.proj, .pgroup-head').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging', 'drop-in'); });
+      root.querySelectorAll('.proj, .pg-tab').forEach(function (el) { el.classList.remove('drop-before', 'drop-after', 'dragging', 'drop-in'); });
       var moved = S.projects.filter(function (p) { return p.name === _dragProjName; })[0];
       if (!moved) return;
-      if (gh) { if ((moved.group || '') !== gh.dataset.group) setGroup(moved, gh.dataset.group); return; }
+      if (gh) { if (gh.dataset.group && (moved.group || '') !== gh.dataset.group) setGroup(moved, gh.dataset.group); return; }
       var to = S.projects.filter(function (p) { return p.name === target.dataset.proj; })[0];
       if (!to || to === moved) return;
-      // reorder the whole list (projects of folded groups keep their place), optimistic
+      // reorder the whole list (projects of other group tabs keep their place), optimistic
       var rest = S.projects.filter(function (p) { return p !== moved; });
       var i = rest.indexOf(to);
       rest.splice(before ? i : i + 1, 0, moved);
       S.projects = rest;
       var names = rest.map(function (p) { return p.name; });
-      var regroup = (moved.group || '') !== (to.group || '');
-      if (regroup) moved.group = to.group || '';
       renderProjects();
-      api('POST', 'projects/order', { order: names }).then(function () { if (regroup) setGroup(moved, moved.group); }).catch(fail);
+      api('POST', 'projects/order', { order: names }).catch(fail);
     });
   }
 
@@ -5477,5 +5505,28 @@
     return document.readyState !== 'loading' ? Promise.resolve()
       : new Promise(function (res) { document.addEventListener('DOMContentLoaded', res, { once: true }); });
   }
-  Promise.all([fonts, scriptsLoaded()]).then(boot);
+  // a script whose download broke (shaky line, the WSL localhost link) fails silently: fetch it again
+  var PARTS = [['SWChat', 'chat.js'], ['SWFiles', 'files.js']];     // used without a check (the rest are optional)
+  function loadScript(src) {
+    return new Promise(function (res) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = s.onerror = function () { res(); };
+      document.body.appendChild(s);
+    });
+  }
+  function missingParts(tries) {
+    var miss = PARTS.filter(function (p) { return !window[p[0]]; });
+    if (!miss.length) return Promise.resolve([]);
+    if (tries <= 0) return Promise.resolve(miss.map(function (p) { return p[1]; }));
+    return miss.reduce(function (pr, p) { return pr.then(function () { return loadScript(p[1] + '?r=' + Date.now()); }); }, Promise.resolve())
+      .then(function () { return new Promise(function (r) { setTimeout(r, 400); }); })
+      .then(function () { return missingParts(tries - 1); });
+  }
+  window.SW._missingParts = missingParts;
+  Promise.all([fonts, scriptsLoaded()]).then(function () { return missingParts(4); }).then(function (miss) {
+    if (!miss.length) return boot();
+    document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' },
+      h('p', { class: 'empty-title' }, 'Could not load the app'), h('p', { class: 'muted' }, miss.join(', ') + ' did not load — reload the page'))));
+  });
 })();

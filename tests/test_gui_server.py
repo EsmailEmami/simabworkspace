@@ -735,14 +735,19 @@ class HttpServer(TmpHome):
         st, d = self.req("POST", "/api/group/a", {"group": "Work"})
         self.assertEqual((st, d), (200, {"group": "Work"}))
         self.assertEqual(self.req("POST", "/api/group/nope", {"group": "Work"})[0], 404)
+        st, d = self.req("POST", "/api/groups/color", {"group": "Work", "color": "#AABBCC"})
+        self.assertEqual((st, d), (200, {"color": "#aabbcc"}))
+        self.assertEqual(self.req("POST", "/api/groups/color", {"group": "Work", "color": "red"})[0], 400)
         st, d = self.req("POST", "/api/groups/rename", {"from": "Work", "to": "Jobs"})
         self.assertEqual((st, d), (200, {"moved": 1}))
         # the drag order is really saved (the route never matched before 1.65.13)
         st, d = self.req("POST", "/api/projects/order", {"order": ["b", "a"]})
         self.assertEqual((st, d), (200, {"ok": True}))
         self.assertEqual(self.store.project_order(), ["b", "a"])
-        ps = {p["name"]: p["group"] for p in self.req("GET", "/api/projects")[1]["projects"]}
-        self.assertEqual(ps, {"a": "Jobs", "b": ""})
+        ps = {p["name"]: (p["group"], p["groupColor"]) for p in self.req("GET", "/api/projects")[1]["projects"]}
+        self.assertEqual(ps, {"a": ("Jobs", "#aabbcc"), "b": ("", "")}, "the colour follows the renamed group")
+        self.store.set_group_color("Jobs", "")
+        self.assertEqual(self.store.group_colors(), {})
 
     def test_browser_errors_go_to_the_log(self):
         lines = []
@@ -2481,7 +2486,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.65.13"', text)
+        self.assertIn('VERSION="1.65.14"', text)
 
 
 if __name__ == "__main__":

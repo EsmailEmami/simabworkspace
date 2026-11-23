@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.13"
+VERSION = "1.65.14"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -588,12 +588,37 @@ class Store:
             raise ApiError(400, "the group name is too long (40 characters at most)")
         n = 0
         with self.lock:
+            colors = self.group_colors()
+            if old in colors:
+                c = colors.pop(old)
+                if new:
+                    colors[new] = c
+                self.db.put("groupColors", colors)
             for v in self.data["projects"].values():
                 if isinstance(v, dict) and v.get("group") == old:
                     v["group"] = new
                     n += 1
             self.save()
         return n
+
+    def set_group_color(self, group, color) -> str:
+        """Colour of a sidebar group tab ("" = automatic)."""
+        group = " ".join(clean_str(group, 200, "group", required=True).split())
+        color = clean_str(color, 7, "color").lower()
+        if color and not re.fullmatch(r"#[0-9a-f]{6}", color):
+            raise ApiError(400, "color must look like #4f8cff")
+        with self.lock:
+            colors = self.group_colors()
+            if color:
+                colors[group] = color
+            else:
+                colors.pop(group, None)
+            self.db.put("groupColors", colors)
+        return color
+
+    def group_colors(self) -> dict:
+        c = self.db.get("groupColors")
+        return dict(c) if isinstance(c, dict) else {}
 
     def set_starter(self, project: str, text) -> str:
         """The text every new Claude chat of this project starts with (the user adds their request)."""
@@ -9815,6 +9840,9 @@ class App:
             idx = {name: i for i, name in enumerate(order)}
             p.sort(key=lambda x: idx.get(x["name"], len(order)))
         builds = ((getattr(self, "_pc_cache", None) or (0, {}))[1] or {}).get("builds") or {}
+        gcol = self.store.group_colors()
+        for x in p:
+            x["groupColor"] = gcol.get(x.get("group") or "", "") if x.get("group") else ""
         for x in p:                   # where its builds run (Computers): run commands follow it
             x["buildsOn"] = "local" if x.get("localOnly") else builds.get(x["name"], "server")
         self._projects_cache = (time.time(), p)
@@ -14223,6 +14251,11 @@ class Handler(BaseHTTPRequestHandler):
             n = app.store.rename_group(b.get("from"), b.get("to"))
             app.invalidate()
             return {"moved": n}
+        if route == ("POST", "groups") and parts[1:] == ["color"]:
+            b = self._body() or {}
+            c = app.store.set_group_color(b.get("group"), b.get("color"))
+            app.invalidate()
+            return {"color": c}
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
             app.invalidate()

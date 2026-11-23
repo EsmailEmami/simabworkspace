@@ -3476,9 +3476,13 @@
     add.dataset.add = '1';
     return [tab('', 'All', S.projects.length)].concat(gs.map(function (g) { return tab(g, g, count[g] || 0); }), [add]);
   }
+  // a change made here: a projects refresh already on its way carries the list from before it — drop it
+  function projChanged() { S.projGen = (S.projGen || 0) + 1; }
   function setGroup(p, g) {
     var old = p.group || '';
+    projChanged();
     return api('POST', 'group/' + encodeURIComponent(p.name), { group: g }).then(function (d) {
+      projChanged();
       // a group never vanishes because its last project moved out: only Ungroup removes it
       if (old && old !== d.group) setNewGroups(newGroups().concat([old]));
       p.group = d.group;
@@ -3505,7 +3509,9 @@
     setTimeout(function () { inp.focus(); }, 40);
   }
   function renameGroup(g, to) {
+    projChanged();
     return api('POST', 'groups/rename', { from: g, to: to }).then(function () {
+      projChanged();
       if (groupTab() === g) localStorage.setItem('sw-group-tab', to || '');
       S.projects.forEach(function (p) { if (p.group === g) p.group = to; });
       setNewGroups(newGroups().map(function (x) { return x === g ? to : x; }));
@@ -3600,7 +3606,8 @@
       S.projects = rest;
       var names = rest.map(function (p) { return p.name; });
       renderProjects();
-      api('POST', 'projects/order', { order: names }).catch(fail);
+      projChanged();
+      api('POST', 'projects/order', { order: names }).then(projChanged, fail);
     });
   }
 
@@ -5136,7 +5143,9 @@
   }
 
   function refreshProjects() {
+    var gen = S.projGen || 0;
     return api('GET', 'projects').then(function (d) {
+      if ((S.projGen || 0) !== gen) return;        // stale: asked before a group / order change landed
       var key = JSON.stringify(d.projects);
       if (key !== S.projectsKey) {
         S.projectsKey = key;
@@ -5348,7 +5357,7 @@
   // ------------------------------------------------------------------ shared with chat.js
   window.SW = {
     h: h, api: api, toast: toast, fail: fail, S: S, faNum: faNum, token: token, project: project,
-    closeTab: closeTab, renderProjects: renderProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
+    closeTab: closeTab, renderProjects: renderProjects, refreshProjects: refreshProjects, activate: activate, setupDrag: setupDrag, isGlobalShortcut: isGlobalShortcut,
     confirmDlg: confirmDlg, promptDlg: promptDlg, openModal: openModal, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, sound: sound, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,

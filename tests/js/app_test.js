@@ -229,6 +229,10 @@ global.fetch = (url, opts) => {
     res = { id: 's' + (++seq), title: body.kind + ' ' + (body.project || 'home'), alive: true, exitCode: null, url: '',
       spec: Object.assign({ kind: body.kind, project: body.project || '', where: body.where || 'local', cmdId: body.cmdId || '' }, body.resume ? { resume: body.resume } : {}) };
   }
+  if (url === '/api/projects' && global.holdProjects) {     // a slow refresh: answers when the test says so
+    const snap = JSON.parse(JSON.stringify(res));
+    return new Promise((r) => { global.holdProjects = () => r({ ok: true, json: () => Promise.resolve(snap) }); });
+  }
   return Promise.resolve({ ok: true, json: () => Promise.resolve(res) });
 };
 
@@ -1343,6 +1347,15 @@ const tests = {
     delete SW.project('shop').group; SW.renderProjects();
     assert.ok(tabOf('Later'), 'Later survives a stale list');
     SW.project('shop').group = was;
+    // Mac: a refresh asked before the move answers after it with the old list — dropped, no jump back
+    global.holdProjects = true;
+    const slow = SW.refreshProjects();
+    const release = global.holdProjects;
+    global.holdProjects = null;
+    await drag(other, tabOf('Later'));
+    release(); await slow; await settle();
+    assert.strictEqual(SW.project(other).group, 'Later', 'the stale answer did not move it back');
+    assert.ok(projOf(other), 'still shown under Later');
     // Ungroup removes a group for good
     tabOf('Clients').dispatch('contextmenu', { preventDefault() {} }); await settle();
     q('button').find((b) => b.textContent.trim() === 'Ungroup').click(); await settle();

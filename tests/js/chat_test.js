@@ -676,6 +676,19 @@ const tests = {
     tab.updateAway();
     assert.ok(!tab.pane.classList.contains('away'));
     document.body.classList.remove('compact');
+    // the "Keep the message box shown" setting: never hidden, and an away box comes back
+    tab.touch = false;
+    tab.hover = false;
+    tab.awaySince = Date.now() - 9000;
+    tab.updateAway();
+    assert.ok(tab.pane.classList.contains('away'));
+    S.settings.keepComposer = true;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'), 'kept by the setting');
+    tab.awaySince = Date.now() - 9000;
+    tab.updateAway();
+    assert.ok(!tab.pane.classList.contains('away'));
+    delete S.settings.keepComposer;
     delete document.hasFocus;
   },
 

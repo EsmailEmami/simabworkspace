@@ -41,6 +41,7 @@
 #    simabworkspace version
 #
 #  Changelog:
+#    1.65.18 2026-11-23  A project added on another device can be removed from this list; setting "Keep the message box shown" in chats
 #    1.65.17 2026-11-23  Mac: a project put in a group no longer jumps back for a moment (a refresh asked before the move is dropped)
 #    1.65.16 2026-11-23  A project group never vanishes by itself (last project moved out, or a refresh with an older list); only Ungroup removes it
 #    1.65.15 2026-11-23  Project groups: drag a project onto a group tab, onto All (out of its group) or onto + (a new group); + at the bottom of the strip makes a group
@@ -402,7 +403,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.17"
+VERSION="1.65.18"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

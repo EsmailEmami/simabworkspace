@@ -65,6 +65,17 @@ class Devices(base.TmpHome):
         self.web.store.update_settings({"shareDevices": False})
         self.assertEqual(self.web.share_sync(), {})
 
+    def test_a_shared_project_can_be_removed_from_this_list(self):
+        self.laptop.share_sync()
+        self.web.share_sync()
+        with self.assertRaises(sw.ApiError):                 # its folder belongs to the device that added it
+            self.web.remove_project("shop", server=True)
+        self.assertTrue(self.web.remove_project("shop")["ok"])
+        self.assertEqual(self.names(self.web), ["blog", "far"])
+        self.web.share_sync()                                # the next round does not bring it back
+        self.assertEqual(self.names(self.web), ["blog", "far"])
+        self.assertIn("shop", self.names(self.laptop))      # the owner keeps it
+
     def test_tabs_open_and_close_on_every_device(self):
         self.laptop.share_sync()
         self.web.share_sync()

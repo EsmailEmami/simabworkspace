@@ -57,7 +57,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.17"
+VERSION = "1.65.18"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -334,6 +334,7 @@ DEFAULT_SETTINGS = {
     "chatMode": "default",       # Claude chat: default (ask) | acceptEdits | plan | auto
     "chatModel": "opus",         # Opus 5.5 (the latest Opus)
     "chatEffort": "medium",      # thinking effort: low, medium, high, xhigh, max
+    "keepComposer": False,       # chat: never hide the message box when away from the tab
     "copyOnSelect": True,
     "bellNotify": True,
     "confirmClose": True,
@@ -9803,8 +9804,9 @@ class App:
             return cached
         p = merge_projects([] if self.web else mutagen_sessions(), self.store.manual(), self.store.data["projects"])
         have = {x["name"] for x in p} | {x.get("remote") for x in p if x.get("remote")}
+        hidden = set(self.store.db.get("hiddenShared", []) or [])      # shared projects removed from this device's list
         for sp in self._share_projects:
-            if sp["name"] in have or sp["remote"] in have:
+            if sp["name"] in have or sp["remote"] in have or sp["remote"] in hidden:
                 continue
             have |= {sp["name"], sp["remote"]}
             own = self.store.data["projects"].get(sp["name"]) or {}      # renamed / coloured here
@@ -10832,8 +10834,15 @@ class App:
         p = next((x for x in self.projects(max_age=0) if x["name"] == name), None)
         if not p:
             raise ApiError(404, "no such project")
-        if p.get("source") == "shared":
-            raise ApiError(400, "a shared project is removed by its owner")
+        if p.get("source") == "shared":           # another device's project: only hide it here; its folder is the owner's
+            if server or local:
+                raise ApiError(400, "a shared project's folder is deleted on the device that added it")
+            hidden = [x for x in (self.store.db.get("hiddenShared", []) or []) if x != p["remote"]] + [p["remote"]]
+            self.store.db.put("hiddenShared", hidden[-500:])
+            self.store.set_project_order([n for n in self.store.project_order() if n != name])
+            self.invalidate()
+            self.activity.add("project-remove", name, "removed from this list (shared from " + (p.get("sharedFrom") or "another device") + ")")
+            return {"ok": True, "server": False, "local": False, "errors": []}
         if server and (p.get("localOnly") or not p.get("remote")):
             raise ApiError(400, "this project has no folder of its own on the server")
         if local and (self.web or not p.get("local")):

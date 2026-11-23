@@ -2395,8 +2395,8 @@
           if (ok) api('POST', 'sync/' + encodeURIComponent(p.name) + '/stop').then(function () { toast(p.name + ': sync stopped', 'ok'); refreshProjects(); }).catch(fail);
         });
       } } : null,
-      p.source !== 'shared' ? '-' : null,
-      p.source !== 'shared' ? { label: 'Remove…', action: function () { removeProjectDialog(p); } } : null
+      '-',
+      { label: 'Remove…', action: function () { removeProjectDialog(p); } }
     ]), { star: 'menu' });
   }
 
@@ -2404,8 +2404,8 @@
 
   // remove a project: from the list only, or also delete its folder on the server and/or this computer
   function removeProjectDialog(p) {
-    var sides = [];
-    if (p.remote && !p.localOnly) sides.push(['server', 'Delete the folder on the server too', p.remote]);
+    var sides = [], shared = p.source === 'shared';
+    if (!shared && p.remote && !p.localOnly) sides.push(['server', 'Delete the folder on the server too', p.remote]);
     if (!S.web && p.localExists) sides.push(['local', 'Delete the folder on this computer too', fullLocal(p.local)]);
     var boxes = {}, go, md;
     function picked() { return sides.filter(function (x) { return boxes[x[0]].checked; }).map(function (x) { return x[0]; }); }
@@ -2421,7 +2421,7 @@
       }).catch(function (e) { go.disabled = false; fail(e); });
     } }, 'Remove from list');
     var body = h('div', null,
-      h('div', null, 'Remove “' + (p.title || p.name) + '” from the list?' + (p.source === 'mutagen' ? ' Its sync stops.' : '')),
+      h('div', null, 'Remove “' + (p.title || p.name) + '” from the list?' + (p.source === 'mutagen' ? ' Its sync stops.' : '') + (shared ? ' Only here: it stays on ' + (p.sharedFrom || 'the device that added it') + '.' : '')),
       sides.map(function (x) {
         var cb = boxes[x[0]] = h('input', { type: 'checkbox', onchange: upd });
         return h('label', { class: 'check', style: 'margin:8px 0 0', title: x[2] }, cb, x[1]);
@@ -4101,6 +4101,7 @@
       h('div', { class: 'row' },
         field('Command', inp('claudeCmd', { class: 'inp mono' })),
         field('Default mode', sel('chatMode', [['default', 'Ask before edits'], ['acceptEdits', 'Auto-accept edits'], ['plan', 'Plan'], ['auto', 'Auto']]))),
+      chk('keepComposer', 'Keep the message box shown', 'A chat no longer hides it a few seconds after you leave the tab.'),
       h('div', { class: 'sec' }, 'Terminal'),
       h('div', { class: 'row' }, field('Font size', inp('fontSize', { type: 'number', min: 9, max: 32, class: 'inp mono' }))),
       chk('copyOnSelect', 'Copy on select'),
@@ -4155,6 +4156,7 @@
         h('div', { class: 'row' },
           field('Command', inp('claudeCmd', { class: 'inp mono' })),
           field('Default mode', sel('chatMode', [['default', 'Ask before edits'], ['acceptEdits', 'Auto-accept edits'], ['plan', 'Plan'], ['auto', 'Auto']]))),
+        chk('keepComposer', 'Keep the message box shown', 'A chat no longer hides it a few seconds after you leave the tab.'),
         h('div', { class: 'sec' }, 'Terminal'),
         h('div', { class: 'row' },
           field('Font size', inp('fontSize', { type: 'number', min: 9, max: 32, class: 'inp mono' })),

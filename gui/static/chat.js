@@ -776,7 +776,7 @@
     return S.active === this && focused;
   };
   P.updateAway = function () {
-    if (this.isPresent()) { this.awaySince = 0; this.setAway(false); return; }
+    if (this.isPresent() || (SW.S.settings && SW.S.settings.keepComposer)) { this.awaySince = 0; this.setAway(false); return; }
     if (!this.awaySince) this.awaySince = Date.now();
     if (Date.now() - this.awaySince >= AWAY_MS) this.setAway(true);
   };

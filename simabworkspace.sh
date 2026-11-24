@@ -42,6 +42,7 @@
 #
 #  Changelog:
 #    1.65.19 2026-11-23  Project groups, colours and order are the same on every device; this computer's LAN address in the sidebar
+#    1.65.20 2026-11-24  Web shows your computers' run commands (which computer / server, greyed when off); "Ask me" of a shared link answered on the phone; shared port edit
 #    1.65.18 2026-11-23  A project added on another device can be removed from this list; setting "Keep the message box shown" in chats
 #    1.65.17 2026-11-23  Mac: a project put in a group no longer jumps back for a moment (a refresh asked before the move is dropped)
 #    1.65.16 2026-11-23  A project group never vanishes by itself (last project moved out, or a refresh with an older list); only Ungroup removes it
@@ -404,7 +405,7 @@
 
 set -u -o pipefail
 
-VERSION="1.65.19"
+VERSION="1.65.20"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

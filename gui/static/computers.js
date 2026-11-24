@@ -712,14 +712,14 @@
       if (!open[id]) { try { guestShown[id].close(); } catch (e) { /* closed */ } delete guestShown[id]; }
     });
   }
-  if (S.web) {
-    setInterval(function () {
-      if (document.hidden) return;
-      api('GET', 'account/share/asks').then(function (d) {
-        guestAsks(d.asks, function (id, ans) { return api('POST', 'account/share/answer', { id: id, answer: ans }); });
-      }).catch(function () {});
-    }, 3000);
+  // web / phone: someone opens a shared link with "Ask me" — answered here, the computer need not be near
+  function guestPoll() {
+    if (!S.web || document.hidden) return Promise.resolve();
+    return api('GET', 'account/share/asks').then(function (d) {
+      guestAsks(d.asks, function (id, ans) { return api('POST', 'account/share/answer', { id: id, answer: ans }); });
+    }).catch(function () {});
   }
+  setInterval(guestPoll, 3000);      // S.web is known only after boot: checked on every tick
 
   function startPoll() {
     if (pollTimer || S.web) return;
@@ -823,12 +823,13 @@
   // web version: run commands of a computer (its "loc" ones) from the phone, with live output and stop
   var remoteKey = '';
   function remoteRunning(p, c) {
-    return (S.remoteBg || []).filter(function (x) { return x.name === 'run-' + c.id && x.project === p.name && x.state === 'running'; })[0];
+    var proj = c.devProject || p.name;     // the name that computer gives the project
+    return (S.remoteBg || []).filter(function (x) { return x.name === 'run-' + c.id && x.project === proj && (!c.fromDev || x.dev === c.fromDev) && x.state === 'running'; })[0];
   }
   function remoteRun(p, c) {
     var x = remoteRunning(p, c);
     if (x) return remoteLog(x.dev, x.name, c.name, x.devName);
-    return ensureUnlock().then(function (ok) { return ok && api('POST', 'pc/remote-run', { project: p.name, id: c.id }); }).then(function (r) {
+    return ensureUnlock().then(function (ok) { return ok && api('POST', 'pc/remote-run', { project: c.devProject || p.name, id: c.id, dev: c.fromDev || '' }); }).then(function (r) {
       if (!r) return;
       toast(c.name + ' started on your computer', 'ok');
       webPoll();
@@ -863,8 +864,9 @@
     if (!S.web) return Promise.resolve();
     return api('GET', 'pc/remote-asks').then(function (x) {
       var now = x.now || Date.now() / 1000, openIds = {};
-      var key = JSON.stringify([x.online, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev, b.urls || b.url]; })]);
+      var key = JSON.stringify([x.online, x.on, (x.bg || []).map(function (b) { return [b.name, b.state, b.dev, b.urls || b.url]; })]);
       S.remoteOnline = x.online || 0;
+      S.remoteOn = x.on || [];
       S.remoteBg = x.bg || [];
       S.pcUnlocked = x.unlocked || {};
       if (key !== remoteKey) { remoteKey = key; if (SW.renderProjects) SW.renderProjects(); }
@@ -1031,6 +1033,6 @@
   }
 
   setInterval(decorate, 5000);         // new chat tabs
-  window.SWComputers = { _fresh: function (v) { infoFresh = v; }, fresh: function () { return infoFresh; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, devLines: devLines, devLog: devLog, portOf: portOf, devBadge: devBadge, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _webRuns: webRuns, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
+  window.SWComputers = { guestPoll: guestPoll, _fresh: function (v) { infoFresh = v; }, fresh: function () { return infoFresh; }, open: open, poll: poll, webPoll: webPoll, remoteRun: remoteRun, ensureUnlock: ensureUnlock, remoteRunning: remoteRunning, devLines: devLines, devLog: devLog, portOf: portOf, devBadge: devBadge, setupCheck: setupCheck, speedTest: speedTest, _info: function () { return info; }, decorate: decorate, pollNet: pollNet, bashWhere: bashWhere, _webRuns: webRuns, _linkWatch: linkWatch, badge: badge, menuLabel: menuLabel, buildState: buildState, refresh: refreshInfo,
     _setInfo: setInfo, _shown: shown, _live: function () { return live; } };
 })();

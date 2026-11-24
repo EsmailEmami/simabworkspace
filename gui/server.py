@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.19"
+VERSION = "1.65.20"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -5170,6 +5170,21 @@ def lan_ips() -> list:
     return res[:4]
 
 
+def share_run_commands(p: dict) -> list:
+    """A project's own run commands (not .simab.json ones) as another device sees them: where each runs."""
+    on_pc = p.get("buildsOn") in ("computers", "local") and p.get("localExists")
+    out = []
+    for c in p.get("commands") or []:
+        if not isinstance(c, dict) or c.get("shared") or not c.get("id"):
+            continue
+        where = "local" if on_pc else ("server" if c.get("where") == "server" else "local")
+        if where == "local" and not p.get("localExists"):
+            continue                  # this device could not run it
+        out.append({"id": str(c["id"])[:40], "name": str(c.get("name") or "")[:80], "cmd": str(c.get("cmd") or "")[:2000],
+                    "cwd": str(c.get("cwd") or "")[:300], "where": where})
+    return out[:50]
+
+
 def layout_key(remote) -> str:
     """Groups / order are shared by the project's server folder: devices may name the same folder differently."""
     r = str(remote or "").strip().rstrip("/")
@@ -7082,6 +7097,7 @@ if sys.argv[1] == "asks":
         except (OSError, ValueError):
             continue
         out["online"] += 1
+        out.setdefault("on", []).append(d["id"])
         for a in r.get("asks") or []:
             a.update(dev=d["id"], devName=d.get("name") or "")
             out["asks"].append(a)
@@ -9900,6 +9916,8 @@ class App:
                 x["sync"].update(state="busy", label=f"copying ×{job.streams}", paused=False, progress=job.progress())
         for x in p:
             x["commands"] = [c for c in x["commands"] if not c.get("shared")] + self.shared_commands(x)
+        if self.web:
+            self._device_commands(p)
         order = self.store.project_order()
         if order:
             idx = {name: i for i, name in enumerate(order)}
@@ -10058,6 +10076,12 @@ class App:
     def _share_projects_mine(self) -> list:
         """This device's projects that live on the default server (others cannot reach the rest)."""
         c, out = self.conf, []
+        pc_id = ""
+        if not self.web and getattr(self, "pc", None):
+            try:
+                pc_id = str(self.pc.cfg().get("id") or "")
+            except Exception:
+                pc_id = ""
         for p in self.projects(max_age=10):
             ep = p.get("endpoint") or {}
             if p.get("source") == "shared" or not p.get("remote"):
@@ -10065,8 +10089,30 @@ class App:
             if ep.get("host") and (ep.get("host") != c.host or (ep.get("user") or c.user) != c.user
                                    or str(ep.get("port") or c.port) != str(c.port)):
                 continue
-            out.append({k: p.get(k) or "" for k in ("name", "remote", "title", "color", "starter")})
+            rec = {k: p.get(k) or "" for k in ("name", "remote", "title", "color", "starter")}
+            if not self.web:              # its own run commands: the web shows them and runs them here / on the server
+                rec["pc"], rec["commands"] = pc_id, share_run_commands(p)
+            out.append(rec)
         return out[:300]
+
+    def _device_commands(self, ps: list):
+        """Web: the run commands my computers set for the same project folder, each marked with where it runs
+        (that computer, or the server)."""
+        for sp in self._share_projects:
+            k = layout_key(sp.get("remote"))
+            cmds = sp.get("commands") if isinstance(sp.get("commands"), list) else []
+            if not k or not cmds:
+                continue
+            for x in ps:
+                if layout_key(x.get("remote")) != k:
+                    continue
+                have = {c.get("id") for c in x["commands"]}
+                for c in cmds:
+                    if isinstance(c, dict) and c.get("id") and c["id"] not in have:
+                        have.add(c["id"])
+                        x["commands"].append(dict(c, shared=False, where="server" if c.get("where") == "server" else "local",
+                                                  devName=str(sp.get("sharedFrom") or "your computer"),
+                                                  fromDev=str(sp.get("pc") or ""), devProject=str(sp.get("name") or "")))
 
     def _share_tabs_mine(self) -> dict:
         out = {}
@@ -10277,7 +10323,11 @@ class App:
         if c:
             return c
         t, cmds = self._shared.get(project, (0.0, []))
-        return next((dict(x) for x in cmds if x["id"] == cid), None)
+        c = next((dict(x) for x in cmds if x["id"] == cid), None)
+        if c or not self.web:
+            return c
+        x = next((x for x in self.projects(max_age=10) if x["name"] == project), None)      # one of my computers'
+        return next((dict(c) for c in (x or {}).get("commands") or [] if c.get("id") == cid and c.get("devName")), None)
 
     def set_commands(self, project: str, commands) -> list:
         """From the editor: rows marked shared go to the project's .simab.json, the rest stay here."""
@@ -11957,7 +12007,7 @@ class App:
         tabs = {(x.spec or {}).get("relay"): sid for sid, x in list(self.sessions.items()) if (x.spec or {}).get("relay")}
         for a in r.get("asks") or []:
             a["session"] = tabs.get(a.get("chat") or "", "")
-        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "now": time.time(), "bg": r.get("bg") or [],
+        return {"asks": r.get("asks") or [], "online": r.get("online") or 0, "on": r.get("on") or [], "now": time.time(), "bg": r.get("bg") or [],
                 "unlocked": self.pc_unlocked()}
 
     def pc_unlocked(self) -> dict:
@@ -12810,6 +12860,9 @@ def share_page(title: str, text: str, script: str = "", busy: bool = False) -> b
             '<div class="spin"></div><p id="m">' + esc(text) + '</p>' + script + '</div></body></html>').encode()
 
 
+SHARE_RETRY = '<p><a href="" onclick="location.reload();return false">Try again</a></p>'
+
+
 def share_js(v) -> str:
     return json.dumps(v).replace("</", "<\\/")
 
@@ -13479,8 +13532,8 @@ class ShareHub:
                 return h._send(200, share_page("Not found", "Nothing is shared at this address.", self._lost_js(h)), MIME[".html"])
             return h._send(404, b"not found", "text/plain")
         except ApiError as e:
-            if nav:
-                return h._send(e.status, share_page("Not available", e.message), MIME[".html"])
+            if nav or hd.get("X-Simab-Nav") == "1":         # also a page the service worker fetches for the tab
+                return h._send(e.status, share_page("Not available", e.message, SHARE_RETRY), MIME[".html"])
             return h._send(e.status, e.message.encode(), "text/plain; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -13643,7 +13696,7 @@ class ShareHub:
                 signed = self.token_ok(self._cookie(h, f"{SHARE_COOKIE}.{sh['user']}"), ws, domain)
                 for x in self.ports(ws, sh["slug"], signed, sh["user"]):
                     pmap.setdefault(str(x["port"]), x["t"])
-            return self._answer(h, method, s, t, prefix, base, nav, sw, pmap)
+            return self._answer(h, method, s, t, prefix, base, nav, sw, pmap, bool(sh.get("tls")))
         finally:
             with self.lock:
                 ln["active"] -= 1
@@ -13667,14 +13720,15 @@ class ShareHub:
         h.wfile.flush()
         share_pipe(h.rfile, h.connection, s)
 
-    def _answer(self, h, method, s, t, prefix, base, nav, sw, pmap=None):
+    def _answer(self, h, method, s, t, prefix, base, nav, sw, pmap=None, tls=False):
         import http.client
         h.close_connection = True
         resp = http.client.HTTPResponse(s, method=method)
         try:
             resp.begin()
         except (http.client.HTTPException, OSError):
-            raise ApiError(502, "this port did not answer like a web server")
+            raise ApiError(502, "this port did not answer like a web server" + (
+                "" if tls else " — if it speaks https://, turn on “The port speaks HTTPS” (Edit in its Share window)"))
         status, headers = resp.status, resp.getheaders()
         ctype = resp.getheader("Content-Type") or ""
         enc = (resp.getheader("Content-Encoding") or "").lower()
@@ -14343,6 +14397,7 @@ class Handler(BaseHTTPRequestHandler):
         if app.web and route == ("POST", "commands"):
             b = self._body()
             cmds = b.get("commands") if isinstance(b.get("commands"), list) else []
+            cmds = [c for c in cmds if not (isinstance(c, dict) and c.get("devName"))]     # another computer's
             for c in cmds:
                 if isinstance(c, dict) and not c.get("shared"):
                     c["where"] = "server"         # shared ones keep theirs: the installed app runs the local ones

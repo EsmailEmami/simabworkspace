@@ -2486,7 +2486,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.65.19"', text)
+        self.assertIn('VERSION="1.65.20"', text)
 
 
 if __name__ == "__main__":
@@ -2684,6 +2684,6 @@ class RemoveProject(TmpHome):
         with self.assertRaises(sw.ApiError):                 # the server folder of Local only is the computer's mount
             sw.App.remove_project(self.app(lo), "lo", server=True)
         with self.assertRaises(sw.ApiError):
-            sw.App.remove_project(self.app({"name": "sh", "source": "shared", "local": "", "remote": "/x/y"}), "sh")
+            sw.App.remove_project(self.app({"name": "sh", "source": "shared", "local": "", "remote": "/x/y"}), "sh", server=True)
         with self.assertRaises(sw.ApiError):                 # the web has no "this computer"
             sw.App.remove_project(self.app({"name": "w", "source": "manual", "local": "/a/b", "remote": ""}, web=True), "w", local=True)

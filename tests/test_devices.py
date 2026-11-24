@@ -65,6 +65,32 @@ class Devices(base.TmpHome):
         self.web.store.update_settings({"shareDevices": False})
         self.assertEqual(self.web.share_sync(), {})
 
+    def test_web_shows_my_computers_run_commands_and_where_they_run(self):
+        loc = Path(self.tmp.name) / "shopsrc"
+        loc.mkdir()
+        self.store.add_manual({"name": "shop", "remote": "~/shop", "local": str(loc)})
+        self.store.set_commands("shop", [{"name": "dev", "cmd": "npm run dev", "where": "local"},
+                                         {"name": "deploy", "cmd": "./deploy.sh", "where": "server"}])
+        self.laptop._projects_cache = (0.0, [])
+        self.laptop.share_sync()
+        self.web.share_sync()
+        shop = next(p for p in self.web.projects(max_age=0) if p["name"] == "shop")
+        by = {c["name"]: c for c in shop["commands"]}
+        self.assertEqual((by["dev"]["where"], by["deploy"]["where"]), ("local", "server"))
+        self.assertTrue(by["dev"]["devName"])                       # the web says which computer runs it
+        self.assertEqual(by["dev"]["devProject"], "shop")
+        self.assertEqual(by["dev"]["fromDev"], str(self.laptop.pc.cfg().get("id") or ""))
+        # a server one runs from the web on the server; a computer's one only through that computer
+        self.assertEqual(self.web.command("shop", by["deploy"]["id"])["cmd"], "./deploy.sh")
+        with self.assertRaises(sw.ApiError):
+            self.web.create_session({"kind": "run", "project": "shop", "cmdId": by["dev"]["id"]})
+        # not on this computer (no folder): its local command is not offered
+        self.assertEqual([c["name"] for c in sw.share_run_commands(dict(shop, localExists=False, buildsOn="server",
+                                                                         commands=[dict(by["dev"], devName=None)]))], [])
+        src = (Path(sw.__file__).parent / "static" / "app.js").read_text()
+        self.assertIn("'⚒ ' + pcName + ' · off'", src)              # computer off: shown, greyed out
+        self.assertIn("!c.devName", src)                            # editor leaves another computer's alone
+
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()
         self.web.share_sync()

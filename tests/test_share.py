@@ -351,7 +351,24 @@ class EndToEnd(unittest.TestCase):
         self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "raw", "port": p, "public": True, "on": True}, MAIN)
         r, d = self.req("GET", "/__simab/p/esi/esi/raw/", self.SW)
         x.close()
-        self.assertEqual((r.status, d), (502, b"this port did not answer like a web server"))
+        self.assertEqual(r.status, 502)
+        self.assertTrue(d.startswith(b"this port did not answer like a web server"))
+        self.assertIn("The port speaks HTTPS".encode(), d)            # the likely fix: an https:// port shared as http
+
+    def test_error_of_a_page_is_a_page(self):
+        """A tab's page fetched by the service worker gets the error card (not one line of plain text)."""
+        x = socket.socket()
+        x.bind(("127.0.0.1", 0))
+        x.listen(1)
+        threading.Thread(target=lambda: x.accept()[0].close(), daemon=True).start()
+        p = x.getsockname()[1]
+        self.store.db.put("pc", dict(self.pc.pc.cfg(), always={"esi": [f"share port {p} on the internet"]}))
+        self.hub.api(self.wsid, "POST", "/port", {"project": "esi", "name": "raw", "port": p, "public": True, "on": True}, MAIN)
+        r, d = self.req("GET", "/__simab/p/esi/esi/raw/", dict(self.SW, **{"X-Simab-Nav": "1"}))
+        x.close()
+        self.assertEqual(r.status, 502)
+        self.assertIn(b"<!doctype html>", d)
+        self.assertIn(b"Try again", d)
 
     def test_older_app_on_the_computer(self):
         with mock.patch.object(sw.PcHub, "serve_proxy", lambda hub, h: h._json(404, {"error": "not found"})):
@@ -729,6 +746,14 @@ class ProjectDialog(unittest.TestCase):
         lst = js[js.index("function shareProjList"):js.index("function shareRows")]
         self.assertIn("x.project === project", lst)
         self.assertIn("shareDialog(x)", lst)
+
+    def test_share_dialog_edits_port_and_https(self):
+        js = (ROOT / "gui" / "static" / "app.js").read_text()
+        ed = js[js.index("function shareEditRow"):js.index("function shareDialog")]
+        self.assertIn("port: port.value, tls: tls.checked, on: true", ed)   # same name: the link and who was let in stay
+        dlg = js[js.index("function shareDialog"):js.index("function shareAddDialog")]
+        self.assertIn("'Edit')", dlg)
+        self.assertIn("shareEditRow(cur", dlg)
 
 
 class PortStop(unittest.TestCase):

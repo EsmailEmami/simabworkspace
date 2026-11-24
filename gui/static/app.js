@@ -358,6 +358,20 @@
     return h('div', { class: 'share-acts' }, h('span', { class: 'muted share-sub grow' }, 'Started outside the workspace — its output is not here. Start it with ▶ a run command to see it.'),
       h('button', { class: 'btn sm danger', onclick: function () { sharePortStop(x); } }, '■ Stop'));
   }
+  // Edit of a shared port in its dialog: the port and whether it speaks HTTPS (the link stays the same).
+  function shareEditRow(cur, done) {
+    var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, value: String(cur.port) });
+    var tls = h('input', { type: 'checkbox' });
+    tls.checked = !!cur.tls;
+    return h('div', { class: 'share-edit' },
+      h('div', { class: 'share-edit-row' }, h('div', { class: 'field' }, h('label', null, 'Port'), port),
+        h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' The port speaks HTTPS')),
+      h('div', { class: 'share-acts' }, h('button', { class: 'btn sm', onclick: done }, 'Cancel'),
+        h('button', { class: 'btn sm primary', onclick: function () {
+          api('POST', 'share/port', Object.assign({}, cur, { port: port.value, tls: tls.checked, on: true }))
+            .then(function () { cur.port = parseInt(port.value, 10); cur.tls = tls.checked; toast('Saved', 'ok'); done(); }).catch(fail);
+        } }, 'Save')));
+  }
   function shareDialog(x) {
     var box = h('div', { class: 'share-dlg' });
     var md = openModal({ title: x.project + ' · ' + x.name + ' on the internet', body: box,
@@ -367,7 +381,7 @@
           api('POST', 'share/port', { slug: x.slug, name: x.name, on: false }).then(function () { md.close(); loadShare(); }).catch(fail);
         });
       } }, 'Stop sharing'), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
-    var url = x.urls[0] || '';
+    var url = x.urls[0] || '', editing = false;
     function ago(t) { var m = Math.round((Date.now() / 1000 - t) / 60); return m < 1 ? 'now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago'; }
     function answer(a, ans) {
       var p = S.web ? api('POST', 'account/share/answer', { id: a.id, answer: ans }) : api('POST', 'pc/guest', { id: a.id, answer: ans });
@@ -399,7 +413,9 @@
             h('span', { class: 'muted mono' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' on your computer')),
           url ? h('div', { class: 'share-acts' },
             h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, 'Open ↗'),
-            h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link')) : null),
+            h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link'),
+            h('button', { class: 'btn sm', onclick: function () { editing = !editing; draw(); } }, 'Edit')) : null),
+        editing ? shareEditRow(cur, function () { editing = false; loadShare(true); draw(); }) : '',
         shareProgram(cur, (S.shareSt || {})[shareKey(x)]) || '',
         h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg,
           h('div', { class: 'muted share-sub' }, (WHO.filter(function (a) { return a[0] === cur.access; })[0] || WHO[0])[2])),
@@ -3651,14 +3667,16 @@
       if (S.web && c.where !== 'server') {
         // a command of your computer: from here through Computers while it is connected
         var C = window.SWComputers, rx = C && C.remoteRunning(p, c);
-        if (!C || !S.remoteOnline) {
-          cmdRows.push(h('div', { class: 'cmd off', title: c.cmd + '\nruns on your computer — it is not connected (open Simab Workspace there)' },
-            h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc off')));
+        var pcName = c.devName || 'your computer';
+        var up = C && (c.fromDev ? (S.remoteOn || []).indexOf(c.fromDev) >= 0 : S.remoteOnline);
+        if (!up) {
+          cmdRows.push(h('div', { class: 'cmd off', title: c.cmd + '\nruns on ' + pcName + ' — it is off or not connected (open Simab Workspace there)' },
+            h('span', { class: 'ic' }, '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, '⚒ ' + pcName + ' · off')));
           return;
         }
-        cmdRows.push(h('div', { class: 'cmd' + (rx ? ' running' : ''), title: c.cmd + '\nruns on your computer' + (rx ? ' (' + (rx.devName || '') + ') — click: output / stop' : ' — click to start it there'),
+        cmdRows.push(h('div', { class: 'cmd' + (rx ? ' running' : ''), title: c.cmd + '\nruns on ' + pcName + (rx ? ' — click: output / stop' : ' — click to start it there'),
           onclick: function () { C.remoteRun(p, c); } },
-          h('span', { class: 'ic' }, rx ? '■' : '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, 'pc')));
+          h('span', { class: 'ic' }, rx ? '■' : '▶'), h('span', { class: 'nm' }, c.name), h('span', { class: 'tag' }, '⚒ ' + pcName)));
         return;
       }
       var t = runningCmd(p.name, c.id);
@@ -3668,7 +3686,7 @@
       cmdRows.push(h('div', { class: 'cmd' + (t ? ' running' : ''), title: c.cmd + (c.cwd ? '\nin ' + c.cwd : '') + (c.where === 'server' ? '\nruns on the server' : '\nruns on this computer') + (c.shared ? '\nshared with the project (.simab.json)' : '') + (t ? '\nclick to stop' : ''),
         onclick: function () { runCommand(p, c); } },
         h('span', { class: 'ic' }, t ? '■' : '▶'), h('span', { class: 'nm' }, c.name), res, link,
-        h('span', { class: 'tag' }, (c.shared ? '⇄ ' : '') + (c.where === 'server' ? 'srv' : 'loc'))));
+        h('span', { class: 'tag' }, (c.shared ? '⇄ ' : '') + (c.where === 'server' ? (S.web ? 'server' : 'srv') : 'loc'))));
     });
     // many run commands: the first CMD_LIMIT (and any running one) stay, the rest fold behind "N more"
     var extra = cmdRows.length > CMD_LIMIT + 1 ? cmdRows.filter(function (row, i) { return i >= CMD_LIMIT && !row.classList.contains('running'); }) : [];
@@ -3741,9 +3759,10 @@
       box._get = function () { return { id: c.id, name: name.value, where: where.value, cmd: cmd.value, url: url.value, cwd: cwd.value, shared: shared.checked }; };
       return box;
     }
-    p.commands.forEach(function (c) { list.append(row(Object.assign({}, c))); });
+    var own = p.commands.filter(function (c) { return !c.devName; });     // another computer's: edited there
+    own.forEach(function (c) { list.append(row(Object.assign({}, c))); });
     var newWhere = S.web || !p.localExists ? 'server' : 'local';
-    if (!p.commands.length) list.append(row({ where: newWhere }));
+    if (!own.length) list.append(row({ where: newWhere }));
     var sugBtn = h('button', { class: 'btn', onclick: function () {
       api('GET', 'suggest/' + encodeURIComponent(p.name)).then(function (d) {
         if (!d.suggestions.length) { toast('Nothing to suggest (looks for package.json, compose, go.mod)', 'warn'); return; }

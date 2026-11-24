@@ -169,6 +169,8 @@ global.fetch = (url, opts) => {
   else if (url === '/api/pc/default') { fakePc.devs['default'] = body.dev; res = fakePc.devs; }
   else if (url === '/api/pc/asks') res = fakePc.asks;
   else if (url === '/api/pc/net') res = fakePc.net;
+  else if (url === '/api/account/share/asks') res = { asks: fakePc.guestAsks || [], now: Date.now() / 1000 };
+  else if (url === '/api/account/share/answer') { fakePc.guestAnswer = body; fakePc.guestAsks = []; res = { ok: true, answer: body.answer }; }
   else if (url === '/api/pc/remote-asks') res = fakePc.remote || { asks: [], online: 1, now: Date.now() / 1000 };
   else if (url === '/api/pc/remote-answer') { fakePc.remoteAnswers = (fakePc.remoteAnswers || []).concat([body]); fakePc.remote = { asks: [], online: 1 }; res = { ok: true }; }
   else if (url === '/api/pc/speed') res = { down: 87.5, up: 21.3, rtt: 34 };
@@ -2109,12 +2111,12 @@ const tests = {
     fakePc.remote = { asks: [], online: 0, now: Date.now() / 1000, bg: [] };
     await global.SWComputers.webPoll(); await settle();
     assert.ok(cmdRow().classList.contains('off'));
-    assert.match(cmdRow().textContent, /pc off/);
+    assert.match(cmdRow().textContent, /⚒ your computer · off/);
     fakePc.remote = { asks: [], online: 1, now: Date.now() / 1000, bg: [], unlocked: { a1b2c3d4e5f6: Date.now() / 1000 + 3600 } };
     await global.SWComputers.webPoll(); await settle();
     assert.ok(!cmdRow().classList.contains('off'));
     cmdRow().click(); await settle();
-    assert.deepStrictEqual(fakePc.remoteRun, { project: 'cheshmeh', id: 'c1' });
+    assert.deepStrictEqual(fakePc.remoteRun, { project: 'cheshmeh', id: 'c1', dev: '' });
     const out = q('.modal').pop();
     assert.match(out.textContent, /compiled ok/);
     assert.match(out.textContent, /localhost:4300 \(on that computer\)/);
@@ -2129,6 +2131,22 @@ const tests = {
     assert.strictEqual(fakePc.remoteRun, null, 'not started twice');
     document.body.querySelector('#modal-root').replaceChildren();
     fakePc.remote = null;
+    S.web = false;
+  },
+
+  async 'web: "Ask me" on a shared link is answered on the phone (S.web known only after boot)'() {
+    const src = fs.readFileSync(path.join(ROOT, 'gui/static/computers.js'), 'utf8');
+    assert.ok(!/if \(S\.web\) \{\s*setInterval/.test(src), 'the poll is not skipped when computers.js loads before boot');
+    const S = global.SW.S;
+    S.web = true;
+    fakePc.guestAsks = [{ id: 'abcdef123456', t: 'cheshmeh/front', label: 'Chrome on Android', ip: '5.6.7.8', until: Date.now() / 1000 + 300 }];
+    await global.SWComputers.guestPoll(); await settle();
+    const md = q('.modal').pop();
+    assert.match(md.textContent, /Someone wants to open your link/);
+    q('button', md).find((b) => b.textContent === 'Allow 1 hour').click(); await settle();
+    assert.deepStrictEqual(fakePc.guestAnswer, { id: 'abcdef123456', answer: 'hour' });
+    await global.SWComputers.guestPoll(); await settle();
+    document.body.querySelector('#modal-root').replaceChildren();
     S.web = false;
   },
 

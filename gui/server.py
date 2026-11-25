@@ -5116,6 +5116,8 @@ lay = data.get("layout") if isinstance(data.get("layout"), dict) else {}
 groups = {k: v for k, v in (lay.get("groups") or {}).items() if isinstance(v, list) and len(v) == 2}
 colors = {k: v for k, v in (lay.get("colors") or {}).items() if isinstance(v, list) and len(v) == 2}
 order = lay.get("order") if isinstance(lay.get("order"), list) and len(lay.get("order")) == 2 else None
+starters = {k: v for k, v in (lay.get("starters") or {}).items() if isinstance(v, list) and len(v) == 2}
+starred = lay.get("starred") if isinstance(lay.get("starred"), list) and len(lay.get("starred")) == 2 else None
 for ch in op.get("layout") or []:      # newest change wins; at 0 = a device's first list, only where nothing is yet
     if not isinstance(ch, dict):
         continue
@@ -5131,8 +5133,15 @@ for ch in op.get("layout") or []:      # newest change wins; at 0 = a device's f
     elif k == "o" and isinstance(v, list):
         if order is None or at > float(order[1] or 0):
             order = [[str(x) for x in v if x][:2000], at]
+    elif k == "s" and isinstance(ch.get("r"), str) and ch["r"] and isinstance(v, str):
+        cur = starters.get(ch["r"])
+        if (cur is None and (v or at)) or (cur is not None and at > float(cur[1] or 0)):
+            starters[ch["r"]] = [v[:20000], at]
+    elif k == "st" and isinstance(v, list):
+        if (starred is None and (v or at)) or (starred is not None and at > float(starred[1] or 0)):
+            starred = [[str(x)[:300] for x in v if x][:500], at]
 data = {"devices": devs, "tabs": tabs, "closed": closed,
-        "layout": {"groups": groups, "colors": colors, "order": order}}
+        "layout": {"groups": groups, "colors": colors, "order": order, "starters": starters, "starred": starred}}
 tmp = f + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False)
@@ -10343,10 +10352,15 @@ class App:
         ch = [{"k": "g", "r": r, "v": (sp.get(n) or {}).get("group"), "at": 0}
               for n, r in rm.items() if (sp.get(n) or {}).get("group")]
         ch += [{"k": "c", "g": g, "v": c, "at": 0} for g, c in self.store.group_colors().items() if c]
+        ch += [{"k": "s", "r": r, "v": (sp.get(n) or {}).get("starter"), "at": 0}
+               for n, r in rm.items() if (sp.get(n) or {}).get("starter")]
+        st = self.store.settings.get("starred") or []
+        if st:
+            ch.append({"k": "st", "v": list(st), "at": 0})
         o = self._layout_order(rm)
         return ch + ([{"k": "o", "v": o, "at": 0}] if o else [])
 
-    def layout_changed(self, names=(), colors=(), order=False):
+    def layout_changed(self, names=(), colors=(), order=False, starters=(), starred=False):
         """A group / group colour / order change made here: on the server at the next share round (now)."""
         if not self.share_on():
             return
@@ -10358,6 +10372,11 @@ class App:
         ch += [{"k": "c", "g": g, "v": gc.get(g, ""), "at": now} for g in colors if g]
         if order:
             ch.append({"k": "o", "v": self._layout_order(rm), "at": now})
+        for n in starters:
+            if rm.get(n):
+                ch.append({"k": "s", "r": rm[n], "v": (self.store.data["projects"].get(n) or {}).get("starter") or "", "at": now})
+        if starred:
+            ch.append({"k": "st", "v": list(self.store.settings.get("starred") or []), "at": now})
         if ch:
             with self._layout_lock:
                 self._layout_out += ch
@@ -10383,6 +10402,21 @@ class App:
                     rec = self.store.data["projects"].setdefault(n, {})
                     if (rec.get("group") or "") != v[0][:40]:
                         rec["group"], changed = v[0][:40], True
+            starters = lay.get("starters") if isinstance(lay.get("starters"), dict) else {}
+            for r, names in by.items():        # starter message: the newest one set on any device
+                v = starters.get(r)
+                if not (isinstance(v, list) and v and isinstance(v[0], str)):
+                    continue
+                for n in names:
+                    rec = self.store.data["projects"].setdefault(n, {})
+                    if (rec.get("starter") or "") != v[0][:20000]:
+                        rec["starter"], changed = v[0][:20000], True
+            st = lay.get("starred")             # starred commands / menu entries: the same list everywhere
+            if isinstance(st, list) and st and isinstance(st[0], list):
+                want = [str(x) for x in st[0] if x][:500]
+                if want != list(self.store.settings.get("starred") or []):
+                    self.store.data["settings"]["starred"] = want
+                    changed = True
             cols = {g: v[0] for g, v in (lay.get("colors") or {}).items()
                     if isinstance(v, list) and v and isinstance(v[0], str) and re.fullmatch(r"#[0-9a-f]{6}", v[0])}
             if isinstance(lay.get("colors"), dict) and cols != self.store.group_colors():
@@ -14572,11 +14606,14 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("GET", "state"):
             return app.state()
         if route == ("GET", "projects"):
-            return {"projects": app.projects()}
+            return {"projects": app.projects(), "starred": list(app.store.settings.get("starred") or [])}
         if route == ("GET", "status"):
             return app.status(force=query.get("force") == ["1"])
         if route == ("POST", "settings"):
-            s = app.store.update_settings(self._body())
+            body = self._body()
+            s = app.store.update_settings(body)
+            if isinstance(body, dict) and "starred" in body:
+                app.layout_changed(starred=True)
             return {"settings": s}
         if route == ("POST", "commands") and len(parts) == 2:
             return {"commands": app.set_commands(parts[1], self._body().get("commands"))}
@@ -14587,6 +14624,7 @@ class Handler(BaseHTTPRequestHandler):
             app._project(parts[1])
             t = app.store.set_starter(parts[1], self._body().get("text"))
             app.invalidate()
+            app.layout_changed(starters=[parts[1]])
             return {"starter": t}
         if route == ("POST", "title") and len(parts) == 2:
             app._project(parts[1])

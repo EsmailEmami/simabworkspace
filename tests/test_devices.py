@@ -174,6 +174,24 @@ class Devices(base.TmpHome):
         self.web.share_sync()
         self.assertEqual(self.proj(self.web, "shop")["group"], "")
 
+    def test_starter_messages_and_stars_are_the_same_on_every_device(self):
+        self.laptop.store.set_starter("shop", "Read memory first.")      # set before the new computer joined
+        self.laptop.store.update_settings({"starred": ["cmd:Git", "proj:Files"]})
+        self.web.store.add_manual({"name": "shop", "remote": "~/shop"})   # the same project, added there too
+        self.laptop.share_sync()
+        self.web.share_sync()
+        self.assertEqual(self.proj(self.web, "shop")["starter"], "Read memory first.")
+        self.assertEqual(self.web.store.settings["starred"], ["cmd:Git", "proj:Files"])
+        # changed / removed on the new one: the old one follows, its own first list does not undo it
+        self.web.store.set_starter("shop", "")
+        self.web.layout_changed(starters=["shop"])
+        self.web.store.update_settings({"starred": ["cmd:Git"]})
+        self.web.layout_changed(starred=True)
+        self.web.share_sync()
+        self.laptop.share_sync()
+        self.assertEqual(self.proj(self.laptop, "shop")["starter"], "")
+        self.assertEqual(self.laptop.store.settings["starred"], ["cmd:Git"])
+
     def test_the_same_folder_under_another_name_shares_its_group(self):
         self.web.store.add_manual({"name": "shop-web", "remote": "/home/esi/shop/"})
         self.web.share_sync()

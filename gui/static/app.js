@@ -5249,6 +5249,7 @@
     var gen = S.projGen || 0;
     return api('GET', 'projects').then(function (d) {
       if ((S.projGen || 0) !== gen) return;        // stale: asked before a group / order change landed
+      if (d.starred && S.settings) S.settings.starred = d.starred;      // stars set on another device
       var key = JSON.stringify(d.projects);
       if (key !== S.projectsKey) {
         S.projectsKey = key;

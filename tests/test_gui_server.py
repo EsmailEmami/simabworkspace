@@ -2310,6 +2310,21 @@ class SyncDetailsAndConflicts(TmpHome):
                 self.assertTrue((icons / f).is_file(), f)
             self.assertFalse(sw.linux_menu_entry(re.search(r"Exec=(\S+) gui", desk).group(1)), "nothing changed → nothing written")
 
+    def test_install_adds_the_linux_menu_entry(self):
+        bin_ = Path(self.tmp.name, ".local", "bin", "simabworkspace")
+        with mock.patch.dict(os.environ, {"HOME": self.tmp.name}), mock.patch.object(sw, "is_wsl", return_value=False), \
+                mock.patch.object(sw.sys, "platform", "linux"), mock.patch.object(sw, "IS_WIN", False), \
+                mock.patch("builtins.print"):
+            self.assertEqual(sw.main(["server.py", "shortcut"]), 1, "not installed yet")
+            bin_.parent.mkdir(parents=True)
+            bin_.write_text("#!/bin/sh\n")
+            self.assertEqual(sw.main(["server.py", "shortcut"]), 0)
+        desk = Path(self.tmp.name, ".local", "share", "applications", "simabworkspace.desktop").read_text()
+        self.assertIn("Exec=%s gui\n" % bin_, desk)
+        self.assertIn("StartupWMClass=simabworkspace", desk)
+        self.assertIn('shortcut)  run_gui_cmd shortcut', (ROOT / "simabworkspace.sh").read_text())
+        self.assertIn('"$BIN" shortcut', (ROOT / "install.sh").read_text())
+
     def test_gui_open_puts_the_logo_in_the_linux_menu(self):
         with mock.patch.object(sw, "linux_desktop", return_value=True), mock.patch.object(sw, "linux_menu_entry") as entry, \
                 mock.patch.object(sw, "ensure_running", return_value={}), mock.patch.object(sw, "open_window"):

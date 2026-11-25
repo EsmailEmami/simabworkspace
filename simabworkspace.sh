@@ -2021,6 +2021,7 @@ main() {
     gui)       [ -x "$BIN_DIR/mutagen" ] && ensure_path; run_gui "${2:-open}"; exit $? ;;
     web)       shift; run_web "$@"; exit $? ;;
     pair)      run_gui_cmd pair "${2:-}"; exit $? ;;
+    shortcut)  run_gui_cmd shortcut; exit $? ;;   # install.sh: the app-menu entry with the logo
   esac
 
   # first run, or a tool went missing: full setup (prereqs → user → SSH key)

@@ -58,7 +58,12 @@ elif [ ! -f "$CONFIG" ] && [ -r /dev/tty ] && [ -z "${SIMAB_NO_SETUP:-}" ]; then
   "$BIN" setup </dev/tty || say "Setup did not finish — run: simabworkspace setup"
 fi
 
+# the app menu entry (with the logo): open it from there, no command needed (Linux desktops)
+menu=0
+if [ "$(uname -s)" = Linux ] && [ -z "${WSL_DISTRO_NAME:-}" ] && "$BIN" shortcut >/dev/null 2>&1; then menu=1; fi
+
 say ""
+[ $menu = 1 ] && say "✓ Simab Workspace is in your app menu — open it from there (pin it to the dock if you like)."
 say "✓ Done. Open a new terminal (or run: export PATH=\"\$HOME/.local/bin:\$PATH\"), then:"
 say "    simabworkspace          menu"
 say "    simabworkspace gui      the workspace window"

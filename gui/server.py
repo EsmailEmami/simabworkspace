@@ -15295,6 +15295,12 @@ def main(argv):
         return pair_computer(argv[2])
     elif cmd == "shortcut" and IS_WIN:        # used by install.ps1
         print("  ✓ Added to the " + make_windows_shortcut())
+    elif cmd == "shortcut":                   # install.sh: the app-menu entry with the logo (Linux desktops)
+        inst = home_path(".local", "bin", "simabworkspace")
+        if not (sys.platform.startswith("linux") and not is_wsl() and inst.is_file()):
+            return 1
+        linux_menu_entry(str(inst))
+        print("  ✓ Added to the app menu")
     else:
         print(__doc__ or "usage: server.py [open|serve|url|status|stop]")
         return 1

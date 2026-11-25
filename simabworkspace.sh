@@ -47,6 +47,7 @@
 #    1.66.1  2026-11-25  A new computer: "Sync to this computer" (project ⋯) and "Sync all projects to this computer" (Ctrl+Shift+P) download the projects added on another device
 #    1.66.2  2026-11-25  Linux: the app logo in the app menu and on the open window (dock), not a gear — the menu entry is made / fixed on every start
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
+#    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.65.18 2026-11-23  A project added on another device can be removed from this list; setting "Keep the message box shown" in chats
 #    1.65.17 2026-11-23  Mac: a project put in a group no longer jumps back for a moment (a refresh asked before the move is dropped)
 #    1.65.16 2026-11-23  A project group never vanishes by itself (last project moved out, or a refresh with an older list); only Ungroup removes it
@@ -409,7 +410,7 @@
 
 set -u -o pipefail
 
-VERSION="1.66.3"
+VERSION="1.67.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -847,7 +847,10 @@ const tests = {
     item.click();
     await settle();
     const modal = q('.modal').pop();
-    assert.ok(!q('select', modal).length, 'no project choice: it is the one of the menu');
+    const sels = q('select', modal);
+    assert.strictEqual(sels.length, 1, 'no project choice (the one of the menu), only the computer');
+    assert.deepStrictEqual(q('option', sels[0]).map((o) => o.textContent), ['The project’s computer', 'laptop'], 'my computers to choose from');
+    sels[0].value = 'a1b2c3d4e5f6';
     const ins = q('input', modal);
     ins[0].value = 'api'; ins[0].dispatch('input'); ins[1].value = '6000';
     assert.ok(modal.textContent.includes('https://apps.x/esi/cheshmeh/api'), 'the link is shown before sharing');
@@ -855,9 +858,40 @@ const tests = {
     q('button', modal).find((b) => b.textContent === 'Share').click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/share/port').pop().body;
-    assert.deepStrictEqual([post.project, post.name, post.port, post.access, post.on], ['cheshmeh', 'api', '6000', 'public', true]);
+    assert.deepStrictEqual([post.project, post.name, post.port, post.access, post.on, post.pc], ['cheshmeh', 'api', '6000', 'public', true, 'a1b2c3d4e5f6']);
     S.share = null;
     document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'computers: only connected ones that have the project are offered (share port, builds)'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const S = global.SW.S;
+    const pr = global.SW.project('cheshmeh');
+    const devs = { devices: [{ id: 'a1b2c3d4e5f6', name: 'laptop', online: true }, { id: 'b2', name: 'desk', online: true }, { id: 'c3', name: 'old', online: false }],
+      builds: { cheshmeh: 'computers' }, pins: {}, self: 'ffffffffffff' };
+    const saved = fakePc.devs;
+    fakePc.devs = devs;
+    pr.pcs = ['b2', 'c3'];
+    let st = global.SWComputers.buildState('cheshmeh', devs, '');
+    assert.strictEqual(st.dev, 'desk', 'laptop is on but has not got the project; old has it but is off');
+    pr.pcs = [];
+    st = global.SWComputers.buildState('cheshmeh', devs, '');
+    assert.strictEqual(st.ok, false);
+    assert.match(st.text, /None of your connected computers has this project/);
+    pr.pcs = ['b2'];
+    S.share = { base: '', shares: [] };
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.indexOf('Share a port on your domain…') === 0).click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.deepStrictEqual(q('option', q('select', modal)[0]).map((o) => o.textContent), ['The project’s computer', 'desk']);
+    q('button', modal).find((b) => b.textContent === 'Cancel').click();
+    await settle();
+    delete pr.pcs;
+    fakePc.devs = saved;
+    S.share = null;
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.body.querySelector('#menu-root').replaceChildren();
   },
 
   async 'settings: a sound or a voice per chat state, kept on this device'() {
@@ -1821,7 +1855,7 @@ const tests = {
     // the sidebar marks it: works (a computer is connected) / will stop (none)
     await settle();
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
-    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ PC', 'builds here: not the same mark as Local only');
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ laptop', 'builds here, on which computer: not the same mark as Local only');
     assert.ok(q('.pcb', head())[0].classList.contains('ok'));
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'My computers');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] }));
@@ -1943,7 +1977,7 @@ const tests = {
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { builds: { cheshmeh: 'local', shop: 'server' } }));
     const head = () => q('.proj-head').find((x) => /cheshmeh/.test(x.textContent));
     assert.ok(q('.pcb', head())[0].classList.contains('ok'));
-    assert.strictEqual(q('.pcb', head())[0].textContent, '⌂ local');
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⌂ laptop');
     assert.match(q('.pcb', head())[0].getAttribute('title'), /Lives on laptop/);
     assert.strictEqual(global.SWComputers.menuLabel('cheshmeh'), 'Local only');
     global.SWComputers._setInfo(Object.assign({}, fakePc.devs, { devices: [], builds: { cheshmeh: 'local', shop: 'server' } }));
@@ -2287,7 +2321,7 @@ const tests = {
       devices: [Object.assign({}, fakePc.devs.devices[0], { online: false })] });
     await global.SWComputers.poll(); await settle();
     assert.strictEqual(fakePc.devUrl, '/api/pc/devices/fresh', 'link came up: asked again at once');
-    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ PC');
+    assert.strictEqual(q('.pcb', head())[0].textContent, '⚒ laptop');
     fakePc.devs = Object.assign({}, fakePc.devs, { devices: [Object.assign({}, fakePc.devs.devices[0], { online: true })] });
     delete fakePc.devs.builds;
     fakePc.devs.builds = { cheshmeh: 'server', shop: 'server' };

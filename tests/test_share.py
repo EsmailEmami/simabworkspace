@@ -56,6 +56,36 @@ class Helpers(unittest.TestCase):
         self.assertFalse(sw.SHARE_SLUG_RE.fullmatch("-x"))
 
 
+class SharePc(unittest.TestCase):
+    """A shared port runs on the computer chosen for it — never on another one."""
+
+    def test_kept_and_used(self):
+        d = sw.share_edit({}, "/port", {"project": "shop", "name": "front", "port": 3000, "on": True, "pc": "b2"})
+        self.assertEqual(d["shares"][0]["pc"], "b2")
+        self.assertEqual(sw.share_clean(d)["shares"][0]["pc"], "b2")
+        self.assertEqual(sw.share_edit({}, "/port", {"project": "shop", "name": "f", "port": 1, "on": True, "pc": "../x y"})["shares"][0]["pc"], "")
+        app = mock.Mock()
+        app.pc_devices.return_value = {"devices": [{"id": "a1", "name": "laptop", "online": True}, {"id": "b2", "name": "desk", "online": False}],
+                                       "pins": {"shop": "a1"}}
+        hub = sw.ShareHub.__new__(sw.ShareHub)
+        self.assertEqual(hub.device(app, "shop"), "a1")
+        with self.assertRaises(sw.ApiError) as cm:
+            hub.device(app, "shop", "b2")
+        self.assertIn("desk is not connected", cm.exception.message)
+
+    def test_project_pcs(self):
+        app = sw.App.__new__(sw.App)
+        app.web, app.pc = False, mock.Mock()
+        app.pc.cfg.return_value = {"id": "me"}
+        app._share_projects = [{"name": "shop", "remote": "~/shop", "pc": "b2", "here": True},
+                               {"name": "shop", "remote": "/home/esi/shop", "pc": "c3", "here": False},
+                               {"name": "shop", "remote": "~/shop", "pc": "d4"}]          # older version: counted in
+        ps = [{"name": "shop", "remote": "~/shop", "localExists": True}, {"name": "api", "remote": "~/api", "localExists": False},
+              {"name": "lo", "remote": "~/.simab-mnt/lo", "localOnly": "b2"}]
+        app._project_pcs(ps)
+        self.assertEqual([x["pcs"] for x in ps], [["me", "b2", "d4"], [], ["b2"]])
+
+
 class DevServer(BaseHTTPRequestHandler):
     """What runs on the user's computer (localhost:3001 …)."""
     protocol_version = "HTTP/1.1"
@@ -160,7 +190,7 @@ class EndToEnd(unittest.TestCase):
         hub = self.hub = self.gate.share
         self.link = {"proc": None, "sock": self.fwd.path, "secret": self.secret, "port": self.pc.port, "used": 0, "active": 0}
         hub.link = lambda ws, app, dev: self.link
-        hub.device = lambda app, project: "dev1"
+        hub.device = lambda app, project, pc="": "dev1"
         self.web = sw.make_web_server(self.gate, "127.0.0.1", 0)
         threading.Thread(target=self.web.serve_forever, daemon=True).start()
         self.port = self.web.server_address[1]
@@ -379,7 +409,7 @@ class EndToEnd(unittest.TestCase):
     def test_status_through_the_computer(self):
         st = self.hub.probe(self.wsid, None, [self.hub.find(self.wsid, "esi", n) for n in ("front", "off", "ws")])
         self.assertEqual(st, {"esi/front": "on", "esi/off": "port-off", "esi/ws": "on"})
-        self.hub.device = lambda app, project: (_ for _ in ()).throw(sw.ApiError(503, "offline"))
+        self.hub.device = lambda app, project, pc="": (_ for _ in ()).throw(sw.ApiError(503, "offline"))
         self.assertEqual(self.hub.probe(self.wsid, None, [self.hub.find(self.wsid, "esi", "front")]), {"esi/front": "pc-off"})
 
     def test_wrong_secret_is_refused_by_the_computer(self):
@@ -564,7 +594,7 @@ class Settings(unittest.TestCase):
 
     def test_ports(self):
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "name": "Front", "port": "3001", "on": True}, MAIN)
-        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False, "access": "private",
+        self.assertEqual(st["shares"], [{"slug": "my-shop", "name": "front", "project": "My Shop", "port": 3001, "public": False, "tls": False, "pc": "", "access": "private",
                                          "urls": []}], "no user for this workspace: no link")
         st = self.hub.api("a", "POST", "/port", {"project": "My Shop", "slug": "shop", "name": "front", "port": 3001, "public": True,
                                                  "old": {"slug": "my-shop", "name": "front"}, "on": True}, MAIN)
@@ -750,7 +780,7 @@ class ProjectDialog(unittest.TestCase):
     def test_share_dialog_edits_port_and_https(self):
         js = (ROOT / "gui" / "static" / "app.js").read_text()
         ed = js[js.index("function shareEditRow"):js.index("function shareDialog")]
-        self.assertIn("port: port.value, tls: tls.checked, on: true", ed)   # same name: the link and who was let in stay
+        self.assertIn("port: port.value, tls: tls.checked, pc: pc.value, on: true", ed)   # same name: the link and who was let in stay
         dlg = js[js.index("function shareDialog"):js.index("function shareAddDialog")]
         self.assertIn("'Edit')", dlg)
         self.assertIn("shareEditRow(cur", dlg)

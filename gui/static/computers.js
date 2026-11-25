@@ -37,6 +37,11 @@
   function kids(el, list) { el.replaceChildren.apply(el, list.filter(Boolean)); }
 
   // where a project builds and whether that works right now
+  // the project's files are on that computer (synced / Local only); unknown (older server data) → yes
+  function hasProject(name, id) {
+    var pr = (S.projects || []).filter(function (x) { return x.name === name; })[0];
+    return !pr || !Array.isArray(pr.pcs) || pr.pcs.indexOf(id) >= 0;
+  }
   // chatPc: the computer chosen in one chat (its ⚒ chip) — before the project's and the default
   function buildState(name, d, chatPc) {
     d = d || info;
@@ -58,8 +63,9 @@
       return isOn(pd) ? { on: 'computers', ok: true, dev: pn, text: 'Commands run on ' + pn + ' (' + why + '; files synced with the server)' }
         : { on: 'computers', ok: false, dev: pn, text: pn + ' (' + why + ') is not connected — Claude cannot run its commands' };
     }
-    var on = online(d);
+    var on = online(d).filter(function (x) { return hasProject(name, x.id); });
     return on.length ? { on: 'computers', ok: true, dev: on.map(function (x) { return x.name; }).join(', '), text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
+      : online(d).length ? { on: 'computers', ok: false, text: 'None of your connected computers has this project — sync it to one (⋯ → Sync to this computer)' }
       : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude cannot run its commands' };
   }
 
@@ -91,7 +97,12 @@
     // two different things: Local only = the files live there; My computers = only builds run there
     var local = st.on === 'local';
     return h('span', { class: 'gb pcb ' + (local ? 'lo ' : 'bd ') + (st.ok ? 'ok' : 'bad'), title: st.text + ' — click for Computers',
-      onclick: function (e) { e.stopPropagation(); open(p.name); } }, (local ? '⌂ local' : '⚒ PC') + (st.ok ? '' : ' off'));
+      onclick: function (e) { e.stopPropagation(); open(p.name); } }, (local ? '⌂ ' : '⚒ ') + pcLabel(st, local) + (st.ok ? '' : ' off'));
+  }
+  // the computer's name on the sidebar mark ("2 PCs" when it may run on several)
+  function pcLabel(st, local) {
+    var n = st.dev ? st.dev.split(', ') : [];
+    return n.length === 1 ? n[0] : n.length > 1 ? n.length + ' PCs' : local ? 'local' : 'PC';
   }
   function menuLabel(name) {
     var st = buildState(name);
@@ -636,9 +647,13 @@
     var base = buildState(name, info, '');
     var items = [{ header: 'Commands of this chat run on' },
       { label: (cur ? '   ' : '✓ ') + 'Project setting (' + (base && base.dev ? base.dev : 'any connected') + ')', action: function () { pick(''); } }];
-    (info.devices || []).forEach(function (x) {
-      items.push({ label: (cur === x.id ? '✓ ' : '   ') + x.name + (isOn(x) ? '' : ' (not connected)'), action: function () { pick(x.id); } });
+    // only connected computers that have this project's files (the one chosen stays, marked)
+    var can = (info.devices || []).filter(function (x) { return (isOn(x) && hasProject(name, x.id)) || x.id === cur; });
+    can.forEach(function (x) {
+      items.push({ label: (cur === x.id ? '✓ ' : '   ') + x.name + (!isOn(x) ? ' (not connected)' : hasProject(name, x.id) ? '' : ' (project not synced there)'),
+        action: function () { pick(x.id); } });
     });
+    if (!can.length) items.push({ label: 'No connected computer has this project', disabled: true });
     items.push('-', { label: 'Project setting… (Computers)', action: function () { open(name); } });
     function pick(id) {
       if (id === cur) return;

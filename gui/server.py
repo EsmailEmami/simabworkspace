@@ -10019,10 +10019,35 @@ class App:
             x["groupColor"] = gcol.get(x.get("group") or "", "") if x.get("group") else ""
         for x in p:                   # where its builds run (Computers): run commands follow it
             x["buildsOn"] = "local" if x.get("localOnly") else builds.get(x["name"], "server")
+        self._project_pcs(p)
         self._projects_cache = (time.time(), p)
         return p
 
     SHARED_TTL = 30
+
+    def _project_pcs(self, ps: list):
+        """x["pcs"]: my computers (Computers ids) that have the project's files — this one if it has them,
+        the others from their devices.json snapshot (an older version that does not say: counted in)."""
+        me = ""
+        if not self.web and getattr(self, "pc", None):
+            try:
+                me = str(self.pc.cfg().get("id") or "")
+            except Exception:
+                me = ""
+        by_key = {}
+        for sp in self._share_projects:
+            k, pc = layout_key(sp.get("remote")), str(sp.get("pc") or "")
+            if k and pc and sp.get("here", True) is not False:
+                by_key.setdefault(k, []).append(pc)
+        for x in ps:
+            if x.get("localOnly"):
+                x["pcs"] = [x["localOnly"]]
+                continue
+            hs = [me] if me and x.get("localExists") else []
+            for pc in by_key.get(layout_key(x.get("remote")), []):
+                if pc not in hs:
+                    hs.append(pc)
+            x["pcs"] = hs
 
     def _shared_side(self, p: dict) -> str:
         if p.get("localExists") and not self.web:
@@ -10183,6 +10208,7 @@ class App:
             rec = {k: p.get(k) or "" for k in ("name", "remote", "title", "color", "starter")}
             if not self.web:              # its own run commands: the web shows them and runs them here / on the server
                 rec["pc"], rec["commands"] = pc_id, share_run_commands(p)
+                rec["here"] = bool(p.get("localExists"))      # its files are on this computer (synced / Local only)
             out.append(rec)
         return out[:300]
 
@@ -12812,10 +12838,17 @@ def share_clean(data) -> dict:
             continue
         seen.add((sl, nm))
         shares.append({"slug": sl, "name": nm, "project": str(x.get("project") or sl)[:200], "port": port,
-                       "access": x.get("access") if x.get("access") in SHARE_ACCESS else "private", "tls": bool(x.get("tls"))})
+                       "access": x.get("access") if x.get("access") in SHARE_ACCESS else "private", "tls": bool(x.get("tls")),
+                       "pc": share_pc(x.get("pc"))})
     base = data.get("base") if isinstance(data.get("base"), str) and re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?/[a-z0-9._-]+", data.get("base") or "") else ""
     revoke = [g for g in (data.get("revoke") or []) if isinstance(g, str) and re.fullmatch(r"[0-9a-f]{16}", g)][:100]
     return {"domains": doms, "shares": shares[:SHARE_MAX], "base": base, "revoke": revoke}
+
+
+def share_pc(v) -> str:
+    """The computer a shared port runs on (its device id); "" = the project's computer."""
+    v = str(v or "")
+    return v if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", v) else ""
 
 
 def share_edit(data: dict, sub: str, body: dict, host: str = "", hosts=()) -> dict:
@@ -12843,7 +12876,8 @@ def share_edit(data: dict, sub: str, body: dict, host: str = "", hosts=()) -> di
         if len(rest) >= SHARE_MAX:
             raise ApiError(400, f"at most {SHARE_MAX} shared ports")
         access = body.get("access") if body.get("access") in SHARE_ACCESS else "public" if body.get("public") else "private"
-        rest.append({"slug": slug, "name": name, "project": project, "port": port, "access": access, "tls": bool(body.get("tls"))})
+        rest.append({"slug": slug, "name": name, "project": project, "port": port, "access": access, "tls": bool(body.get("tls")),
+                     "pc": share_pc(body.get("pc"))})
     data["shares"] = sorted(rest, key=lambda x: (x["slug"], x["name"]))
     return data
 
@@ -13027,7 +13061,7 @@ class ShareHub:
         self.db.run("CREATE TABLE IF NOT EXISTS web_share_domains (domain TEXT PRIMARY KEY, ws TEXT NOT NULL, main TEXT NOT NULL)")
         self.db.run("CREATE TABLE IF NOT EXISTS web_shares (ws TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, "
                     "project TEXT NOT NULL, port INTEGER NOT NULL, public INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ws, slug, name))")
-        for col in ("tls INTEGER NOT NULL DEFAULT 0", "ask INTEGER NOT NULL DEFAULT 0"):
+        for col in ("tls INTEGER NOT NULL DEFAULT 0", "ask INTEGER NOT NULL DEFAULT 0", "pc TEXT NOT NULL DEFAULT ''"):
             try:
                 self.db.run("ALTER TABLE web_shares ADD COLUMN " + col)
             except sqlite3.Error:
@@ -13095,11 +13129,11 @@ class ShareHub:
         return sh
 
     def _find(self, ws: str, slug: str, name: str):
-        r = self.db.rows("SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
+        r = self.db.rows("SELECT slug, name, project, port, public, tls, ask, pc FROM web_shares WHERE ws = ? AND slug = ? AND name = ?", (ws, slug, name))
         if not r:
             return None
         return {"slug": r[0][0], "name": r[0][1], "project": r[0][2], "port": r[0][3], "public": bool(r[0][4]),
-                "tls": bool(r[0][5]), "ask": bool(r[0][6]), "access": "public" if r[0][4] else "ask" if r[0][6] else "private"}
+                "tls": bool(r[0][5]), "ask": bool(r[0][6]), "access": "public" if r[0][4] else "ask" if r[0][6] else "private", "pc": r[0][7]}
 
     def ports(self, ws: str, slug: str, signed: bool, user: str = "") -> list:
         """[{port, t}] of this workspace, this project first: a page that calls localhost:PORT (its API)
@@ -13113,7 +13147,7 @@ class ShareHub:
     def data_of(self, ws: str) -> dict:
         """This workspace's domains + shared ports, as kept in the user's share.json on the server."""
         st = self.state(ws)
-        return {"shares": [{k: x[k] for k in ("slug", "name", "project", "port", "access", "tls")}
+        return {"shares": [{k: x[k] for k in ("slug", "name", "project", "port", "access", "tls", "pc")}
                                                      for x in st["shares"]]}
 
     def main_of(self, ws: str) -> str:
@@ -13130,9 +13164,9 @@ class ShareHub:
         self.db.run("DELETE FROM web_shares WHERE ws = ?", (ws,))
         for x in data.get("shares") or []:
             a = x.get("access") if x.get("access") in SHARE_ACCESS else "private"
-            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls, ask) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            self.db.run("INSERT OR REPLACE INTO web_shares (ws, slug, name, project, port, public, tls, ask, pc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (ws, x["slug"], x["name"], x["project"], int(x["port"]), 1 if a == "public" else 0, 1 if x.get("tls") else 0,
-                         1 if a == "ask" else 0))
+                         1 if a == "ask" else 0, share_pc(x.get("pc"))))
 
     def pull(self, ws: str, app):
         """Read share.json of this workspace (the app may have changed it); the first time, write ours there."""
@@ -13185,7 +13219,7 @@ class ShareHub:
         by_dev = {}
         for x in shares:
             try:
-                by_dev.setdefault(self.device(app, x["project"]), []).append(x)
+                by_dev.setdefault(self.device(app, x["project"], x.get("pc") or ""), []).append(x)
             except ApiError:
                 out[f"{x['slug']}/{x['name']}"] = "pc-off"
         for dev, xs in by_dev.items():
@@ -13215,9 +13249,9 @@ class ShareHub:
     def state(self, ws: str) -> dict:
         base = self.base(ws)
         shares = []
-        for slug, name, project, port, pub, tls, ask in self.db.rows(
-                "SELECT slug, name, project, port, public, tls, ask FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
-            shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub), "tls": bool(tls),
+        for slug, name, project, port, pub, tls, ask, pc in self.db.rows(
+                "SELECT slug, name, project, port, public, tls, ask, pc FROM web_shares WHERE ws = ? ORDER BY slug, name", (ws,)):
+            shares.append({"slug": slug, "name": name, "project": project, "port": port, "public": bool(pub), "tls": bool(tls), "pc": pc,
                            "access": "public" if pub else "ask" if ask else "private",
                            "urls": [f"{base}/{slug}/{name}"] if base else []})
         now = time.time()
@@ -13425,9 +13459,16 @@ class ShareHub:
         return h._send(200, share_page("Asking…", "Asking the owner of this link to let you in…", js, busy=True), MIME[".html"])
 
     # the way to the computer --------------------------------------------------------------------------
-    def device(self, app, project: str) -> str:
+    def device(self, app, project: str, pc: str = "") -> str:
+        """The computer a shared port runs on: the one chosen for this port (never another one — its port
+        would be a different app), else the project's computer, else any connected one."""
         info = app.pc_devices(cached=True)
         on = [d for d in info.get("devices") or [] if d.get("online")]
+        if pc:
+            if any(d.get("id") == pc for d in on):
+                return pc
+            nm = next((d.get("name") for d in info.get("devices") or [] if d.get("id") == pc), "") or "that computer"
+            raise ApiError(503, f"{nm} is not connected — open Simab Workspace on it")
         pin = (info.get("pins") or {}).get(project)
         for d in on:
             if d.get("id") == pin:
@@ -13503,7 +13544,7 @@ class ShareHub:
 
     def dial(self, ws: str, app, share: dict, guest: str = ""):
         """→ (socket to the port of the computer, link) after the computer said yes."""
-        ln = self.link(ws, app, self.device(app, share["project"]))
+        ln = self.link(ws, app, self.device(app, share["project"], share.get("pc") or ""))
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(PC_ASK_WAIT + 15)       # the first time, the computer asks its user
         try:

@@ -359,17 +359,49 @@
       h('button', { class: 'btn sm danger', onclick: function () { sharePortStop(x); } }, '■ Stop'));
   }
   // Edit of a shared port in its dialog: the port and whether it speaks HTTPS (the link stays the same).
+  // which computer a shared port runs on: "" = the project's computer (Commands run on…), else one device
+  var sharePcs = null;
+  function loadSharePcs() {
+    return api('GET', 'pc/devices').then(function (d) { sharePcs = (d && d.devices) || []; return sharePcs; }, function () { return sharePcs || []; });
+  }
+  function sharePcName(id) {
+    var d = (sharePcs || []).filter(function (x) { return x.id === id; })[0];
+    return d ? d.name || id : id ? 'a removed computer' : '';
+  }
+  // only my connected computers that have the project's files (+ the one chosen before, marked)
+  function sharePcSelect(value, project) {
+    var sel = h('select', { class: 'inp', title: 'The computer whose localhost:PORT is opened' }, h('option', { value: '' }, 'The project’s computer'));
+    function fill(all) {
+      var v = sel.value || value || '';
+      var pr = S.projects && S.projects.filter(function (x) { return x.name === project(); })[0];
+      var list = (all || []).filter(function (d) {
+        return d.id === v || (d.online && (!pr || !Array.isArray(pr.pcs) || pr.pcs.indexOf(d.id) >= 0));
+      });
+      sel.replaceChildren.apply(sel, [h('option', { value: '' }, 'The project’s computer')].concat(list.map(function (d) {
+        return h('option', { value: d.id }, (d.name || d.id) + (d.online ? '' : ' · off'));
+      })));
+      if (v && !list.some(function (d) { return d.id === v; })) sel.append(h('option', { value: v }, 'a removed computer'));
+      sel.value = v;
+    }
+    fill(sharePcs || []);
+    loadSharePcs().then(fill);
+    sel.refill = function () { fill(sharePcs || []); };
+    return sel;
+  }
+  function shareOnWhere(x) { return x.pc ? 'on ' + sharePcName(x.pc) : 'on the project’s computer'; }
+
   function shareEditRow(cur, done) {
     var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, value: String(cur.port) });
     var tls = h('input', { type: 'checkbox' });
     tls.checked = !!cur.tls;
+    var pc = sharePcSelect(cur.pc || '', function () { return cur.project; });
     return h('div', { class: 'share-edit' },
-      h('div', { class: 'share-edit-row' }, h('div', { class: 'field' }, h('label', null, 'Port'), port),
+      h('div', { class: 'share-edit-row' }, h('div', { class: 'field' }, h('label', null, 'Port'), port), h('div', { class: 'field' }, h('label', null, 'Computer'), pc),
         h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' The port speaks HTTPS')),
       h('div', { class: 'share-acts' }, h('button', { class: 'btn sm', onclick: done }, 'Cancel'),
         h('button', { class: 'btn sm primary', onclick: function () {
-          api('POST', 'share/port', Object.assign({}, cur, { port: port.value, tls: tls.checked, on: true }))
-            .then(function () { cur.port = parseInt(port.value, 10); cur.tls = tls.checked; toast('Saved', 'ok'); done(); }).catch(fail);
+          api('POST', 'share/port', Object.assign({}, cur, { port: port.value, tls: tls.checked, pc: pc.value, on: true }))
+            .then(function () { cur.port = parseInt(port.value, 10); cur.tls = tls.checked; cur.pc = pc.value; toast('Saved', 'ok'); done(); }).catch(fail);
         } }, 'Save')));
   }
   function shareDialog(x) {
@@ -410,7 +442,7 @@
         h('div', { class: 'share-head' },
           h('div', { class: 'share-url mono' }, url || 'No link yet — the web version has not said its apps address'),
           h('div', { class: 'share-to' }, h('span', { class: 'share-pill ' + st[0] }, '● ' + st[1]),
-            h('span', { class: 'muted mono' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' on your computer')),
+            h('span', { class: 'muted mono' }, '→ ' + (cur.tls ? 'https' : 'http') + '://localhost:' + cur.port + ' ' + shareOnWhere(cur))),
           url ? h('div', { class: 'share-acts' },
             h('a', { class: 'btn sm', href: url, target: '_blank', rel: 'noopener' }, 'Open ↗'),
             h('button', { class: 'btn sm', onclick: function () { if (navigator.clipboard) navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'ok'); }, fail); } }, 'Copy link'),
@@ -472,7 +504,7 @@
     if (project) proj.value = project;
     var name = h('input', { class: 'inp mono', placeholder: 'front' });
     var port = h('input', { class: 'inp mono', type: 'number', min: 1, max: 65535, placeholder: '3001' });
-    var tls = h('input', { type: 'checkbox' }), who = 'private';
+    var tls = h('input', { type: 'checkbox' }), who = 'private', pc = sharePcSelect('', function () { return proj.value; });
     var WHO = [['private', 'Only me', 'Only you, signed in to the workspace'], ['ask', 'Ask me', 'Others wait while your phone / computer asks you'],
       ['public', 'Anyone', 'Anyone with the link, no question']];
     var hint = h('div', { class: 'muted share-sub' }), seg = h('div', { class: 'seg' });
@@ -484,19 +516,20 @@
     var base = S.share && S.share.base;
     var preview = h('div', { class: 'share-url mono' });
     function prev() { preview.textContent = base ? base + '/' + (proj.value || '<project>') + '/' + (name.value || '<name>') : ''; }
-    proj.addEventListener('change', prev); name.addEventListener('input', prev); prev();
+    proj.addEventListener('change', function () { prev(); pc.refill(); }); name.addEventListener('input', prev); prev();
     function field(label, el) { return h('div', { class: 'field' }, h('label', null, label), el); }
     var md = openModal({ title: 'Share a port', size: 'sm', body: h('div', { class: 'share-dlg' },
       h('div', { class: 'muted share-sub' }, 'Open a port of your computer from anywhere, while your computer is on and the port runs.'),
       project ? null : field('Project', proj),
       project ? shareProjList(project, function () { md.close(); }) : null,
       h('div', { class: 'share-add-row' }, field('Name', name), field('Port', port)),
+      field('Computer', pc),
       h('label', { class: 'muted', title: 'The port itself speaks https:// (like https://localhost:6000)' }, tls, ' The port speaks HTTPS'),
       h('div', { class: 'share-who-row' }, h('span', { class: 'share-lbl' }, 'Who can open it'), seg, hint),
       base ? preview : null),
       foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'),
         h('button', { class: 'btn primary', onclick: function () {
-          api('POST', 'share/port', { project: proj.value, name: name.value, port: port.value, access: who, tls: tls.checked, on: true })
+          api('POST', 'share/port', { project: proj.value, name: name.value, port: port.value, access: who, tls: tls.checked, pc: pc.value, on: true })
             .then(function (d) { md.close(); toast('Shared', 'ok'); loadShare(true); if (done) done(d); }).catch(fail);
         } }, 'Share')] });
     setTimeout(function () { name.focus(); }, 50);
@@ -509,7 +542,7 @@
       var url = x.urls && x.urls[0] || '';
       return h('div', { class: 'share-row share-item' },
         h('div', { class: 'grow' },
-          h('div', null, h('b', null, x.name), h('span', { class: 'muted mono share-sub' }, '  → :' + x.port)),
+          h('div', null, h('b', null, x.name), h('span', { class: 'muted mono share-sub' }, '  → :' + x.port + (x.pc ? ' · ' + sharePcName(x.pc) : ''))),
           url ? h('a', { class: 'mono share-sub share-link', href: url, target: '_blank', rel: 'noopener' }, url) : null),
         h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''),
         h('button', { class: 'btn sm', onclick: function () { close(); shareDialog(x); } }, 'Manage'));
@@ -527,7 +560,7 @@
         return h('div', { class: 'share-row share-item' },
           h('span', { class: 'share-dot ' + st[0], title: st[1] }, '●'),
           h('div', { class: 'grow' },
-            h('div', null, h('b', null, x.project + ' · ' + x.name), h('span', { class: 'muted mono share-sub' }, '  → ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port)),
+            h('div', null, h('b', null, x.project + ' · ' + x.name), h('span', { class: 'muted mono share-sub' }, '  → ' + (x.tls ? 'https' : 'http') + '://localhost:' + x.port + (x.pc ? ' · ' + sharePcName(x.pc) : ''))),
             url ? h('a', { class: 'mono share-sub share-link', href: url, target: '_blank', rel: 'noopener' }, url) : null),
           h('span', { class: 'tag' }, SHARE_WHO[x.access] || ''),
           h('button', { class: 'btn sm', onclick: function () { shareDialog(x); } }, 'Manage'),
@@ -543,6 +576,7 @@
       })) : []);
     }
     function load() {
+      if (!sharePcs) loadSharePcs().then(function () { if (S.share && S.share.shares) render(S.share); });
       api('GET', 'share').then(render).catch(function (e) { doms.replaceChildren(h('span', null, e.message || 'not available')); });
       api('GET', 'share/status').then(function (d) { S.shareSt = d.status || {}; api('GET', 'share').then(render).catch(function () {}); }).catch(function () {});
       if (S.web) api('GET', 'account/share').then(renderGuests).catch(function () {});

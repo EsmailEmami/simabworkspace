@@ -131,6 +131,10 @@ global.fetch = (url, opts) => {
     server: { items: [{ path: 'web/dist', dir: true, size: 2048 }], total: 2048, truncated: false }, local: { items: [], total: 0, truncated: false } };
   else if (url === '/api/server-folders') res = { folders: [{ path: '/home/esi/shop', name: 'shop', git: 'repo', mtime: 1, project: '' }, { path: '/home/esi/cheshmeh', name: 'cheshmeh', git: 'repos inside', mtime: 2, project: 'cheshmeh' }] };
   else if (url === '/api/add-project') res = { ok: true, project: 'shop' };
+  else if (url === '/api/copy-from' && method === 'GET') res = { devices: [{ id: 'd1', name: 'desk', projects: [
+    { name: 'cheshmeh', remote: '/home/esi/cheshmeh', here: 'cheshmeh', starter: true, title: '', color: '#aa3300', commands: 2 },
+    { name: 'blog', remote: '~/blog', here: '', starter: true, title: '', color: '', commands: 0 }] }] };
+  else if (url === '/api/copy-from') res = { done: { starter: 1, commands: 2 } };
   else if (url.startsWith('/api/shared-ignores')) res = { ignores: url.indexOf('shop') >= 0 ? ['node_modules', '/vendor'] : null };
   else if (url.startsWith('/api/update') && method === 'GET') res = { current: '9', latest: '10.0.0', available: true, notes: '## Changes\n- faster', url: 'https://x' };
   else if (url === '/api/update' && method === 'POST') res = { ok: true, version: '10.0.0' };
@@ -781,6 +785,33 @@ const tests = {
     assert.ok(q('.toast').some((t) => /shop: sync finished/.test(t.textContent)));
   },
 
+  async 'settings → Sync: from your other computers — sync all here, copy starter / run commands from another'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    document.body.querySelector('#btn-settings').click();
+    q('button').find((b) => b.textContent.trim() === 'Settings…').click();
+    await settle();
+    const modal = q('.modal').pop();
+    assert.ok(q('span', modal).some((x) => x.textContent === '1 project not on this computer yet'));
+    q('button', modal).find((b) => b.textContent === 'Sync all to this computer…').click();
+    await settle();
+    let md = q('.modal').pop();
+    assert.ok(q('input', md).some((i) => i.value === '~/shop'), 'the sync dialog, with shop');
+    q('button', md).find((b) => b.textContent === 'Cancel').click();
+    q('button', modal).find((b) => b.textContent === 'Copy from another computer…').click();
+    await settle();
+    md = q('.modal').pop();
+    assert.strictEqual(q('option', md).map((o) => o.textContent).join(), 'desk');
+    assert.ok(md.textContent.indexOf('starter · 2 commands · colour') >= 0, 'only projects that are here, with what it has: ' + md.textContent);
+    assert.ok(md.textContent.indexOf('blog') < 0);
+    q('input', md).filter((i) => i.getAttribute('type') === 'checkbox')[2].checked = false;          // not the names
+    q('button', md).find((b) => b.textContent === 'Copy').click();
+    await settle();
+    const post = calls.filter((c) => c.url === '/api/copy-from' && c.method === 'POST').pop();
+    assert.deepStrictEqual(post.body, { dev: 'd1', kinds: ['starter', 'commands', 'color'], remotes: ['/home/esi/cheshmeh'] });
+    assert.ok(q('.toast').some((t) => /Copied: 1 starter messages, 2 run commands/.test(t.textContent)));
+    q('button', modal).find((b) => b.getAttribute('title') === 'Close (Esc)').click();      // closed, not just removed (the stack)
+  },
+
   async 'settings shows prerequisites and installs a missing one'() {
     document.body.querySelector('#modal-root').replaceChildren();
     document.body.querySelector('#btn-settings').click();
@@ -877,6 +908,18 @@ const tests = {
     pr.pcs = ['b2', 'c3'];
     let st = global.SWComputers.buildState('cheshmeh', devs, '');
     assert.strictEqual(st.dev, 'desk', 'laptop is on but has not got the project; old has it but is off');
+    pr.pcs = ['a1b2c3d4e5f6', 'b2'];
+    st = global.SWComputers.buildState('cheshmeh', devs, '');
+    assert.strictEqual(st.dev, 'laptop', 'two connected, none chosen: ONE of them, never "laptop, desk"');
+    devs.self = 'b2';
+    st = global.SWComputers.buildState('cheshmeh', devs, '');
+    assert.strictEqual(st.dev, 'desk', 'the computer the app runs on comes first');
+    assert.match(st.text, /desk \(this computer; if it goes off, the next connected one/);
+    assert.strictEqual(global.SWComputers.buildState('cheshmeh', devs, '', 'a1b2c3d4e5f6').dev, 'laptop', 'a chat opened on laptop stays there');
+    devs.devices[1].online = false;
+    assert.strictEqual(global.SWComputers.buildState('cheshmeh', devs, '').dev, 'laptop', 'this one off: the next connected one');
+    devs.devices[1].online = true;
+    devs.self = 'ffffffffffff';
     pr.pcs = [];
     st = global.SWComputers.buildState('cheshmeh', devs, '');
     assert.strictEqual(st.ok, false);

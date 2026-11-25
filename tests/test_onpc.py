@@ -172,6 +172,20 @@ class ServerScripts(unittest.TestCase):
         self.assertEqual(json.loads(Path(self.home, ".cache/simabworkspace/pc/chatpins.json").read_text()),
                          {"00112233445566aa": "abcdef012345", "00112233445566bb": ""})
 
+    def test_chat_prefers_the_computer_it_was_opened_on(self):
+        s = sw.chat_remote_script("~/p", "claude", [], "00112233445566aa", "", "abcdef012345")
+        self.assertIn("SIMAB_PREFER=abcdef012345; export SIMAB_PREFER;", s)
+        self.assertNotIn("SIMAB_PC=", s, "a preference, not a choice: another one runs it while this one is off")
+        self.assertNotIn("SIMAB_PREFER", sw.chat_remote_script("~/p", "claude", [], "", "", "bad;rm"))
+        g = {}
+        src = sw.ONPC_PY
+        exec(src[src.index("def first_here"):src.index("CHOSEN = ")], dict(os=os), g)
+        devs = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        with mock.patch.dict(os.environ, {"SIMAB_PREFER": "b"}):
+            self.assertEqual([d["id"] for d in g["first_here"](devs)], ["b", "a", "c"])
+        with mock.patch.dict(os.environ, {"SIMAB_PREFER": ""}):
+            self.assertEqual(g["first_here"](devs), devs)
+
     def test_chat_passes_its_computer_to_claude(self):
         s = sw.chat_remote_script("~/p", "claude", [], "00112233445566aa", "abcdef012345")
         self.assertIn("SIMAB_PC=abcdef012345; export SIMAB_PC;", s)

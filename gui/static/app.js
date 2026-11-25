@@ -2407,6 +2407,61 @@
       errBox], foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
   }
 
+  // Settings → From your other computers: sync every project here at once; copy another computer's
+  // starter messages, names, colours and run commands into the projects this one has
+  function otherPcsRow() {
+    var notHere = (S.projects || []).filter(notSyncedHere);
+    return h('div', { class: 'svc' },
+      h('span', { class: 'muted' }, notHere.length ? plural(notHere.length, 'project') + ' not on this computer yet' : 'Every project is on this computer'),
+      notHere.length ? h('button', { class: 'btn sm', onclick: function () { syncHereDialog(notHere); } }, 'Sync all to this computer…') : null,
+      h('button', { class: 'btn sm', onclick: copyFromDialog }, 'Copy from another computer…'));
+  }
+  function copyFromDialog() {
+    var KINDS = [['starter', 'Starter messages'], ['commands', 'Run commands'], ['title', 'Names'], ['color', 'Colours']];
+    var pick = h('select', { class: 'inp' });
+    var list = h('div', { class: 'sync-here-list' }, h('div', { class: 'muted' }, 'Loading…'));
+    var kinds = KINDS.map(function (k) { return { k: k[0], el: h('input', { type: 'checkbox', checked: true }), label: k[1] }; });
+    var rows = [], devs = [];
+    var go = h('button', { class: 'btn primary', disabled: true }, 'Copy');
+    function draw() {
+      var d = devs.filter(function (x) { return x.id === pick.value; })[0];
+      rows = [];
+      var here = d ? d.projects.filter(function (p) { return p.here; }) : [];
+      list.replaceChildren.apply(list, here.length ? here.map(function (p) {
+        var on = h('input', { type: 'checkbox', checked: true });
+        var what = [p.starter ? 'starter' : '', p.commands ? plural(p.commands, 'command') : '', p.title ? 'name' : '', p.color ? 'colour' : ''].filter(Boolean).join(' · ');
+        rows.push({ p: p, on: on });
+        return h('label', { class: 'check' }, on, h('span', null, p.here, h('small', null, what || 'nothing set there')));
+      }) : [h('div', { class: 'muted' }, d ? 'None of its projects is on this computer — sync them first' : 'No other computer has shared its projects yet')]);
+      go.disabled = !rows.length;
+    }
+    pick.addEventListener('change', draw);
+    go.addEventListener('click', function () {
+      var ks = kinds.filter(function (k) { return k.el.checked; }).map(function (k) { return k.k; });
+      var rs = rows.filter(function (r) { return r.on.checked; }).map(function (r) { return r.p.remote; });
+      if (!ks.length || !rs.length) return;
+      go.disabled = true;
+      api('POST', 'copy-from', { dev: pick.value, kinds: ks, remotes: rs }).then(function (x) {
+        var d = x.done || {}, n = Object.keys(d).reduce(function (a, k) { return a + d[k]; }, 0);
+        md.close();
+        refreshProjects();
+        toast(n ? 'Copied: ' + KINDS.filter(function (k) { return d[k[0]]; }).map(function (k) { return d[k[0]] + ' ' + k[1].toLowerCase(); }).join(', ') : 'Nothing new to copy', 'ok');
+      }).catch(function (e) { go.disabled = false; fail(e); });
+    });
+    var md = openModal({ title: 'Copy from another computer', body: [
+      h('div', { class: 'field' }, h('label', null, 'From'), pick),
+      h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap;margin:6px 0 10px' }, kinds.map(function (k) { return h('label', { class: 'check' }, k.el, h('span', null, k.label)); })),
+      list,
+      h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Run commands are added, never replaced.')],
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
+    api('GET', 'copy-from').then(function (x) {
+      devs = x.devices || [];
+      pick.replaceChildren.apply(pick, devs.map(function (d) { return h('option', { value: d.id }, d.name); }));
+      if (devs.length) pick.value = devs[0].id;
+      draw();
+    }).catch(function (e) { list.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
+  }
+
   function runCommand(p, c) {
     var t = runningCmd(p.name, c.id);
     if (t) { t.stop(); return; }
@@ -4250,6 +4305,7 @@
           h('button', { class: 'btn sm', onclick: function () { service('stop'); } }, 'Stop service'),
           h('button', { class: 'btn sm', onclick: function () { service('start'); } }, 'Start service')),
         h('label', { class: 'check' }, autostart, h('span', null, 'Start syncing automatically', h('small', null, 'When a terminal opens on this machine (adds a line to ~/.bashrc).'))),
+        otherPcsRow(),
 
         h('div', { class: 'sec' }, 'This machine'),
         prereqBox(),

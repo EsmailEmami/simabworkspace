@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.67.0"
+VERSION = "1.68.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1947,14 +1947,16 @@ def pc_edit_verdict(tool, mode):
     return True if mode in ("acceptEdits", "auto", "bypassPermissions") else False if mode == "plan" else None
 
 
-def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "", pc: str = "") -> str:
+def chat_remote_script(rpath: str, claude_cmd: str, args: list, chat: str = "", pc: str = "", prefer: str = "") -> str:
     """chat: the relay key of the chat tab — onpc sends it, so a question about a command goes to
-    exactly that chat (not to whatever tab is open)."""
+    exactly that chat (not to whatever tab is open). prefer: the computer the chat was opened on — with no
+    computer chosen, onpc runs there first and moves to another connected one only while it is off."""
     cmd = claude_cmd or "claude"
     # a project built on the user's own computers: Claude is told to use onpc (see PC_HINT)
     inner = (CLAUDE_FIND + (CLAUDE_MISSING if cmd == "claude" else "")
              + (f"SIMAB_CHAT={chat}; export SIMAB_CHAT; " if RELAY_KEY_RE.fullmatch(chat or "") else "")
              + (f"SIMAB_PC={pc}; export SIMAB_PC; " if PC_ID_RE.fullmatch(pc or "") else "")
+             + (f"SIMAB_PREFER={prefer}; export SIMAB_PREFER; " if PC_ID_RE.fullmatch(prefer or "") else "")
              + 'H=$("$HOME/.local/bin/onpc" --hint 2>/dev/null); L=$("$HOME/.local/bin/onpc" --local 2>/dev/null); '
              + 'if [ $? = 3 ]; then echo "simabworkspace: this project lives on your computer and it is not connected'
              + ' — open Simab Workspace there (Computers → Connect this computer)" >&2; exit 98; fi; '
@@ -3555,7 +3557,7 @@ class WatchSession:
                 "started": self.started, "runs": 1, "win": self.win, "moved": self.moved}
 
 
-def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> dict:
+def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list, prefer: str = "") -> dict:
     pname = spec.get("project") or ""
     project = next((p for p in projects if p["name"] == pname), None) if pname else None
     if pname and not project:
@@ -3580,10 +3582,14 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
     pc = spec.get("pc") if isinstance(spec.get("pc"), str) and PC_ID_RE.fullmatch(spec.get("pc")) else \
         ((pp.get("chatPc") or {}).get(resume) or "" if resume else "")
 
+    # the computer the chat was opened on (none on the web: the one it had, when reopened there)
+    prefer = prefer if PC_ID_RE.fullmatch(prefer or "") else \
+        spec["prefer"] if isinstance(spec.get("prefer"), str) and PC_ID_RE.fullmatch(spec["prefer"]) else ""
+
     def make_argv(mode_, model_, resume_, effort_="", relay=None, pc=""):
         """relay: (start|attach|kill, key, offset) — Claude kept running on the server (see CHAT_RELAY_PY).
         pc: the computer chosen in this chat (onpc runs its commands there)."""
-        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "", pc)
+        script = chat_remote_script(rpath, claude_cmd, chat_args(mode_, model_, resume_, effort_), relay[1] if relay else "", pc, prefer)
         if relay:
             script = chat_relay_command(relay[0], relay[1], relay[2], script, relay[3] if len(relay) > 3 else "")
         ext = ["-o", "ConnectTimeout=15"] if relay else []      # a dead line fails fast and is tried again
@@ -3598,7 +3604,7 @@ def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list) -> di
             "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new",
                      "slot": 0, **({"resume": resume} if resume else {}),
                      **({"named": spec["named"]} if spec.get("named") in CHAT_NAMED else {}),
-                     **({"pc": pc} if pc else {})}}
+                     **({"pc": pc} if pc else {}), **({"prefer": prefer} if prefer else {})}}
 
 
 
@@ -5990,6 +5996,12 @@ def pinned(cwd, why=False):
     return (dev, how) if why else dev
 
 
+def first_here(devs):
+    """No computer chosen: the one the chat was opened on first (SIMAB_PREFER), the others only while it is off."""
+    me = os.environ.get("SIMAB_PREFER", "")
+    return sorted(devs, key=lambda d: d["id"] != me) if me else devs
+
+
 CHOSEN = {"chat": "chosen for this chat", "project": "chosen for this project", "default": "your default computer"}
 
 
@@ -6092,7 +6104,7 @@ def on_server(cmd, why):
 def run(cmd, on):
     cwd = os.path.realpath(os.getcwd())
     pin, how = ("", "") if on else pinned(cwd, True)
-    devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id"))) and (not pin or d["id"] == pin)]
+    devs = first_here([d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id"))) and (not pin or d["id"] == pin)])
     here = not on and "/.simab-mnt/" not in cwd + "/"      # a Local only project lives only on its computer
     if not devs and here:
         name = next((d.get("name") for d in devices() if d["id"] == pin), "") if pin else ""
@@ -6290,7 +6302,7 @@ def fs_call(op, args):
     """One Grep / Glob / Read / Edit / Write of a Local only project, done on the computer → (answer, error)."""
     cwd = os.path.realpath(os.getcwd())
     pin = pinned(cwd)
-    devs = [d for d in devices() if d["online"] and (not pin or d["id"] == pin)]
+    devs = first_here([d for d in devices() if d["online"] and (not pin or d["id"] == pin)])
     if not devs:
         return {}, ("the user's computer is not connected — nothing was done. Do not work around it on the server: "
                     "tell the user to open Simab Workspace on their computer.")
@@ -6351,7 +6363,7 @@ class Mux:
     def _open(self):
         cwd = os.path.realpath(os.getcwd())
         pin = pinned(cwd)
-        for d in [x for x in devices() if x["online"] and (not pin or x["id"] == pin)]:
+        for d in first_here([x for x in devices() if x["online"] and (not pin or x["id"] == pin)]):
             s = reach(d)
             if s is None:
                 continue
@@ -6635,7 +6647,7 @@ def mcp_serve():
 def bg(body):
     """Dev servers on the computer, kept by the app there: --bg NAME CMD | --logs NAME | --stop NAME | --ps"""
     pin, how = pinned(os.path.realpath(os.getcwd()), True) if body.get("op") == "start" else ("", "")
-    devs = [d for d in devices() if d["online"] and (not pin or d["id"] == pin)]
+    devs = first_here([d for d in devices() if d["online"] and (not pin or d["id"] == pin)])
     if not devs:
         sys.stderr.write("onpc: %s is not connected — nothing was started or stopped.\n"
                          % ("the computer " + CHOSEN.get(how, "chosen") if pin else "none of your computers"))
@@ -6712,7 +6724,7 @@ def main(a):
         if on == "local":
             # Claude gives an MCP server only a few variables (HOME, PATH…), not SIMAB_CHAT / SIMAB_PC: passed here,
             # else this chat's connection is filed under no chat (its badge always said 0)
-            env = {k: os.environ[k] for k in ("SIMAB_CHAT", "SIMAB_PC") if os.environ.get(k)}
+            env = {k: os.environ[k] for k in ("SIMAB_CHAT", "SIMAB_PC", "SIMAB_PREFER") if os.environ.get(k)}
             sys.stdout.write(json.dumps({"mcpServers": {"pc": dict({"type": "stdio", "command": sys.executable,
                                          "args": [os.path.realpath(os.path.abspath(sys.argv[0])), "--mcp-serve"]},
                                          **({"env": env} if env else {}))}}))
@@ -10306,7 +10318,7 @@ class App:
                     continue
                 for p in dev.get("projects") or []:
                     if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"] and isinstance(p.get("remote"), str) and p["remote"]:
-                        others.append(dict(p, sharedFrom=str(dev.get("name") or "")[:40]))
+                        others.append(dict(p, sharedFrom=str(dev.get("name") or "")[:40], sharedDev=str(dev_id)[:40]))
             if others != self._share_projects:
                 self._share_projects = others
                 self._projects_cache = (0.0, [])
@@ -10521,6 +10533,59 @@ class App:
         x = next((x for x in self.projects(max_age=10) if x["name"] == project), None)      # one of my computers'
         return next((dict(c) for c in (x or {}).get("commands") or [] if c.get("id") == cid and c.get("devName")), None)
 
+    # Settings → Copy from another computer: a new computer takes another one's starter messages, names,
+    # colours and run commands (from its devices.json snapshot), per project folder
+    COPY_KINDS = ("starter", "title", "color", "commands")
+
+    def copy_sources(self) -> list:
+        mine = {}
+        for p in self.projects(max_age=10):
+            if p.get("source") != "shared" and layout_key(p.get("remote")):
+                mine.setdefault(layout_key(p["remote"]), p["name"])
+        devs = {}
+        for sp in self._share_projects:
+            d = devs.setdefault(sp.get("sharedDev") or "", {"id": sp.get("sharedDev") or "", "name": sp.get("sharedFrom") or "?", "projects": []})
+            cmds = sp.get("commands") if isinstance(sp.get("commands"), list) else []
+            d["projects"].append({"name": sp.get("name"), "remote": sp.get("remote"), "here": mine.get(layout_key(sp.get("remote")), ""),
+                                  "starter": bool(sp.get("starter")), "title": sp.get("title") or "", "color": sp.get("color") or "",
+                                  "commands": len(cmds)})
+        return [d for d in devs.values() if d["id"] and d["projects"]]
+
+    def copy_from(self, dev: str, kinds, remotes) -> dict:
+        """Only into projects on this device with the same server folder; run commands are added (same command
+        line skipped), never replaced. → how many of each kind changed."""
+        kinds = [k for k in (kinds or []) if k in self.COPY_KINDS]
+        want = {layout_key(r) for r in (remotes or []) if isinstance(r, str)}
+        src = [sp for sp in self._share_projects if sp.get("sharedDev") == dev and layout_key(sp.get("remote")) in want]
+        if not dev or not src:
+            raise ApiError(404, "that computer has none of these projects")
+        done = {k: 0 for k in kinds}
+        self.invalidate()
+        for sp in src:
+            for p in self.projects(max_age=10):
+                if p.get("source") == "shared" or layout_key(p.get("remote")) != layout_key(sp.get("remote")):
+                    continue
+                n = p["name"]
+                for k in ("starter", "title", "color"):
+                    v = sp.get(k)
+                    if k in kinds and isinstance(v, str) and v and v != p.get(k):
+                        try:
+                            {"starter": self.store.set_starter, "title": self.store.set_title, "color": self.store.set_color}[k](n, v)
+                        except ApiError:
+                            continue
+                        self.layout_changed(fields=[(n, k)])
+                        done[k] += 1
+                if "commands" in kinds and isinstance(sp.get("commands"), list):
+                    own = [c for c in (p.get("commands") or []) if isinstance(c, dict) and not c.get("shared")]
+                    have = {(c.get("cmd"), c.get("cwd") or "") for c in p.get("commands") or [] if isinstance(c, dict)}
+                    add = [{k: c.get(k) for k in ("name", "cmd", "cwd", "where") if c.get(k)}
+                           for c in sp["commands"] if isinstance(c, dict) and c.get("cmd") and (c.get("cmd"), c.get("cwd") or "") not in have]
+                    if add:
+                        self.store.set_commands(n, [{k: c[k] for k in ("id", "name", "cmd", "cwd", "where", "url") if c.get(k)} for c in own] + add)
+                        done["commands"] += len(add)
+        self.invalidate()
+        return done
+
     def set_commands(self, project: str, commands) -> list:
         """From the editor: rows marked shared go to the project's .simab.json, the rest stay here."""
         p = self._project(project)
@@ -10615,7 +10680,8 @@ class App:
             self._remember()
             return w.info()
         if body.get("kind") == "chat":
-            built = build_chat(body, self.conf, self.store, self.projects(max_age=10))
+            built = build_chat(body, self.conf, self.store, self.projects(max_age=10),
+                               prefer="" if self.web else self.pc.cfg()["id"])
             if built["resume"]:
                 try:
                     built["history"] = remote_python(built["conf"], REMOTE_HISTORY_PY,
@@ -14650,6 +14716,11 @@ class Handler(BaseHTTPRequestHandler):
             return app.pc_api(method, parts[1:], self._body() if method == "POST" else {})
         if route == ("GET", "state"):
             return app.state()
+        if route == ("GET", "copy-from"):
+            return {"devices": app.copy_sources()}
+        if route == ("POST", "copy-from"):
+            b = self._body() or {}
+            return {"done": app.copy_from(str(b.get("dev") or ""), b.get("kinds"), b.get("remotes"))}
         if route == ("GET", "shared-ignores"):    # Add project: the Not synced list my other computers use there
             ig = app._shared_ignores.get(layout_key((query.get("remote") or [""])[0]))
             return {"ignores": ig}

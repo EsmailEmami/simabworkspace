@@ -43,7 +43,9 @@
     return !pr || !Array.isArray(pr.pcs) || pr.pcs.indexOf(id) >= 0;
   }
   // chatPc: the computer chosen in one chat (its ⚒ chip) — before the project's and the default
-  function buildState(name, d, chatPc) {
+  // prefer: the computer the chat was opened on (default: this one) — no computer chosen = that one,
+  // another connected one only while it is off (onpc does the same: SIMAB_PREFER)
+  function buildState(name, d, chatPc, prefer) {
     d = d || info;
     if (!d || !d.builds || !d.builds[name]) return null;
     if (d.builds[name] === 'local') {               // Local only: the files live on one computer
@@ -64,7 +66,11 @@
         : { on: 'computers', ok: false, dev: pn, text: pn + ' (' + why + ') is not connected — Claude cannot run its commands' };
     }
     var on = online(d).filter(function (x) { return hasProject(name, x.id); });
-    return on.length ? { on: 'computers', ok: true, dev: on.map(function (x) { return x.name; }).join(', '), text: 'Commands run on ' + on.map(function (x) { return x.name; }).join(', ') + ' (files synced with the server)' }
+    var me = prefer === undefined ? d.self : prefer;
+    var one = on.filter(function (x) { return x.id === me; })[0] || on[0];
+    return one ? { on: 'computers', ok: true, dev: one.name, text: 'Commands run on ' + one.name
+        + (one.id === d.self ? ' (this computer' : one.id === me ? ' (the computer this chat was opened on' : me ? ' (the computer this chat was opened on is off' : ' (the first connected one')
+        + (on.length > 1 ? '; if it goes off, the next connected one' : '') + '; files synced with the server)' }
       : online(d).length ? { on: 'computers', ok: false, text: 'None of your connected computers has this project — sync it to one (⋯ → Sync to this computer)' }
       : { on: 'computers', ok: false, text: 'No computer of yours is connected — Claude cannot run its commands' };
   }
@@ -621,7 +627,7 @@
     (S.tabs || []).forEach(function (t) {
       if (!t.setWhere || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
-      var st = p ? buildState(p.name, null, t.info.spec.pc) : null;
+      var st = p ? buildState(p.name, null, t.info.spec.pc, t.info.spec.prefer || (S.web ? '' : undefined)) : null;
       var name = p ? p.name : '';
       // the badge at the top right of the chat: where its commands run; click → change it
       if (!st || st.on === 'server') {
@@ -644,7 +650,7 @@
   // the ⚒ chip of a My computers chat: which computer runs this chat's commands
   function chatPcMenu(t, name, el) {
     var cur = t.info.spec.pc || '';
-    var base = buildState(name, info, '');
+    var base = buildState(name, info, '', t.info.spec.prefer || (S.web ? '' : undefined));
     var items = [{ header: 'Commands of this chat run on' },
       { label: (cur ? '   ' : '✓ ') + 'Project setting (' + (base && base.dev ? base.dev : 'any connected') + ')', action: function () { pick(''); } }];
     // only connected computers that have this project's files (the one chosen stays, marked)

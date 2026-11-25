@@ -197,6 +197,36 @@ class Devices(base.TmpHome):
         self.assertEqual(self.laptop.store.settings["starred"], ["cmd:Git"])
         self.assertEqual(self.laptop.store.settings["chatMode"], "plan")
 
+    def test_a_new_computer_copies_starter_names_colours_and_run_commands_from_another(self):
+        """Settings → From your other computers → Copy from another computer…"""
+        self.laptop.store.set_starter("shop", "Read memory first.")
+        self.laptop.store.set_color("shop", "#aa3300")
+        self.laptop.store.set_commands("shop", [{"name": "api", "cmd": "make api", "where": "server"},
+                                                {"name": "web", "cmd": "npm start", "where": "server"}])
+        d = Path(self.tmp.name) / "pc2"
+        d.mkdir()
+        pc2 = sw.App(sw.Store(d / "simab.db"), sw.ServerConf("esi", "h"))
+        try:
+            pc2.store.add_manual({"name": "my-shop", "remote": "/home/esi/shop"})     # same folder, another name
+            pc2.store.set_commands("my-shop", [{"name": "web", "cmd": "npm start", "where": "server"}])
+            self.laptop.share_sync()
+            pc2.share_sync()
+            pc2.store.set_starter("my-shop", "my own")          # changed here: the copy puts the laptop's back
+            src = [x for x in pc2.copy_sources() if x["name"] == self.laptop.device_name()]
+            self.assertEqual(len(src), 1)
+            shop = next(p for p in src[0]["projects"] if p["name"] == "shop")
+            self.assertEqual((shop["here"], shop["starter"], shop["commands"]), ("my-shop", True, 2))
+            done = pc2.copy_from(src[0]["id"], ["starter", "commands"], ["~/shop"])
+            self.assertEqual(done, {"starter": 1, "commands": 1}, "npm start was there already: only make api is added")
+            p = next(x for x in pc2.projects(max_age=0) if x["name"] == "my-shop")
+            self.assertEqual(p["starter"], "Read memory first.")
+            self.assertEqual(sorted(c["cmd"] for c in p["commands"]), ["make api", "npm start"])
+            self.assertEqual(pc2.copy_from(src[0]["id"], ["commands"], ["~/shop"]), {"commands": 0}, "twice: nothing doubled")
+            with self.assertRaises(sw.ApiError):
+                pc2.copy_from("nope", ["starter"], ["~/shop"])
+        finally:
+            pc2.shutdown_sessions()
+
     def test_a_new_computer_gets_the_not_synced_list_of_the_folder(self):
         self.laptop.share_sync()
         self.laptop.layout_changed(ignores=("shop", ["node_modules", "/dist"]))

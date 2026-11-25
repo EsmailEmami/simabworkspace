@@ -2328,6 +2328,51 @@
     }).catch(fail);
   }
 
+  // projects in the list (added on another device) that have no copy on this computer yet
+  function notSyncedHere(p) {
+    return !S.web && p.source !== 'mutagen' && !!p.remote && !p.localExists && !p.localOnly && !p.elsewhere
+      && p.remote.indexOf('~/.simab-mnt/') !== 0;
+  }
+  // Sync to this computer: download each one from the server and keep it in sync (same name, its own folder here)
+  function syncHereDialog(list) {
+    var rows = list.map(function (p) {
+      var inp = h('input', { class: 'inp mono', value: '~/' + p.remote.replace(/\/+$/, '').split('/').pop() });
+      var on = h('input', { type: 'checkbox', checked: true });
+      return { p: p, inp: inp, on: on, el: h('div', { class: 'sync-here-row' },
+        list.length > 1 ? h('label', { class: 'check' }, on, h('span', null, p.name, h('small', null, p.remote))) : null,
+        localFolderField(list.length > 1 ? 'Folder on this computer' : 'Put “' + p.name + '” on this computer at', inp)) };
+    });
+    var git = h('input', { type: 'checkbox', checked: true });
+    var errBox = h('div', { class: 'add-err hidden' });
+    var go = h('button', { class: 'btn primary', onclick: function () {
+      var todo = rows.filter(function (r) { return r.on.checked; });
+      if (!todo.length) return;
+      go.disabled = true;
+      go.textContent = 'Setting up…';
+      errBox.classList.add('hidden');
+      var bad = [];
+      todo.reduce(function (chain, r) {
+        return chain.then(function () {
+          return api('POST', 'add-project', { mode: 'download', remote: r.p.remote, name: r.p.name, local: r.inp.value.trim(), git: git.checked })
+            .then(function () { r.on.checked = false; r.el.classList.add('done'); })
+            .catch(function (e) { bad.push(r.p.name + ': ' + e.message); });
+        });
+      }, Promise.resolve()).then(function () {
+        refreshProjects();
+        if (!bad.length) { md.close(); toast(plural(todo.length, 'project') + ': downloading in the background — progress shows under each project', 'ok', { timeout: 7000 }); return; }
+        go.disabled = false;
+        go.textContent = 'Try again';
+        errBox.textContent = bad.join('\n');
+        errBox.classList.remove('hidden');
+      });
+    } }, list.length > 1 ? 'Sync ' + plural(list.length, 'project') : 'Download & sync');
+    var md = openModal({ title: 'Sync to this computer', body: [
+      h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'Downloads from the server, then keeps both sides in sync. Use a new or empty folder.'),
+      h('div', { class: 'sync-here-list' }, rows.map(function (r) { return r.el; })),
+      h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))),
+      errBox], foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
+  }
+
   function runCommand(p, c) {
     var t = runningCmd(p.name, c.id);
     if (t) { t.stop(); return; }
@@ -2379,6 +2424,7 @@
         : { label: 'Local terminal', disabled: !p.localExists, action: function () { openSession({ kind: 'shell', where: 'local', project: p.name }); } },
       { label: 'VS Code on server', disabled: !r, action: function () { openEditor(p, 'server'); } },
       { label: 'VS Code, local folder', disabled: !p.localExists, action: function () { openEditor(p, 'local'); } },
+      notSyncedHere(p) ? { label: 'Sync to this computer…', action: function () { syncHereDialog([p]); } } : null,
       { label: 'Open folder', k: p.localExists ? '' : 'not synced', disabled: !p.localExists, action: function () { openFolder(p); } },
       { label: 'Copy server path', disabled: !r, action: function () { copyServerPath(p); } },
       { label: 'Copy local path', disabled: !p.localExists, action: function () { copyText(fullLocal(p.local)); } },
@@ -4940,6 +4986,8 @@
     items.push({ label: 'Single section', grp: 'layout', action: mergeAll });
     items.push({ label: 'Toggle sidebar', grp: 'layout', action: toggleWorkMode });
     items.push({ label: 'Add project…', grp: 'app', action: addManualProject });
+    var notHere = (S.projects || []).filter(notSyncedHere);
+    if (notHere.length) items.push({ label: 'Sync all projects to this computer… (' + notHere.length + ')', grp: 'app', action: function () { syncHereDialog(notHere); } });
     items.push({ label: 'History — what you did', grp: 'app', action: function () { historyDialog(); } });
     items.push({ label: 'Claude usage — limits and cost', grp: 'app', action: usageDialog });
     items.push({ label: 'Settings', grp: 'app', action: settingsDialog });

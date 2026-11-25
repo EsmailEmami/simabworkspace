@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.66.0"
+VERSION = "1.66.1"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -10872,7 +10872,8 @@ class App:
             raise ApiError(502, f"cannot reach the server: {e}")
         if r.returncode != 0:
             raise ApiError(502, "cannot list server folders: " + (r.stderr.decode("utf-8", "replace").strip().splitlines() or ["?"])[-1][:200])
-        synced = {p.get("remote"): p["name"] for p in self.projects(max_age=5) if p.get("remote")}
+        # only folders synced on THIS computer: a project added on another device can still be downloaded here
+        synced = {p.get("remote"): p["name"] for p in self.projects(max_age=5) if p.get("remote") and p.get("source") == "mutagen"}
         out = []
         for line in r.stdout.decode("utf-8", "replace").splitlines():
             parts = line.split("\t")

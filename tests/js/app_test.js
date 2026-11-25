@@ -318,6 +318,26 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  async 'project menu: Sync to this computer downloads a project added on another device'() {
+    await settle();
+    q('.act.more')[0].click();
+    assert.ok(!q('button').some((b) => b.textContent.indexOf('Sync to this computer') === 0), 'not for a synced project');
+    document.body.querySelector('#menu-root').replaceChildren();
+    q('.act.more')[1].click();
+    const it = q('button').find((b) => b.textContent.indexOf('Sync to this computer') === 0);
+    assert.ok(it, 'shown for a project with no copy here');
+    it.click(); await settle();
+    const modal = document.body.querySelector('#modal-root');
+    const inp = q('input', modal).find((i) => i.value === '~/shop');
+    assert.ok(inp, 'folder field, filled in');
+    inp.value = '~/work/shop';
+    q('.btn.primary', modal).pop().click(); await settle();
+    const post = calls.filter((c) => c.url === '/api/add-project').pop();
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/srv/shop', name: 'shop', local: '~/work/shop', git: true });
+    assert.strictEqual(modal.children.length, 0, 'closed after it started');
+    document.body.querySelector('#menu-root').replaceChildren();
+  },
+
   async 'boots, shows projects and status, no Persian in the UI'() {
     await settle();
     assert.strictEqual(q('.proj').length, 2);

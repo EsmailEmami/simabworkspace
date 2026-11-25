@@ -1977,6 +1977,14 @@ class SetupFromWindow(unittest.TestCase):
             f = app.server_folders()
         self.assertEqual([(x["name"], x["git"], x["project"]) for x in f],
                          [("shop", "", ""), ("cheshmeh", "repos inside", "cheshmeh"), ("api", "repo", "")])
+        # a project only in the list (added on another device / server only) can still be downloaded here
+        store.add_manual({"name": "shop", "local": "", "remote": "/home/esi/shop"})
+        app._share_projects = [{"name": "api", "remote": "/home/esi/api"}]
+        app.invalidate()
+        with mock.patch.object(sw.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, out, b"")), \
+                mock.patch.object(sw, "mutagen_sessions", return_value=sess):
+            f = app.server_folders()
+        self.assertEqual([x["project"] for x in f], ["", "cheshmeh", ""])
 
 
 @unittest.skipUnless(shutil.which("jq"), "jq not installed")
@@ -2486,7 +2494,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.66.0"', text)
+        self.assertIn('VERSION="1.66.1"', text)
 
 
 if __name__ == "__main__":

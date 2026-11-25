@@ -572,6 +572,9 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 .ftag { font: 10px var(--mono); padding: 0 5px; border-radius: 6px; background: var(--bg3); color: var(--muted); }
 .ftag.done { color: var(--ok); }
 .add-err { margin-top: 8px; padding: 7px 10px; border-radius: 7px; background: #1c1013; border: 1px solid #5a2633; color: #f7a1b0; font-size: 12.5px; white-space: pre-wrap; }
+.sync-here-list { max-height: 50vh; overflow: auto; margin-bottom: 8px; }
+.sync-here-row { padding: 6px 0; border-bottom: 1px solid #ffffff12; }
+.sync-here-row.done { opacity: .45; }
 
 .conn-msg { font-size: 12px; margin: 2px 0 10px; }
 .conn-msg.ok { color: var(--ok); } .conn-msg.err { color: #f7a1b0; } .conn-msg.warn { color: var(--warn); }

@@ -2303,7 +2303,19 @@ class SyncDetailsAndConflicts(TmpHome):
             desk = Path(self.tmp.name, ".local", "share", "applications", "simabworkspace.desktop").read_text()
             self.assertIn("Name=Simab Workspace", desk)
             self.assertRegex(desk, r"Exec=.*simabworkspace(\.sh)? gui")
-            self.assertTrue(Path(self.tmp.name, ".local", "share", "icons", "simabworkspace.svg").is_file())
+            self.assertIn("Icon=simabworkspace\n", desk)
+            self.assertIn("StartupWMClass=simabworkspace\n", desk)      # the window's --class: logo in the dock, not a gear
+            icons = Path(self.tmp.name, ".local", "share", "icons", "hicolor")
+            for f in ("scalable/apps/simabworkspace.svg", "512x512/apps/simabworkspace.png", "192x192/apps/simabworkspace.png"):
+                self.assertTrue((icons / f).is_file(), f)
+            self.assertFalse(sw.linux_menu_entry(re.search(r"Exec=(\S+) gui", desk).group(1)), "nothing changed → nothing written")
+
+    def test_gui_open_puts_the_logo_in_the_linux_menu(self):
+        with mock.patch.object(sw, "linux_desktop", return_value=True), mock.patch.object(sw, "linux_menu_entry") as entry, \
+                mock.patch.object(sw, "ensure_running", return_value={}), mock.patch.object(sw, "open_window"):
+            sw.main(["server.py", "open"])
+        entry.assert_called_once()
+        self.assertRegex(entry.call_args[0][0], r"simabworkspace(\.sh)?$")
 
 
 class Release(unittest.TestCase):

@@ -9823,6 +9823,46 @@ def desktop_quote(arg: str) -> str:
     return '"' + re.sub(r'(["`$\\])', r"\\\1", arg) + '"'
 
 
+def linux_menu_entry(cmd: str) -> bool:
+    """The app-menu entry + icon (hicolor theme). StartupWMClass = the window's --class, so the dock shows
+    our logo for the open window instead of a gear. Writes only what changed; True when something did."""
+    apps = home_path(".local", "share", "applications")
+    icons = home_path(".local", "share", "icons")
+    files = [(icons / "hicolor" / "scalable" / "apps" / "simabworkspace.svg", STATIC / "icon.svg"),
+             (icons / "hicolor" / "512x512" / "apps" / "simabworkspace.png", STATIC / "icon-512.png"),
+             (icons / "hicolor" / "192x192" / "apps" / "simabworkspace.png", STATIC / "icon-192.png")]
+    desk = ("[Desktop Entry]\nType=Application\nName=Simab Workspace\nComment=Projects, terminals and Claude\n"
+            f"Exec={desktop_quote(cmd)} gui\nIcon=simabworkspace\nStartupWMClass=simabworkspace\nStartupNotify=true\n"
+            "Terminal=false\nCategories=Development;\n")
+    changed = False
+    for dst, src in files:
+        if src.is_file() and (not dst.is_file() or dst.read_bytes() != src.read_bytes()):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            changed = True
+    old = icons / "simabworkspace.svg"           # before 1.66.2: Icon=<this path>, no StartupWMClass
+    if old.is_file():
+        old.unlink()
+    f = apps / "simabworkspace.desktop"
+    if not f.is_file() or f.read_text(errors="replace") != desk:
+        apps.mkdir(parents=True, exist_ok=True)
+        f.write_text(desk)
+        changed = True
+    if changed:
+        for tool in (["gtk-update-icon-cache", "-q", "-t", str(icons / "hicolor")], ["update-desktop-database", "-q", str(apps)]):
+            if shutil.which(tool[0]):
+                try:
+                    subprocess.run(tool, stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+    return changed
+
+
+def linux_desktop() -> bool:
+    """A Linux desktop session (not Windows, Mac or WSL)."""
+    return sys.platform.startswith("linux") and not is_wsl() and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def windows_startup_file() -> Path:
     return Path(os.environ.get("APPDATA") or home_path("AppData", "Roaming"), "Microsoft", "Windows", "Start Menu",
                 "Programs", "Startup", "simabworkspace-sync.cmd")
@@ -11241,7 +11281,6 @@ class App:
         script = self.script()
         installed = home_path(".local", "bin", "simabworkspace")
         cmd = str(installed) if installed.is_file() else script
-        icon_src = STATIC / "icon.svg"
         made = []
         if is_wsl():
             distro = os.environ.get("WSL_DISTRO_NAME", "")
@@ -11264,15 +11303,7 @@ class App:
             app.chmod(0o755)
             made.append(str(app))
         else:
-            d = home_path(".local", "share", "applications")
-            d.mkdir(parents=True, exist_ok=True)
-            icon_dir = home_path(".local", "share", "icons")
-            icon_dir.mkdir(parents=True, exist_ok=True)
-            icon = icon_dir / "simabworkspace.svg"
-            icon.write_bytes(icon_src.read_bytes())
-            (d / "simabworkspace.desktop").write_text(
-                "[Desktop Entry]\nType=Application\nName=Simab Workspace\nComment=Projects, terminals and Claude\n"
-                f"Exec={desktop_quote(cmd)} gui\nIcon={icon}\nTerminal=false\nCategories=Development;\n")
+            linux_menu_entry(cmd)
             made.append("app menu")
         return made
 
@@ -15236,6 +15267,14 @@ def main(argv):
             return subprocess.call([sys.executable, "-X", "utf8", str(Path(__file__).resolve())] + argv[1:])
         serve()
     elif cmd == "open":
+        if linux_desktop():                   # the logo in the app menu and on the open window (dock), not a gear
+            try:
+                inst = home_path(".local", "bin", "simabworkspace")
+                sc = HERE.parent / "simabworkspace.sh"
+                if inst.is_file() or sc.is_file():
+                    linux_menu_entry(str(inst if inst.is_file() else sc))
+            except OSError:
+                pass
         open_window(ensure_running())
     elif cmd == "url":
         print(app_url(ensure_running()))

@@ -3971,6 +3971,13 @@
     if (!streams.value) streams.value = '4';
     var ign = h('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
     ign.value = (S.defaultIgnores || []).join('\n');
+    ign.addEventListener('input', function () { ign.dataset.edited = '1'; });
+    // a folder my other computers already sync: start with their Not synced list (not the defaults)
+    function sharedIgnores(path) {
+      api('GET', 'shared-ignores?remote=' + encodeURIComponent(path)).then(function (d) {
+        if (d && d.ignores && d.ignores.length && !ign.dataset.edited && pickedRemote === path) ign.value = d.ignores.join('\n');
+      }).catch(function () {});
+    }
     var errBox = h('div', { class: 'add-err hidden' });
     var list = h('div', { class: 'flist' }, h('div', { class: 'muted', style: 'padding:10px' }, 'Loading folders on the server…'));
     var filter = h('input', { class: 'inp', placeholder: 'Filter folders', autocomplete: 'off' });
@@ -3988,6 +3995,7 @@
           title: f.project ? 'Already synced as ' + f.project : f.path,
           onclick: function () {
             pickedRemote = f.path;
+            sharedIgnores(f.path);
             if (!local.value || local.dataset.auto) { local.value = '~/' + f.name; local.dataset.auto = '1'; if (local._upd) local._upd(); }
             renderFolders();
           } },
@@ -4027,6 +4035,7 @@
         var deeper = h('button', { class: 'btn', type: 'button', style: 'flex:none', title: 'Any folder on the server, not only the ones in your home', onclick: function () {
           serverFolderDialog({ title: 'Folder to download', start: pickedRemote || '~', pick: function (path) {
             pickedRemote = path;
+            sharedIgnores(path);
             var base = path.replace(/\/$/, '').split('/').pop();
             if (!local.value || local.dataset.auto) { local.value = '~/' + base; local.dataset.auto = '1'; if (local._upd) local._upd(); }
             renderFolders();
@@ -5249,7 +5258,7 @@
     var gen = S.projGen || 0;
     return api('GET', 'projects').then(function (d) {
       if ((S.projGen || 0) !== gen) return;        // stale: asked before a group / order change landed
-      if (d.starred && S.settings) S.settings.starred = d.starred;      // stars set on another device
+      if (d.shared && S.settings) Object.assign(S.settings, d.shared);   // stars / chat defaults set on another device
       var key = JSON.stringify(d.projects);
       if (key !== S.projectsKey) {
         S.projectsKey = key;

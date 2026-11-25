@@ -322,6 +322,9 @@ def db_and_legacy(path, default_legacy: str):
 
 
 # ----------------------------------------------------------------------------- GUI store (settings, projects)
+SHARED_SETTINGS = ("starred", "chatMode", "chatModel", "chatEffort")     # the same on every device
+SHARED_PROJECT_FIELDS = {"starter": 20000, "title": 80, "color": 20}     # per project folder, every device
+
 DEFAULT_SETTINGS = {
     "fontSize": 14,
     "fontFamily": "",
@@ -913,6 +916,7 @@ def merge_projects(sessions: list, manual: list, store_projects: dict) -> list:
                      "paused": bool(s.get("paused")), "error": s.get("lastError") or "",
                      "conflicts": len(conflicts) if isinstance(conflicts, list) else 0,
                      "git": vcs not in ("ignore", "1"),
+                     "ignores": [str(x) for x in ((s.get("configuration") or {}).get("ignores") or [])][:200],
                      "progress": sync_progress(s) if not (s.get("status") or "").startswith("watching") else None,
                      "cycles": int(s.get("successfulCycles") or 0)},
         })
@@ -5116,8 +5120,11 @@ lay = data.get("layout") if isinstance(data.get("layout"), dict) else {}
 groups = {k: v for k, v in (lay.get("groups") or {}).items() if isinstance(v, list) and len(v) == 2}
 colors = {k: v for k, v in (lay.get("colors") or {}).items() if isinstance(v, list) and len(v) == 2}
 order = lay.get("order") if isinstance(lay.get("order"), list) and len(lay.get("order")) == 2 else None
-starters = {k: v for k, v in (lay.get("starters") or {}).items() if isinstance(v, list) and len(v) == 2}
-starred = lay.get("starred") if isinstance(lay.get("starred"), list) and len(lay.get("starred")) == 2 else None
+fields = {fk: {k: v for k, v in fv.items() if isinstance(v, list) and len(v) == 2}
+          for fk, fv in (lay.get("fields") or {}).items() if isinstance(fv, dict)}
+sets = {k: v for k, v in (lay.get("settings") or {}).items() if isinstance(v, list) and len(v) == 2}
+def newer(cur, v, at):               # newest wins; at 0 (a first list) only where nothing is yet, and not empty
+    return (cur is None and (bool(v) or at > 0)) or (cur is not None and at > float(cur[1] or 0))
 for ch in op.get("layout") or []:      # newest change wins; at 0 = a device's first list, only where nothing is yet
     if not isinstance(ch, dict):
         continue
@@ -5133,15 +5140,23 @@ for ch in op.get("layout") or []:      # newest change wins; at 0 = a device's f
     elif k == "o" and isinstance(v, list):
         if order is None or at > float(order[1] or 0):
             order = [[str(x) for x in v if x][:2000], at]
-    elif k == "s" and isinstance(ch.get("r"), str) and ch["r"] and isinstance(v, str):
-        cur = starters.get(ch["r"])
-        if (cur is None and (v or at)) or (cur is not None and at > float(cur[1] or 0)):
-            starters[ch["r"]] = [v[:20000], at]
-    elif k == "st" and isinstance(v, list):
-        if (starred is None and (v or at)) or (starred is not None and at > float(starred[1] or 0)):
-            starred = [[str(x)[:300] for x in v if x][:500], at]
+    elif k == "f" and ch.get("f") in ("starter", "title", "color", "ignores") and isinstance(ch.get("r"), str) and ch["r"]:
+        if ch["f"] == "ignores":
+            v = [str(x)[:200] for x in v if x][:200] if isinstance(v, list) else None
+        else:
+            v = v[:20000] if isinstance(v, str) else None
+        fd = fields.setdefault(ch["f"], {})
+        if v is not None and newer(fd.get(ch["r"]), v, at):
+            fd[ch["r"]] = [v, at]
+    elif k == "set" and ch.get("n") in ("starred", "chatMode", "chatModel", "chatEffort"):
+        if ch["n"] == "starred":
+            v = [str(x)[:300] for x in v if x][:500] if isinstance(v, list) else None
+        else:
+            v = v[:60] if isinstance(v, str) else None
+        if v is not None and newer(sets.get(ch["n"]), v, at):
+            sets[ch["n"]] = [v, at]
 data = {"devices": devs, "tabs": tabs, "closed": closed,
-        "layout": {"groups": groups, "colors": colors, "order": order, "starters": starters, "starred": starred}}
+        "layout": {"groups": groups, "colors": colors, "order": order, "fields": fields, "settings": sets}}
 tmp = f + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False)
@@ -9967,6 +9982,7 @@ class App:
         self._share_gone = {}                    # session id -> closed because another device closed it
         self._layout_out = []                    # group / group colour / order changes not yet on the server
         self._layout_lock = threading.Lock()
+        self._shared_ignores = {}                # layout_key(remote) -> Not synced list another device set
         self._copies_checked = False
         self.pc = PcHub(self)                    # builds on this computer (onpc)
         self._pc_unlock = {}                     # web: computer id -> (MFA unlock token, until) — memory only
@@ -10352,15 +10368,20 @@ class App:
         ch = [{"k": "g", "r": r, "v": (sp.get(n) or {}).get("group"), "at": 0}
               for n, r in rm.items() if (sp.get(n) or {}).get("group")]
         ch += [{"k": "c", "g": g, "v": c, "at": 0} for g, c in self.store.group_colors().items() if c]
-        ch += [{"k": "s", "r": r, "v": (sp.get(n) or {}).get("starter"), "at": 0}
-               for n, r in rm.items() if (sp.get(n) or {}).get("starter")]
-        st = self.store.settings.get("starred") or []
-        if st:
-            ch.append({"k": "st", "v": list(st), "at": 0})
+        ch += [{"k": "f", "f": f, "r": r, "v": (sp.get(n) or {}).get(f), "at": 0}
+               for n, r in rm.items() for f in SHARED_PROJECT_FIELDS if (sp.get(n) or {}).get(f)]
+        if not self.web:
+            for x in self.projects(max_age=10):     # what is not synced, as this computer's syncs have it
+                r = layout_key(x.get("remote"))
+                ign = ((x.get("sync") or {}).get("ignores")) if isinstance(x.get("sync"), dict) else None
+                if r and ign:
+                    ch.append({"k": "f", "f": "ignores", "r": r, "v": list(ign), "at": 0})
+        st = self.store.settings
+        ch += [{"k": "set", "n": n, "v": st.get(n), "at": 0} for n in SHARED_SETTINGS if st.get(n)]
         o = self._layout_order(rm)
         return ch + ([{"k": "o", "v": o, "at": 0}] if o else [])
 
-    def layout_changed(self, names=(), colors=(), order=False, starters=(), starred=False):
+    def layout_changed(self, names=(), colors=(), order=False, fields=(), settings=(), ignores=None):
         """A group / group colour / order change made here: on the server at the next share round (now)."""
         if not self.share_on():
             return
@@ -10372,11 +10393,14 @@ class App:
         ch += [{"k": "c", "g": g, "v": gc.get(g, ""), "at": now} for g in colors if g]
         if order:
             ch.append({"k": "o", "v": self._layout_order(rm), "at": now})
-        for n in starters:
-            if rm.get(n):
-                ch.append({"k": "s", "r": rm[n], "v": (self.store.data["projects"].get(n) or {}).get("starter") or "", "at": now})
-        if starred:
-            ch.append({"k": "st", "v": list(self.store.settings.get("starred") or []), "at": now})
+        for n, f in fields:                    # (project, "starter" | "title" | "color")
+            if rm.get(n) and f in SHARED_PROJECT_FIELDS:
+                ch.append({"k": "f", "f": f, "r": rm[n], "v": (self.store.data["projects"].get(n) or {}).get(f) or "", "at": now})
+        if ignores and rm.get(ignores[0]):     # (project, list): its new Not synced list
+            ch.append({"k": "f", "f": "ignores", "r": rm[ignores[0]], "v": list(ignores[1]), "at": now})
+        for n in settings:
+            if n in SHARED_SETTINGS:
+                ch.append({"k": "set", "n": n, "v": self.store.settings.get(n), "at": now})
         if ch:
             with self._layout_lock:
                 self._layout_out += ch
@@ -10402,21 +10426,38 @@ class App:
                     rec = self.store.data["projects"].setdefault(n, {})
                     if (rec.get("group") or "") != v[0][:40]:
                         rec["group"], changed = v[0][:40], True
-            starters = lay.get("starters") if isinstance(lay.get("starters"), dict) else {}
-            for r, names in by.items():        # starter message: the newest one set on any device
-                v = starters.get(r)
-                if not (isinstance(v, list) and v and isinstance(v[0], str)):
+            fields = lay.get("fields") if isinstance(lay.get("fields"), dict) else {}
+            for f in SHARED_PROJECT_FIELDS:    # starter message, name shown, colour: the newest set on any device
+                fd = fields.get(f) if isinstance(fields.get(f), dict) else {}
+                for r, names in by.items():
+                    v = fd.get(r)
+                    if not (isinstance(v, list) and v and isinstance(v[0], str)):
+                        continue
+                    val = v[0][:SHARED_PROJECT_FIELDS[f]]
+                    if f == "color" and val and not re.fullmatch(r"#[0-9a-fA-F]{6}", val):
+                        continue
+                    for n in names:
+                        rec = self.store.data["projects"].setdefault(n, {})
+                        if (rec.get(f) or "") != val:
+                            rec[f], changed = val, True
+            ig = fields.get("ignores") if isinstance(fields.get("ignores"), dict) else {}
+            self._shared_ignores = {r: [str(x) for x in v[0]] for r, v in ig.items()
+                                    if isinstance(v, list) and v and isinstance(v[0], list)}
+            sets = lay.get("settings") if isinstance(lay.get("settings"), dict) else {}
+            for n in SHARED_SETTINGS:          # stars + the chat's default mode / model / effort
+                v = sets.get(n)
+                if not (isinstance(v, list) and v):
                     continue
-                for n in names:
-                    rec = self.store.data["projects"].setdefault(n, {})
-                    if (rec.get("starter") or "") != v[0][:20000]:
-                        rec["starter"], changed = v[0][:20000], True
-            st = lay.get("starred")             # starred commands / menu entries: the same list everywhere
-            if isinstance(st, list) and st and isinstance(st[0], list):
-                want = [str(x) for x in st[0] if x][:500]
-                if want != list(self.store.settings.get("starred") or []):
-                    self.store.data["settings"]["starred"] = want
-                    changed = True
+                val = v[0]
+                if n == "starred":
+                    if not isinstance(val, list):
+                        continue
+                    val = [str(x) for x in val if x][:500]
+                elif not ((n == "chatMode" and val in CHAT_MODES) or (n == "chatEffort" and val in CHAT_EFFORTS)
+                          or (n == "chatModel" and isinstance(val, str) and re.fullmatch(r"[A-Za-z0-9.\[\]_-]{1,60}", val))):
+                    continue
+                if self.store.settings.get(n) != val:
+                    self.store.data["settings"][n], changed = val, True
             cols = {g: v[0] for g, v in (lay.get("colors") or {}).items()
                     if isinstance(v, list) and v and isinstance(v[0], str) and re.fullmatch(r"#[0-9a-f]{6}", v[0])}
             if isinstance(lay.get("colors"), dict) and cols != self.store.group_colors():
@@ -10587,7 +10628,10 @@ class App:
             built["prepare"] = lambda force=False: self.pc.ensure_mount(pn, force) if pn else None
             c = ChatSession(sid, built, on_change=self._changed)
             c.log = self.activity.add
-            c.remember = self.store.set_chat_prefs
+            def remember(*a, **k):
+                self.store.set_chat_prefs(*a, **k)
+                self.layout_changed(settings=("chatMode", "chatModel", "chatEffort"))
+            c.remember = remember
             c.remember_pc = self.store.set_chat_pc
             c.on_usage = self.usage.limits
             c.on_cost = self.usage.cost
@@ -10934,6 +10978,7 @@ class App:
         if code != 0:
             raise ApiError(400, self.script_error(text, "could not change what is not synced"))
         self.activity.add("sync-ignores", name, "not synced: " + (", ".join(out) or "nothing"))
+        self.layout_changed(ignores=(name, out))
         res = {"ok": True, "ignores": out, "deleted": {}}
         for w in ("server", "local"):
             paths = delete.get(w)
@@ -14605,15 +14650,18 @@ class Handler(BaseHTTPRequestHandler):
             return app.pc_api(method, parts[1:], self._body() if method == "POST" else {})
         if route == ("GET", "state"):
             return app.state()
+        if route == ("GET", "shared-ignores"):    # Add project: the Not synced list my other computers use there
+            ig = app._shared_ignores.get(layout_key((query.get("remote") or [""])[0]))
+            return {"ignores": ig}
         if route == ("GET", "projects"):
-            return {"projects": app.projects(), "starred": list(app.store.settings.get("starred") or [])}
+            return {"projects": app.projects(), "shared": {n: app.store.settings.get(n) for n in SHARED_SETTINGS}}
         if route == ("GET", "status"):
             return app.status(force=query.get("force") == ["1"])
         if route == ("POST", "settings"):
             body = self._body()
             s = app.store.update_settings(body)
-            if isinstance(body, dict) and "starred" in body:
-                app.layout_changed(starred=True)
+            if isinstance(body, dict):
+                app.layout_changed(settings=[n for n in SHARED_SETTINGS if n in body])
             return {"settings": s}
         if route == ("POST", "commands") and len(parts) == 2:
             return {"commands": app.set_commands(parts[1], self._body().get("commands"))}
@@ -14624,12 +14672,13 @@ class Handler(BaseHTTPRequestHandler):
             app._project(parts[1])
             t = app.store.set_starter(parts[1], self._body().get("text"))
             app.invalidate()
-            app.layout_changed(starters=[parts[1]])
+            app.layout_changed(fields=[(parts[1], "starter")])
             return {"starter": t}
         if route == ("POST", "title") and len(parts) == 2:
             app._project(parts[1])
             t = app.store.set_title(parts[1], self._body().get("title"))
             app.invalidate()
+            app.layout_changed(fields=[(parts[1], "title")])
             return {"title": t}
         if route == ("POST", "group") and len(parts) == 2:
             app._project(parts[1])
@@ -14654,6 +14703,7 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "color") and len(parts) == 2:
             c = app.store.set_color(parts[1], self._body().get("color"))
             app.invalidate()
+            app.layout_changed(fields=[(parts[1], "color")])
             return {"color": c}
         if route == ("POST", "manual"):
             item = app.store.add_manual(self._body())

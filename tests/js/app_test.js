@@ -131,6 +131,7 @@ global.fetch = (url, opts) => {
     server: { items: [{ path: 'web/dist', dir: true, size: 2048 }], total: 2048, truncated: false }, local: { items: [], total: 0, truncated: false } };
   else if (url === '/api/server-folders') res = { folders: [{ path: '/home/esi/shop', name: 'shop', git: 'repo', mtime: 1, project: '' }, { path: '/home/esi/cheshmeh', name: 'cheshmeh', git: 'repos inside', mtime: 2, project: 'cheshmeh' }] };
   else if (url === '/api/add-project') res = { ok: true, project: 'shop' };
+  else if (url.startsWith('/api/shared-ignores')) res = { ignores: url.indexOf('shop') >= 0 ? ['node_modules', '/vendor'] : null };
   else if (url.startsWith('/api/update') && method === 'GET') res = { current: '9', latest: '10.0.0', available: true, notes: '## Changes\n- faster', url: 'https://x' };
   else if (url === '/api/update' && method === 'POST') res = { ok: true, version: '10.0.0' };
   else if (url.startsWith('/api/activity')) res = { items: [
@@ -710,12 +711,14 @@ const tests = {
     assert.deepStrictEqual(rows.map((r) => r.querySelector('.fname').textContent), ['shop', 'cheshmeh']);
     assert.ok(rows[1].disabled, 'already synced folder cannot be picked');
     rows[0].click();
+    await settle();
     const local = q('input', modal).find((i) => i.value === '~/shop');
     assert.ok(local, 'local folder filled in');
     q('.btn.primary', modal).pop().click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
-    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, streams: 4, ignores: ['node_modules', 'dist'] });
+    // my other computer already syncs this folder: its Not synced list, not the defaults
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, streams: 4, ignores: ['node_modules', '/vendor'] });
     assert.ok(q('.toast').some((t) => /shop: downloading in the background/.test(t.textContent)));
   },
 

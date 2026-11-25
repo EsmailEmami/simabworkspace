@@ -174,23 +174,35 @@ class Devices(base.TmpHome):
         self.web.share_sync()
         self.assertEqual(self.proj(self.web, "shop")["group"], "")
 
-    def test_starter_messages_and_stars_are_the_same_on_every_device(self):
+    def test_starter_title_colour_stars_and_chat_defaults_are_the_same_on_every_device(self):
         self.laptop.store.set_starter("shop", "Read memory first.")      # set before the new computer joined
-        self.laptop.store.update_settings({"starred": ["cmd:Git", "proj:Files"]})
+        self.laptop.store.set_title("shop", "Shop")
+        self.laptop.store.set_color("shop", "#aa3300")
+        self.laptop.store.update_settings({"starred": ["cmd:Git", "proj:Files"], "chatEffort": "high"})
         self.web.store.add_manual({"name": "shop", "remote": "~/shop"})   # the same project, added there too
         self.laptop.share_sync()
         self.web.share_sync()
-        self.assertEqual(self.proj(self.web, "shop")["starter"], "Read memory first.")
+        p = self.proj(self.web, "shop")
+        self.assertEqual((p["starter"], p["title"], p["color"]), ("Read memory first.", "Shop", "#aa3300"))
         self.assertEqual(self.web.store.settings["starred"], ["cmd:Git", "proj:Files"])
+        self.assertEqual(self.web.store.settings["chatEffort"], "high")
         # changed / removed on the new one: the old one follows, its own first list does not undo it
         self.web.store.set_starter("shop", "")
-        self.web.layout_changed(starters=["shop"])
-        self.web.store.update_settings({"starred": ["cmd:Git"]})
-        self.web.layout_changed(starred=True)
+        self.web.layout_changed(fields=[("shop", "starter")])
+        self.web.store.update_settings({"starred": ["cmd:Git"], "chatMode": "plan"})
+        self.web.layout_changed(settings=["starred", "chatMode"])
         self.web.share_sync()
         self.laptop.share_sync()
         self.assertEqual(self.proj(self.laptop, "shop")["starter"], "")
         self.assertEqual(self.laptop.store.settings["starred"], ["cmd:Git"])
+        self.assertEqual(self.laptop.store.settings["chatMode"], "plan")
+
+    def test_a_new_computer_gets_the_not_synced_list_of_the_folder(self):
+        self.laptop.share_sync()
+        self.laptop.layout_changed(ignores=("shop", ["node_modules", "/dist"]))
+        self.laptop.share_sync()
+        self.web.share_sync()
+        self.assertEqual(self.web._shared_ignores.get(sw.layout_key("/home/esi/shop")), ["node_modules", "/dist"])
 
     def test_the_same_folder_under_another_name_shares_its_group(self):
         self.web.store.add_manual({"name": "shop-web", "remote": "/home/esi/shop/"})

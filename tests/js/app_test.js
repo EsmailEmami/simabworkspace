@@ -187,6 +187,7 @@ global.fetch = (url, opts) => {
     { id: 'sshfs', ok: false, optional: true, title: 'sshfs on the server (Local only projects)', detail: 'not yet', fix: 'sshfs' }] };
   else if (url === '/api/setup-check/sshfs') { fakePc.sshfsFetched = true; res = { ok: true }; }
   else if (url === '/api/pc/access') res = fakePc.access || { mfa: false, unlocks: [], terms: [], runs: [], log: [], now: Date.now() / 1000 };
+  else if (url === '/api/pc/mfa') { fakePc.mfa = body; res = Object.assign({}, fakePc.access, { mfa: false, devices: [], unlocks: [], terms: [] }); }
   else if (url === '/api/pc/disconnect') { fakePc.disconnected = body.id; res = Object.assign({}, fakePc.access, { unlocks: [], terms: [] }); }
   else if (url === '/api/pc/unlock') { fakePc.unlocked = body; res = { unlocked: { [body.dev]: Date.now() / 1000 + 3600 } }; }
   else if (url === '/api/pc/remote-run') { fakePc.remoteRun = body; res = { name: 'run-' + body.id, dev: 'a1b2c3d4e5f6' }; }
@@ -2301,7 +2302,8 @@ const tests = {
     global.SW.S.web = false;
     const now = Date.now() / 1000;
     fakePc.access = { mfa: true, now: now, runs: [],
-      unlocks: [{ id: 'aaaaaaaaaaaa', by: 'Chrome on Android', at: now - 60, until: now + 3500 }],
+      devices: [{ id: 'cccccccccccc', name: 'Phone', at: now - 900, last: now - 60 }, { id: 'dddddddddddd', name: 'Tablet', at: now - 800, last: 0 }],
+      unlocks: [{ id: 'aaaaaaaaaaaa', by: 'Chrome on Android', dev: 'cccccccccccc', at: now - 60, until: now + 3500 }],
       terms: [{ id: 'bbbbbbbbbbbb', unlock: 'aaaaaaaaaaaa', project: 'cheshmeh', at: now - 30, by: 'Chrome on Android' }],
       log: [{ t: now - 30, kind: 'term', text: 'terminal opened in cheshmeh', by: 'Chrome on Android' }] };
     document.body.querySelector('#modal-root').replaceChildren();
@@ -2312,9 +2314,17 @@ const tests = {
     assert.match(sec.textContent, /Chrome on Android/);
     assert.match(sec.textContent, /terminal in cheshmeh/);
     assert.match(sec.textContent, /Remote activity \(1\)/);
+    assert.match(sec.textContent, /Phone.*connected now/);
+    assert.match(sec.textContent, /Tablet.*not used yet/);
+    assert.ok(q('button', sec).some((b) => b.textContent === 'Add a device…'), 'more devices: phone, tablet…');
     q('button', sec).find((b) => b.textContent === 'Disconnect').click(); await settle();
     assert.strictEqual(fakePc.disconnected, 'aaaaaaaaaaaa');
     assert.match(sec.textContent, /Nobody is connected/);
+    const ok = global.SW.confirmDlg; global.SW.confirmDlg = () => Promise.resolve(true);
+    q('button', sec).find((b) => b.textContent === 'Turn off').click(); await settle();
+    global.SW.confirmDlg = ok;
+    assert.deepStrictEqual(fakePc.mfa, { op: 'off' }, 'no code asked on this computer');
+    assert.match(sec.textContent, /Off —/);
     fakePc.access = null;
     document.body.querySelector('#modal-root').replaceChildren();
   },

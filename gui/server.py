@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.65.20"
+VERSION = "1.66.0"
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -4403,9 +4403,9 @@ def fs_main(argv):
             print(json.dumps(fs_change(root, op, rel, argv[3] if len(argv) > 3 else "", text)))
             return
         if op == "upload":
-            # argv: upload root folder name  — raw bytes on stdin
-            folder = argv[3] if len(argv) > 3 else ""
-            name = argv[4] if len(argv) > 4 else "upload"
+            # argv: upload root folder name  — raw bytes on stdin (folder = rel, argv[2])
+            folder = rel
+            name = argv[3] if len(argv) > 3 else "upload"
             fs_name_ok(name)
             root_real = os.path.realpath(os.path.expanduser(root or "~"))
             if not os.path.isdir(root_real):
@@ -5838,7 +5838,9 @@ PC_DEFAULT = {"on": False, "id": "", "secret": "", "name": "", "mode": "chat", "
               "output": "chat", "autoOpen": False,
               "shareRevoked": [],     # Share on your domain: guests taken back on this computer (refused here)
               "trusted": None,        # projects whose hooked commands follow the chat: set HERE only (None = not yet taken over)
-              "mfa": "", "mfaOn": False, "mfaStep": 0}   # this computer's own two-step key: the phone unlocks it
+              "mfa": "", "mfaOn": False, "mfaStep": 0,   # (old single key: moved into mfaDevs)
+              "mfaDevs": [],          # phone access: one two-step key per device (phone, tablet…): id, name, key, step, at, last
+              "mfaNew": None}         # a device being added (key shown, its first code not given yet)
 PC_UNLOCK_TTL = 3600     # an MFA unlock from the phone / web: terminal, run commands, answers — no limits for 1 h
 PC_TICKET_TTL = 60       # one terminal of the web version per ticket
 PC_MFA_FAILS = 5         # wrong codes per 15 minutes before unlocking is refused
@@ -5856,8 +5858,8 @@ PC_HINT = (
     "on this server: use Read/Write/Glob for them; a Bash command that mentions ~/.claude runs here. Git "
     "commands (only git, cd, head, tail …) run here too, where the repo is. `cd` "
     "does not carry over to the next command: use `cd dir && command`. Give long builds a long Bash timeout "
-    "(600000 ms). If a command says no computer is connected, stop and tell the user; never try to run it "
-    "on the server instead. Dev servers (ng serve, npm start …): `onpc --bg NAME COMMAND` starts it on the "
+    "(600000 ms). When no computer is connected, a command runs on this server by itself (its output says so) — "
+    "go on with the work. Dev servers (ng serve, npm start …): `onpc --bg NAME COMMAND` starts it on the "
     "computer and returns at once with its URL; `onpc --logs NAME`, `onpc --stop NAME`, `onpc --ps`. Never "
     "run a dev server in the foreground. " + PC_ONSERVER_HINT)
 
@@ -6055,10 +6057,23 @@ def send(d, cwd, cmd):
         note.add(chunk)
 
 
+def on_server(cmd, why):
+    """No computer to run on, but the folder is this server's own (not a Local only mount): run it here."""
+    sys.stderr.write("onpc: %s — ran on the server instead (the project folder is here).\n" % why)
+    sys.stderr.flush()
+    import subprocess
+    return subprocess.call(["bash", "-c", cmd])
+
+
 def run(cmd, on):
     cwd = os.path.realpath(os.getcwd())
     pin, how = ("", "") if on else pinned(cwd, True)
     devs = [d for d in devices() if d["online"] and (not on or on in (d.get("name"), d.get("id"))) and (not pin or d["id"] == pin)]
+    here = not on and "/.simab-mnt/" not in cwd + "/"      # a Local only project lives only on its computer
+    if not devs and here:
+        name = next((d.get("name") for d in devices() if d["id"] == pin), "") if pin else ""
+        return on_server(cmd, "%s (%s) is not connected" % (name or "the chosen computer", CHOSEN.get(how, how)) if pin
+                         else "none of your computers is connected")
     if pin and not devs:
         name = next((d.get("name") for d in devices() if d["id"] == pin), "") or "the chosen computer"
         sys.stderr.write("onpc: %s (%s) is not connected — the command was NOT run.\n"
@@ -7396,6 +7411,13 @@ class PcHub:
                 c["id"] = c["id"] if PC_ID_RE.fullmatch(c.get("id") or "") else secrets.token_hex(6)
                 c["secret"] = c["secret"] if len(c.get("secret") or "") >= 32 else secrets.token_urlsafe(32)
                 self.app.store.db.put("pc", c)
+            if c.get("mfa") and c.get("mfaOn") and not c.get("mfaDevs"):      # one key of an older version → its first device
+                c["mfaDevs"] = [{"id": secrets.token_hex(6), "name": "Phone", "key": c["mfa"], "step": int(c.get("mfaStep") or 0),
+                                 "at": time.time(), "last": 0}]
+                c["mfa"], c["mfaStep"] = "", 0
+                self.app.store.db.put("pc", c)
+            c["mfaDevs"] = [d for d in (c.get("mfaDevs") or []) if isinstance(d, dict) and d.get("key")]
+            c["mfaOn"] = bool(c["mfaDevs"])
             if not c.get("name"):
                 c["name"] = (socket.gethostname() or "computer").split(".")[0][:40]
             return c
@@ -7411,7 +7433,7 @@ class PcHub:
 
     def public(self) -> dict:
         c = self.cfg()
-        for k in ("secret", "mfa", "mfaStep"):
+        for k in ("secret", "mfa", "mfaStep", "mfaDevs", "mfaNew"):
             c.pop(k, None)
         return {"config": c, "state": self.state, "error": self.error, "since": self.since, "os": pc_os(),
                 "mounts": dict(self.mounts)}
@@ -8380,43 +8402,68 @@ class PcHub:
     # phone / web access: unlocked with THIS computer's own MFA code ------------------
     # The server only carries the code and the token; the key and the check stay here, so nothing
     # on the server (Claude in a chat included) can open a terminal or answer for you on its own.
-    def mfa_setup(self) -> dict:
+    def mfa_setup(self, name: str = "") -> dict:
+        """Add a device (phone, tablet…): a new key of its own; it counts after its first code (mfa_add)."""
+        name = re.sub(r"\s+", " ", str(name or "")).strip()[:40] or "Phone"
         with self.lock:
             c = self.cfg()
-            if c.get("mfaOn"):
-                raise ApiError(409, "phone access is already on")
-            c["mfa"], c["mfaStep"] = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="), 0
+            c["mfaNew"] = {"key": base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="), "name": name, "at": time.time()}
             self.app.store.db.put("pc", c)
-        uri = ("otpauth://totp/" + urllib.parse.quote("Simab computer:" + c["name"]) + "?secret=" + c["mfa"]
+        key = c["mfaNew"]["key"]
+        uri = ("otpauth://totp/" + urllib.parse.quote("Simab " + c["name"] + ":" + name) + "?secret=" + key
                + "&issuer=Simab%20Workspace")
-        return {"secret": c["mfa"], "uri": uri}
+        return {"secret": key, "uri": uri}
 
-    def mfa_check(self, code, at: float = None) -> bool:
+    def mfa_check(self, code, at: float = None):
+        """The device whose code this is (each code works once) or None."""
         code = str(code or "").replace(" ", "")
+        if not re.fullmatch(r"\d{6}", code):
+            return None
+        step = int((at or time.time()) // 30)
         with self.lock:
             c = self.cfg()
-            if not c.get("mfa") or not re.fullmatch(r"\d{6}", code):
-                return False
-            step = int((at or time.time()) // 30)
-            for st in (step, step - 1, step + 1):
-                if st > int(c.get("mfaStep") or 0) and hmac.compare_digest(totp_code(c["mfa"], st), code):
-                    c["mfaStep"] = st                            # a code works once
-                    self.app.store.db.put("pc", c)
-                    return True
-        return False
+            for d in c["mfaDevs"]:
+                for st in (step, step - 1, step + 1):
+                    if st > int(d.get("step") or 0) and hmac.compare_digest(totp_code(d["key"], st), code):
+                        d["step"], d["last"] = st, time.time()
+                        self.app.store.db.put("pc", c)
+                        return dict(d)
+        return None
 
-    def mfa_enable(self, code, on: bool) -> dict:
-        if not self.mfa_check(code):
-            raise ApiError(400, "wrong code")
+    def mfa_add(self, code) -> dict:
+        """The device being added counts once its app shows the right code."""
+        code = str(code or "").replace(" ", "")
+        step = int(time.time() // 30)
         with self.lock:
             c = self.cfg()
-            c["mfaOn"] = bool(on)
-            if not on:
-                c["mfa"], c["mfaStep"] = "", 0
+            n = c.get("mfaNew") if isinstance(c.get("mfaNew"), dict) else None
+            if not n:
+                raise ApiError(409, "start again: Add a device")
+            ok = next((st for st in (step, step - 1, step + 1) if hmac.compare_digest(totp_code(n["key"], st), code)), None)
+            if ok is None:
+                raise ApiError(400, "wrong code")
+            c["mfaDevs"] = c["mfaDevs"] + [{"id": secrets.token_hex(6), "name": n["name"], "key": n["key"], "step": ok,
+                                            "at": time.time(), "last": 0}]
+            c["mfaNew"] = None
             self.app.store.db.put("pc", c)
-        if not on:
-            self.lock_out("all", "phone access turned off")
-        self.audit("mfa", "phone access " + ("on" if on else "off"))
+        self.audit("mfa", "device added: " + n["name"])
+        return self.remote_access()
+
+    def mfa_remove(self, did) -> dict:
+        """Remove one device ("all" = phone access off): asked here only, so no code — it only takes access away."""
+        with self.lock:
+            c = self.cfg()
+            gone = [d for d in c["mfaDevs"] if did == "all" or d["id"] == did]
+            if not gone:
+                raise ApiError(404, "no such device")
+            c["mfaDevs"] = [d for d in c["mfaDevs"] if d not in gone]
+            c["mfaNew"] = None if did == "all" else c.get("mfaNew")
+            ids = {d["id"] for d in gone}
+            self.app.store.db.put("pc", c)
+            uids = [u["id"] for u in self.unlocks.values() if did == "all" or u.get("dev") in ids]
+        for uid in uids:
+            self.lock_out(uid, "device removed")
+        self.audit("mfa", "phone access off" if did == "all" else "device removed: " + gone[0]["name"])
         return self.remote_access()
 
     def unlock(self, code, by: str) -> dict:
@@ -8430,13 +8477,15 @@ class PcHub:
         if not c.get("mfaOn"):
             raise ApiError(403, f"phone access is off on {c['name']} — turn it on there (Computers → Phone access)")
         by = (by or "web")[:80]
-        if not self.mfa_check(code):
+        d = self.mfa_check(code)
+        if not d:
             with self.lock:
                 self.mfa_fails.append(now)
             self.audit("unlock-failed", "wrong code", by)
             raise ApiError(403, "wrong code — check the time on your phone and try the newest code")
         tok = secrets.token_urlsafe(32)
-        u = {"id": secrets.token_hex(6), "hash": hashlib.sha256(tok.encode()).hexdigest(), "by": by, "at": now,
+        by = (d["name"] + " · " + by)[:120]
+        u = {"id": secrets.token_hex(6), "hash": hashlib.sha256(tok.encode()).hexdigest(), "by": by, "dev": d["id"], "at": now,
              "until": now + PC_UNLOCK_TTL}
         with self.lock:
             self.unlocks[u["id"]] = u
@@ -8503,12 +8552,14 @@ class PcHub:
         """Computers → Phone access: who is in now (unlocks, terminals, run commands) and the log."""
         self.unlocked("-")                                   # drops the expired ones
         with self.lock:
-            unl = [{k: u[k] for k in ("id", "by", "at", "until")} for u in self.unlocks.values()]
+            unl = [{k: u.get(k) for k in ("id", "by", "dev", "at", "until")} for u in self.unlocks.values()]
             terms = [{k: t[k] for k in ("id", "unlock", "project", "at", "by")} for t in self.terms.values()]
             runs = [{"name": n, "project": x["project"], "cmd": x["cmd"], "unlock": x["unlock"], "start": x.get("start", 0)}
                     for n, x in self.bg.items() if x.get("unlock") and x["state"] == "running"]
         log = self.app.store.db.get("pcAudit", []) or []
-        return {"mfa": bool(self.cfg().get("mfaOn")), "unlocks": unl, "terms": terms, "runs": runs,
+        c = self.cfg()
+        devs = [{k: d.get(k) for k in ("id", "name", "at", "last")} for d in c["mfaDevs"]]
+        return {"mfa": c["mfaOn"], "devices": devs, "unlocks": unl, "terms": terms, "runs": runs,
                 "log": list(reversed(log if isinstance(log, list) else []))[:100], "now": time.time()}
 
     def answer(self, aid, ans) -> dict:
@@ -11953,10 +12004,20 @@ class App:
             if not (uid == "all" or (isinstance(uid, str) and re.fullmatch(r"[0-9a-f]{12}", uid))):
                 raise ApiError(400, "bad request")
             return self.pc.lock_out(uid)
-        if key == ("POST", "mfa"):
-            if body.get("op") == "setup":
-                return self.pc.mfa_setup()
-            return self.pc.mfa_enable(body.get("code"), body.get("op") == "on")
+        if key == ("POST", "mfa"):            # phone access devices: set on THIS computer only
+            if self.web:
+                raise ApiError(403, "set phone access on the computer itself")
+            op = body.get("op")
+            if op == "setup":
+                return self.pc.mfa_setup(body.get("name"))
+            if op == "on":
+                return self.pc.mfa_add(body.get("code"))
+            if op in ("remove", "off"):
+                did = "all" if op == "off" else body.get("id")
+                if not (did == "all" or (isinstance(did, str) and PC_ID_RE.fullmatch(did))):
+                    raise ApiError(400, "bad request")
+                return self.pc.mfa_remove(did)
+            raise ApiError(400, "bad request")
         if key == ("GET", "run") and len(rest) == 2:
             return self.pc.run_info(rest[1])
         raise ApiError(404, "not found")

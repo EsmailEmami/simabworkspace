@@ -288,9 +288,9 @@ class EndToEnd(unittest.TestCase):
 
     def unlock(self):
         """Phone access on (this computer's own MFA key) + an unlock through the bridge → {dev: token}."""
-        key = self.hub.mfa_setup()["secret"]
+        key = self.hub.mfa_setup("Phone")["secret"]
         step = int(time.time() // 30)
-        self.hub.mfa_enable(sw.totp_code(key, step - 1), True)
+        self.hub.mfa_add(sw.totp_code(key, step - 1))
         dev = self.hub.cfg()["id"]
         r = self.bridge("call", dev, json.dumps({"op": "unlock", "code": sw.totp_code(key, step), "by": "Chrome on Android"}))
         self.assertIn("token", r, r)
@@ -358,8 +358,13 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(code, 255)
         self.assertIn("not synced to laptop", err)
         self.fwd.close()
-        code, _, err = self.onpc("echo x")
-        self.assertEqual(code, 255)
+        code, out, err = self.onpc("echo x; exit 3")             # the folder is on the server: runs here
+        self.assertEqual((code, out), (3, "x\n"))
+        self.assertIn("ran on the server instead", err)
+        mnt = os.path.join(self.home, ".simab-mnt", "lo")
+        os.makedirs(mnt)
+        code, out, err = self.onpc("echo x", cwd=mnt)           # a Local only project: never on the server
+        self.assertEqual((code, out), (255, ""))
         self.assertIn("none of your computers is connected", err)
         self.assertIn("NOT run", err)
         _, out, _ = self.onpc("--list")
@@ -422,7 +427,7 @@ class EndToEnd(unittest.TestCase):
         out = until("DONE-42")
         self.assertIn("DONE-42", out, out)
         self.assertIn(os.path.realpath(self.local), out, "a shell in the project folder on the computer")
-        self.assertEqual([t["by"] for t in self.hub.remote_access()["terms"]], ["Chrome on Android"])
+        self.assertEqual([t["by"] for t in self.hub.remote_access()["terms"]], ["Phone · Chrome on Android"])
         os.write(master, b"exit\n")
         self.assertEqual(p.wait(15), 0)
         os.close(master)
@@ -448,9 +453,9 @@ class EndToEnd(unittest.TestCase):
     def test_a_project_can_be_tied_to_one_computer(self):
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): "ffffffffffff"}))
         code, out, err = self.onpc("echo x")
-        self.assertEqual(code, 255)
+        self.assertEqual((code, out), (0, "x\n"), "that computer is off and the folder is here: the server")
         self.assertIn("chosen for this project", err)
-        self.assertIn("NOT run", err)
+        self.assertIn("ran on the server instead", err)
         Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): self.hub.cfg()["id"]}))
         self.assertEqual(self.onpc("echo x")[:2], (0, "x\n"))
 
@@ -460,7 +465,7 @@ class EndToEnd(unittest.TestCase):
         real = os.path.realpath(self.srv_dir)
         Path(self.pcdir, "pins.json").write_text(json.dumps({"*": other}))
         code, _, err = self.onpc("echo x")
-        self.assertEqual(code, 255)
+        self.assertEqual(code, 0)
         self.assertIn("your default computer", err)
         Path(self.pcdir, "pins.json").write_text(json.dumps({"*": other, real: me}))
         self.assertEqual(self.onpc("echo x")[:2], (0, "x\n"), "the project's choice beats the default")
@@ -472,7 +477,7 @@ class EndToEnd(unittest.TestCase):
         Path(self.pcdir, "pins.json").write_text(json.dumps({real: other}))
         Path(self.pcdir, "chatpins.json").write_text(json.dumps({key: me}))
         self.assertEqual(self.onpc("echo x", chat=key)[:2], (0, "x\n"), "the chat beats the project")
-        self.assertEqual(self.onpc("echo x")[0], 255, "another chat keeps the project's choice")
+        self.assertIn("chosen for this project", self.onpc("echo x")[2], "another chat keeps the project's choice")
 
     def test_web_and_phone_see_and_answer_the_question(self):
         """PC_BRIDGE_PY (on the server as the user) asks the computer over its socket."""
@@ -1128,8 +1133,8 @@ class PhoneAccess(unittest.TestCase):
         self.tmp.cleanup()
 
     def mfa_on(self):
-        key = self.hub.mfa_setup()["secret"]
-        self.hub.mfa_enable(sw.totp_code(key, int(time.time() // 30) - 1), True)
+        key = self.hub.mfa_setup("Phone")["secret"]
+        self.hub.mfa_add(sw.totp_code(key, int(time.time() // 30) - 1))
         return key
 
     def test_key_stays_here_and_a_code_works_once(self):
@@ -1146,7 +1151,7 @@ class PhoneAccess(unittest.TestCase):
         self.assertIsNone(self.hub.unlocked("other"))
         with self.assertRaises(sw.ApiError):
             self.hub.unlock(code, "web")                         # the same code again
-        self.assertEqual(self.hub.remote_access()["unlocks"][0]["by"], "Chrome on Android")
+        self.assertEqual(self.hub.remote_access()["unlocks"][0]["by"], "Phone · Chrome on Android")
         self.hub.lock_out("all")
         self.assertIsNone(self.hub.unlocked(u["token"]))
 
@@ -1166,9 +1171,42 @@ class PhoneAccess(unittest.TestCase):
         self.hub.unlocks[u["id"]]["until"] = time.time() - 1
         self.assertIsNone(self.hub.unlocked(u["token"]))
         u = self.hub.unlock(sw.totp_code(key, int(time.time() // 30) + 1), "web")
-        with self.assertRaises(sw.ApiError):
-            self.hub.mfa_enable("000000", False)
         self.assertEqual(self.app.pc_api("POST", ["disconnect"], {"id": u["id"]})["unlocks"], [])
+        a = self.app.pc_api("POST", ["mfa"], {"op": "off"})          # here: no code needed
+        self.assertFalse(a["mfa"])
+        self.assertEqual((a["unlocks"], a["devices"]), ([], []))
+
+    def test_each_device_has_its_own_key(self):
+        phone = self.mfa_on()
+        self.assertEqual(self.app.pc_api("POST", ["mfa"], {"op": "setup", "name": "Tablet"})["uri"].count("Tablet"), 1)
+        tab = self.hub.cfg()["mfaNew"]["key"]
+        with self.assertRaises(sw.ApiError):
+            self.hub.unlock(sw.totp_code(tab, int(time.time() // 30)), "web")      # not added until its first code
+        a = self.app.pc_api("POST", ["mfa"], {"op": "on", "code": sw.totp_code(tab, int(time.time() // 30) - 1)})
+        self.assertEqual([d["name"] for d in a["devices"]], ["Phone", "Tablet"])
+        self.assertNotIn("key", a["devices"][0])
+        self.assertNotIn("mfaDevs", self.hub.public()["config"])
+        step = int(time.time() // 30)
+        up = self.hub.unlock(sw.totp_code(phone, step), "Safari")
+        ut = self.hub.unlock(sw.totp_code(tab, step), "Chrome")
+        self.assertTrue(self.hub.remote_access()["unlocks"][1]["by"].startswith("Tablet"))
+        tid = a["devices"][1]["id"]
+        a = self.app.pc_api("POST", ["mfa"], {"op": "remove", "id": tid})
+        self.assertEqual([d["name"] for d in a["devices"]], ["Phone"])
+        self.assertIsNone(self.hub.unlocked(ut["token"]), "the removed device is disconnected")
+        self.assertIsNotNone(self.hub.unlocked(up["token"]))
+        with self.assertRaises(sw.ApiError):
+            self.hub.unlock(sw.totp_code(tab, step + 1), "web")
+        self.app.web = True
+        with self.assertRaises(sw.ApiError) as e:
+            self.app.pc_api("POST", ["mfa"], {"op": "off"})
+        self.assertEqual(e.exception.status, 403)
+
+    def test_the_old_single_key_becomes_a_device(self):
+        key = "JBSWY3DPEHPK3PXP"
+        self.app.store.db.put("pc", dict(self.hub.cfg(), mfa=key, mfaOn=True, mfaStep=0))
+        self.assertEqual([d["name"] for d in self.hub.remote_access()["devices"]], ["Phone"])
+        self.assertIn("token", self.hub.unlock(sw.totp_code(key, int(time.time() // 30)), "web"))
 
     def test_tickets_once_per_project(self):
         key = self.mfa_on()

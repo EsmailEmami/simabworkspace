@@ -163,13 +163,23 @@
               + runs.map(function (r) { return ' · running ' + r.project + ': ' + r.cmd; }).join(''))),
           h('button', { class: 'btn sm danger', onclick: function () { off(u.id); } }, 'Disconnect'));
       });
+      var devs = (acc.devices || []).map(function (d) {
+        var inNow = acc.unlocks.some(function (u) { return u.dev === d.id; });
+        return h('div', { class: 'pc-dev' }, dot(inNow ? 'on' : 'off'),
+          h('div', { class: 'pc-dev-main' }, h('div', null, h('b', null, d.name)),
+            h('small', { class: 'muted' }, inNow ? 'connected now' : d.last ? 'last used ' + ago(d.last, acc.now) : 'not used yet')),
+          h('button', { class: 'btn sm danger', onclick: function () { mfaRemove(d); } }, 'Remove'));
+      });
       kids(accBox, [
         h('div', { class: 'pc-note' }, acc.mfa
-          ? 'On — your phone unlocks this computer for 1 hour with a code of this computer: terminal, run commands, answers. Without it nothing from the server can do these (Claude in a chat included).'
+          ? 'On — each device below unlocks this computer for 1 hour with its own code: terminal, run commands, answers. Without it nothing from the server can do these (Claude in a chat included).'
           : 'Off — nothing from the server or the web version can open a terminal here, start a run command, or allow a command from the phone.'),
         h('div', { class: 'pc-actions', style: 'justify-content:flex-start' },
-          acc.mfa ? h('button', { class: 'btn sm', onclick: mfaOff }, 'Turn off…') : h('button', { class: 'btn sm primary', onclick: mfaSetup }, 'Turn on…'),
+          h('button', { class: 'btn sm' + (acc.mfa ? '' : ' primary'), onclick: mfaSetup }, acc.mfa ? 'Add a device…' : 'Turn on…'),
+          acc.mfa ? h('button', { class: 'btn sm', onclick: mfaOff }, 'Turn off') : null,
           rows.length > 1 ? h('button', { class: 'btn sm danger', onclick: function () { off('all'); } }, 'Disconnect all') : null),
+        devs.length ? h('div', null, h('div', { class: 'muted' }, 'Devices'), devs) : null,
+        h('div', { class: 'muted' }, 'Connected now'),
         rows.length ? h('div', null, rows) : h('div', { class: 'muted' }, 'Nobody is connected from the phone / web now.'),
         acc.log.length ? h('details', { class: 'pc-log' }, h('summary', null, 'Remote activity (' + acc.log.length + ')'),
           acc.log.slice(0, 40).map(function (x) {
@@ -177,23 +187,33 @@
           })) : null]);
     }
     function mfaSetup() {
-      api('POST', 'pc/mfa', { op: 'setup' }).then(function (d) {
+      SW.promptDlg('Name of this device (phone, tablet…)', (acc.devices || []).length ? 'Tablet' : 'Phone').then(function (name) {
+        if (name && name.trim()) mfaScan(name.trim());
+      });
+    }
+    function mfaScan(name) {
+      api('POST', 'pc/mfa', { op: 'setup', name: name }).then(function (d) {
         var code = h('input', { class: 'inp mono', placeholder: '123456', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' });
         var m = SW.openModal({ title: 'Phone access', size: 'sm', body: [
-          h('p', null, '1. Scan this code with the authenticator app on your phone (its own entry, not the sign-in one):'),
+          h('p', null, '1. On ' + name + ', scan this code with the authenticator app (its own entry, not the sign-in one):'),
           h('img', { class: 'totp-qr', src: window.SWQR ? SWQR.dataUrl(d.uri) : '', alt: 'QR code' }),
           h('p', { class: 'muted' }, 'or ', h('a', { href: d.uri }, 'open it in the app'), ', or type the key:'),
           h('div', { class: 'mono totp-key' }, d.secret.replace(/(.{4})/g, '$1 ').trim()),
           h('p', null, '2. Enter the code it shows:'), code],
           foot: [h('button', { class: 'btn', onclick: function () { m.close(); } }, 'Cancel'),
             h('button', { class: 'btn primary', onclick: function () {
-              api('POST', 'pc/mfa', { op: 'on', code: code.value.trim() }).then(function (x) { acc = x; m.close(); renderAccess(); toast('Phone access is on', 'ok'); }).catch(fail);
-            } }, 'Turn on')] });
+              api('POST', 'pc/mfa', { op: 'on', code: code.value.trim() }).then(function (x) { acc = x; m.close(); renderAccess(); toast(name + ' added', 'ok'); }).catch(fail);
+            } }, 'Add')] });
       }).catch(fail);
     }
     function mfaOff() {
-      SW.promptDlg('Code of this computer from your authenticator app, to turn phone access off', '').then(function (c) {
-        if (c) api('POST', 'pc/mfa', { op: 'off', code: c.trim() }).then(function (x) { acc = x; renderAccess(); toast('Phone access is off', 'ok'); }).catch(fail);
+      SW.confirmDlg('Turn phone access off? Every device is removed and disconnected.', 'Turn off', true).then(function (ok) {
+        if (ok) api('POST', 'pc/mfa', { op: 'off' }).then(function (x) { acc = x; renderAccess(); toast('Phone access is off', 'ok'); }).catch(fail);
+      });
+    }
+    function mfaRemove(d) {
+      SW.confirmDlg('Remove ' + d.name + '? It is disconnected and its code no longer works.', 'Remove', true).then(function (ok) {
+        if (ok) api('POST', 'pc/mfa', { op: 'remove', id: d.id }).then(function (x) { acc = x; renderAccess(); toast(d.name + ' removed', 'ok'); }).catch(fail);
       });
     }
 

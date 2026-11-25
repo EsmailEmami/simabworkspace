@@ -172,3 +172,21 @@ class ServerStats(base.TmpHome):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerUpload(unittest.TestCase):
+    """The upload script run on the server (web / another computer → the server folder or a Local only mount)."""
+
+    def run_fs(self, args, data):
+        return json.loads(subprocess.run([sys.executable, "-c", sw.FS_PY] + args, input=data,
+                                         capture_output=True, timeout=20).stdout or b"null")
+
+    def test_into_the_project_folder_and_a_subfolder(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "docs"))
+            r = self.run_fs(["upload", d, "", "HSE-a.pdf"], b"pdf")
+            self.assertEqual(r.get("path"), "HSE-a.pdf", r)
+            r = self.run_fs(["upload", d, "docs", "b.txt"], b"hi")
+            self.assertEqual(r.get("path"), "docs/b.txt", r)
+            self.assertEqual(Path(d, "docs", "b.txt").read_bytes(), b"hi")
+            self.assertIn("error", self.run_fs(["upload", d, "../x", "c.txt"], b"no"))

@@ -2355,6 +2355,22 @@
     return h('div', { class: 'field' }, h('label', null, label), h('div', { style: 'display:flex;gap:6px' }, input, browse), hint);
   }
 
+  // Sync guard pause: the folders looked wrong (missing marker, nearly empty side, mass delete). Resume anyway asks first.
+  function guardApprove(p, done) {
+    var g = (p.sync && p.sync.guard) || p.guard || {};
+    var go = h('button', { class: 'btn danger', onclick: function () {
+      go.disabled = true;
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/approve').then(function () {
+        md.close(); toast(p.name + ': sync resumed', 'ok'); setTimeout(refreshProjects, 600); if (done) done();
+      }).catch(function (e) { go.disabled = false; fail(e); });
+    } }, 'Resume anyway');
+    var md = openModal({ title: 'Resume ' + p.name + '?', body: [
+      h('div', { class: 'add-err' }, g.reason || 'The sync guard paused this project.'),
+      h('div', { class: 'muted', style: 'font-size:12.5px;margin-top:10px' },
+        'Resuming sends what is missing on one side as deletes to the other. First check the folder on this computer is the right one and fully there (disk mounted). A snapshot of the server folder is taken before resuming.')],
+      foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Keep paused'), go] });
+  }
+
   function syncAction(p, action) {
     api('POST', 'sync/' + encodeURIComponent(p.name) + '/' + action).then(function () {
       toast({ flush: 'Syncing…', pause: 'Sync paused', resume: 'Sync resumed' }[action], 'ok');
@@ -2529,6 +2545,7 @@
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
       sync ? { header: 'Sync · ' + (p.sync ? p.sync.label : '') } : null,
+      sync && p.sync.guard ? { label: 'Resume anyway…', action: function () { guardApprove(p); } } : null,
       sync ? { label: 'Sync now', action: function () { syncAction(p, 'flush'); } } : null,
       sync ? (p.sync && p.sync.paused ? { id: 'Pause / resume sync', label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { id: 'Pause / resume sync', label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
       sync ? { id: 'Sync details…', label: 'Sync details' + (p.sync && p.sync.conflicts ? ' · ' + plural(p.sync.conflicts, 'conflict') : '') + '…', action: function () { syncDetails(p); } } : null,
@@ -4305,6 +4322,13 @@
           h('button', { class: 'btn sm', onclick: function () { service('stop'); } }, 'Stop service'),
           h('button', { class: 'btn sm', onclick: function () { service('start'); } }, 'Start service')),
         h('label', { class: 'check' }, autostart, h('span', null, 'Start syncing automatically', h('small', null, 'When a terminal opens on this machine (adds a line to ~/.bashrc).'))),
+        chk('guardOn', 'Guard against mass deletes', 'Pauses a sync when a folder looks unmounted, nearly empty or loses many files at once.'),
+        h('div', { class: 'row' },
+          field('Pause at % gone', inp('guardDropPct', { type: 'number', min: 1, max: 100, class: 'inp mono' })),
+          field('or files gone', inp('guardDropFiles', { type: 'number', min: 0, class: 'inp mono' })),
+          field('Snapshot every (min)', inp('guardSnapEvery', { type: 'number', min: 0, class: 'inp mono' })),
+          field('Snapshots kept', inp('guardSnapKeep', { type: 'number', min: 1, class: 'inp mono' }))),
+        chk('guardTopDirs', 'Pause when a top folder disappears'),
         otherPcsRow(),
 
         h('div', { class: 'sec' }, 'This machine'),
@@ -4344,7 +4368,7 @@
             var el = f[k];
             if (k === 'persianView') patch[k] = el.checked ? 'auto' : 'off';
             else if (el.type === 'checkbox') patch[k] = el.checked;
-            else if (el.type === 'number') patch[k] = Number(el.value) || 13;
+            else if (el.type === 'number') patch[k] = el.value.trim() !== '' && isFinite(Number(el.value)) ? Number(el.value) : (k === 'fontSize' ? 13 : s[k]);
             else patch[k] = el.value;
           });
           api('POST', 'settings', patch).then(function (d) {
@@ -4565,6 +4589,8 @@
                 h('a', { href: '#', class: 'ign-edit', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Edit…'))),
             d.error ? kv('last error', d.error, 'err') : null,
             isErr ? h('div', { class: 'kv' }, h('span', { class: 'k' }), h('span', { class: 'v muted', style: 'font-size:12px' }, 'Click Reconnect to restore the sync after a network outage.')) : null)];
+        if (d.guard) rows.unshift(h('div', { class: 'add-err', style: 'margin-bottom:10px' }, 'Paused by the sync guard: ' + d.guard.reason + ' ',
+          h('button', { class: 'btn sm', onclick: function () { guardApprove(d, load); } }, 'Resume anyway…')));
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
           h('span', null, progressLabel(d.progress))));
         rows.push(h('div', { class: 'sec' }, d.conflicts.length ? plural(d.conflicts.length, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
@@ -5329,7 +5355,12 @@
           }
           // notify once when sync transitions into an error state
           var prev = (S.syncStates || {})[p.name];
-          if (p.sync && p.sync.state === 'err' && prev && prev !== 'err') {
+          var gk = p.sync && p.sync.guard ? p.sync.guard.t : 0;
+          if (gk && (S.guardSeen || {})[p.name] !== gk) {
+            (S.guardSeen = S.guardSeen || {})[p.name] = gk;
+            toast(p.name + ': sync paused — ' + p.sync.guard.reason + ' (click for details)', 'err', { sticky: true, onclick: (function (q) { return function () { syncDetails(q); }; })(p) });
+            notify('Sync paused', p.name + ': ' + p.sync.guard.reason);
+          } else if (p.sync && p.sync.state === 'err' && prev && prev !== 'err' && !gk) {
             toast(p.name + ': sync ' + (p.sync.label || 'disconnected') + ' — open Sync details to reconnect', 'err', { timeout: 10000 });
           }
         });

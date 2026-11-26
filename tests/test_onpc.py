@@ -544,6 +544,10 @@ class EndToEnd(unittest.TestCase):
                          + os.path.join(os.path.realpath(self.srv_dir), "web", "x") + "\n",
                          "ran in the synced copy; paths shown as the server's both ways")
         self.assertFalse(self.hub.pending()["asks"])
+        self.assertIn("rewritten in the command, and back in the output", err, "the rewrite is never hidden")
+        code, out, err = self.onpc("echo " + os.path.realpath(self.srv_dir), env={"SIMAB_NO_REWRITE": "1"})
+        self.assertNotIn("rewritten", err)
+        self.assertEqual(code, 0, err)
 
     def test_dev_server_in_the_background(self):
         srv = socket.socket()

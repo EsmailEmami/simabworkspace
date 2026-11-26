@@ -58,8 +58,11 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.68.0"
+VERSION = "1.69.0"
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import syncguard as sg  # noqa: E402 — the sync guard (also runs on the server as a script)
 STATIC = HERE / "static"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 BUFFER_LIMIT = 1_500_000          # characters of output kept per tab (for reloads)
@@ -333,6 +336,12 @@ DEFAULT_SETTINGS = {
     "localShell": "",            # empty = $SHELL
     "serverPersist": False,      # server shells / Claude inside tmux (survive disconnects)
     "sshMultiplex": True,        # one SSH connection shared by all server tabs (fast tabs)
+    "guardOn": True,             # sync guard: pause a sync that is about to spread a mass delete
+    "guardDropPct": 20,          #   pause when this % of a side's files disappear at once (and >= 20 files)
+    "guardDropFiles": 500,       #   or this many files (0 = off)
+    "guardTopDirs": True,        #   or a top folder disappears on this computer
+    "guardSnapEvery": 30,        #   minutes between server snapshots (0 = only before a resume)
+    "guardSnapKeep": 12,         #   snapshots kept (plus the first of each of the last 7 days)
     "persianView": "auto",       # auto | off — readable Persian pane next to the terminal
     "composer": "claude",        # always | claude | never — Persian input box under the terminal
     "chatMode": "default",       # Claude chat: default (ask) | acceptEdits | plan | auto
@@ -358,7 +367,8 @@ SETTING_CHOICES = {
     "chatMode": ("default", "acceptEdits", "plan", "auto"),
     "chatEffort": ("low", "medium", "high", "xhigh", "max"),
 }
-SETTING_RANGES = {"fontSize": (9, 32), "scrollback": (1000, 100000), "port": (0, 65535)}
+SETTING_RANGES = {"fontSize": (9, 32), "scrollback": (1000, 100000), "port": (0, 65535), "guardDropPct": (1, 100),
+                  "guardDropFiles": (0, 10 ** 7), "guardSnapEvery": (0, 1440), "guardSnapKeep": (1, 500)}
 WHERE = ("local", "server")
 WIN_RE = re.compile(r"[a-z0-9]{4,16}")
 WIN_TTL = 180          # an extra window that has not said hello for this long is gone (hidden windows tick slowly)
@@ -4987,6 +4997,449 @@ def mutagen_resume(name):
             pass
 
 
+# ----------------------------------------------------------------------------- sync guard
+# Two-way-safe Mutagen still sends a deletion when the other side did not change the file. A disk that is not
+# mounted (a few folders created by docker/udisks in its place) looks like "almost everything was deleted"
+# (only a fully empty root is halted by Mutagen itself). The guard pauses such a session before it spreads:
+# a .simab-root marker on both sides, a watch on each side's file count and top folders, a check before
+# every resume, and a server-side snapshot (syncguard.py) before resuming and every few minutes.
+GUARD_SETTINGS = {"guardOn": "on", "guardDropPct": "dropPct", "guardDropFiles": "dropFiles",
+                  "guardTopDirs": "topDirs", "guardSnapEvery": "snapEvery", "guardSnapKeep": "snapKeep"}
+
+
+def guard_source() -> str:
+    try:
+        return (HERE / "syncguard.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+class SyncGuard:
+    TICK = 2.0               # local checks (marker, top folders, Mutagen's counts)
+    REMOTE_EVERY = 60        # the server's marker is read this often (and before every resume)
+
+    def __init__(self, state_dir: Path, settings=lambda: {}, conf=lambda: ServerConf(), activity=None, changed=None,
+                 busy=lambda name: False):
+        self.dir = Path(state_dir)
+        self.file = self.dir / "syncguard.json"
+        self.log_file = self.dir / "syncguard.log"
+        self._settings, self._conf, self._activity, self._changed, self._busy = settings, conf, activity, changed, busy
+        self.lock = threading.RLock()
+        try:
+            st = json.loads(self.file.read_text())
+        except (OSError, ValueError):
+            st = {}
+        self.alerts = st.get("alerts") if isinstance(st.get("alerts"), dict) else {}   # name -> {reason, kind, t}
+        self.roots = st.get("roots") if isinstance(st.get("roots"), dict) else {}      # name -> {id, local, balanced, fresh}
+        self.remote = {}         # name -> (time, stat of the server folder)
+        self.drops = {}          # (name, side) -> sg.DropWatch
+        self.tops = {}           # name -> top folders seen last tick
+        self.snapped = {}        # name -> time of the last snapshot try
+        self.running = set()     # names with a server call in flight
+        self.adding = 0          # Add project is running: sessions unknown to the guard are left alone
+        self.installed = set()   # servers that got ~/.simabworkspace/syncguard.py
+        self.stop = False
+
+    # state ---------------------------------------------------------------
+    def cfg(self) -> dict:
+        s = self._settings() or {}
+        return sg.config({v: s[k] for k, v in GUARD_SETTINGS.items() if k in s})
+
+    def _save(self):
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"alerts": self.alerts, "roots": self.roots}))
+            os.replace(tmp, self.file)
+        except OSError:
+            pass
+
+    def log(self, name: str, text: str):
+        line = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()) + f"Z  {name}  {text}\n"
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError:
+            pass
+        if self._activity:
+            try:
+                self._activity("sync-guard", name, text)
+            except Exception:       # noqa: BLE001 — the log line above is enough
+                pass
+
+    def root(self, name: str) -> dict:
+        return self.roots.setdefault(name, {})
+
+    def alert_for(self, name: str):
+        return self.alerts.get(name)
+
+    def note_created(self, name: str):
+        """A session this window just created: no ancestor yet, so a lopsided start is a first download."""
+        with self.lock:
+            self.roots[name] = {"fresh": True}
+            self.alerts.pop(name, None)
+            self._save()
+
+    def forget(self, name: str):
+        with self.lock:
+            self.roots.pop(name, None)
+            self.alerts.pop(name, None)
+            self._save()
+
+    # actions -------------------------------------------------------------
+    def _mutagen(self, *args, timeout=30) -> bool:
+        exe = which("mutagen")
+        if not exe:
+            return False
+        try:
+            return subprocess.run([exe, "sync"] + list(args), capture_output=True, timeout=timeout,
+                                  env=dict(os.environ, PATH=tool_path())).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def pause(self, name: str, kind: str, reason: str):
+        """Pause first, then tell: the pause is what keeps the files."""
+        paused = self._mutagen("pause", name)
+        with self.lock:
+            new = (self.alerts.get(name) or {}).get("reason") != reason
+            self.alerts[name] = {"kind": kind, "reason": reason, "t": time.time(), "paused": paused}
+            self._save()
+        if new:
+            self.log(name, ("PAUSED: " if paused else "COULD NOT PAUSE: ") + reason)
+        if self._changed:
+            self._changed()
+
+    def _conf_for(self, ep: dict) -> ServerConf:
+        return self._conf().with_endpoint(ep.get("user") or None, ep.get("host") or None, ep.get("port") or None)
+
+    def _call(self, ep: dict, args: list, timeout=30, stdin: bytes = None):
+        return remote_python(self._conf_for(ep), guard_source(), args, multiplex=not IS_WIN, timeout=timeout, stdin=stdin)
+
+    def remote_stat(self, name: str, ep: dict, path: str, ignores: list, force=False):
+        """The server folder's marker and file count; None when the server cannot be reached (then nothing syncs anyway)."""
+        t, st = self.remote.get(name) or (0, None)
+        if not force and st is not None and time.time() - t < self.REMOTE_EVERY:
+            return st
+        try:
+            st = self._call(ep, ["marker-read", path] + list(ignores), timeout=60)
+        except ApiError:
+            return None
+        if not isinstance(st, dict) or not isinstance(st.get("marker"), dict):
+            return None
+        self.remote[name] = (time.time(), st)
+        return st
+
+    @staticmethod
+    def _sides(sess: dict):
+        a, b = _endpoint(sess.get("alpha")), _endpoint(sess.get("beta"))
+        if not a["host"] and b["host"]:
+            return a, b, sess.get("alpha") or {}, sess.get("beta") or {}
+        if a["host"] and not b["host"]:
+            return b, a, sess.get("beta") or {}, sess.get("alpha") or {}
+        return None, None, {}, {}
+
+    @staticmethod
+    def _files(ep: dict):
+        """Mutagen's file count of one side, only once it is connected and scanned (else None: no decision)."""
+        n = ep.get("files", 0) if ep.get("connected") and ep.get("scanned") else None
+        return n if isinstance(n, int) and not isinstance(n, bool) else None
+
+    @staticmethod
+    def _ignores(sess: dict) -> list:
+        return [str(x) for x in ((sess.get("configuration") or {}).get("ignores") or [])][:200]
+
+    def disk(self, path: str, r: dict, strict=False):
+        """Why this folder is not the synced one on its disk: made by another user (docker / sudo), its disk
+        mounted elsewhere (DISK2 → DISK21) or not at all. strict=False: the "folder under /media on the system
+        disk" hint counts only for a folder the guard has not seen on a disk before."""
+        why = sg.foreign_owner(path)
+        if why:
+            return why
+        cur = sg.mount_of(path)
+        return sg.mount_verdict(path, r.get("mount") or {}, cur) if cur else None
+
+    def _remember_disk(self, r: dict, path: str):
+        m = sg.mount_of(path)
+        if m:
+            r["mount"] = {"mnt": m.get("mnt", ""), "uuid": m.get("uuid", ""), "label": m.get("label", "")}
+
+    def verify(self, sess: dict, force_remote=True, count=True) -> tuple:
+        """(kind, reason) when the session must not sync, else (None, None). Writes the markers when both sides
+        are new to the guard and look the same. Slow (ssh): never call it from the 1 s tick."""
+        name = sess.get("name") or ""
+        loc, rem, _, _ = self._sides(sess)
+        if not loc:
+            return None, None
+        cfg, ign = self.cfg(), self._ignores(sess)
+        lm = sg.read_marker(loc["path"])
+        if lm["state"] == "noroot":
+            return "marker", "The folder on this computer is missing (disk not mounted?): " + loc["path"]
+        why = self.disk(loc["path"], self.root(name))
+        if why:
+            return "disk", why
+        rst = self.remote_stat(name, rem, rem["path"], ign, force=force_remote)
+        if rst is None:
+            return "unreachable", "Cannot reach the server to check the folder"
+        r = self.root(name)
+        verdict = sg.marker_verdict(lm, rst["marker"])
+        rf = rst.get("files") if isinstance(rst.get("files"), int) else -1
+        known = bool(r.get("id")) and verdict is None and not count    # the 60 s re-check: the tick has Mutagen's counts
+        lf = 0 if known else sg.count_files(loc["path"], ign)
+        states = {lm["state"], rst["marker"]["state"]}
+        if verdict is None:
+            pass
+        elif verdict == "adopt" or (states == {"ok", "missing"} and not r.get("id")):
+            # first time this computer sees the project with the guard: only when both folders look alike
+            if not r.get("fresh"):
+                why = sg.lopsided(lf, rf, cfg)
+                big = max(lf, rf, 1)
+                if why:
+                    return "lopsided", why
+                if abs(lf - rf) * 2 > big and abs(lf - rf) >= max(1, cfg["dropMin"]):     # half the files missing
+                    return "differ", (f"This computer has {lf} files, the server {rf}: check the folder "
+                                      f"({loc['path']}) is the right one and fully mounted, then Resume anyway")
+            pid = rst["marker"]["id"] if rst["marker"]["state"] == "ok" else lm["id"] if lm["state"] == "ok" else sg.new_id()
+            if rst["marker"]["state"] != "ok":
+                try:
+                    w = self._call(rem, ["marker-write", rem["path"], pid, name])
+                except ApiError as e:
+                    return "unreachable", "Cannot write the server's .simab-root: " + str(e)
+                pid = ((w or {}).get("marker") or {}).get("id") or ""
+                if not pid:
+                    return "marker", "Cannot write the server's .simab-root"
+            if not sg.write_marker(loc["path"], pid, name):
+                return "marker", "Cannot write .simab-root on this computer: " + loc["path"]
+            self.remote.pop(name, None)
+            lm = sg.read_marker(loc["path"])
+            self.log(name, "marker .simab-root added (" + pid + ")")
+        else:
+            return "marker", verdict
+        if r.get("id") and lm.get("id") != r["id"]:
+            return "marker", "The folder on this computer is not the one synced before (.simab-root changed)"
+        if not r.get("fresh") and not known:
+            why = sg.lopsided(lf, rf, cfg)
+            if why:
+                return "lopsided", why
+        with self.lock:
+            r.update(id=lm["id"], local=loc["path"])
+            self._remember_disk(r, loc["path"])
+            self._save()
+        return None, None
+
+    def snapshot(self, sess: dict, force=False) -> dict:
+        """A snapshot of the server folder (skipped when the last one is younger than snapEvery, unless force)."""
+        name = sess.get("name") or ""
+        loc, rem, _, _ = self._sides(sess)
+        cfg = self.cfg()
+        pid = self.root(name).get("id")
+        if not rem or not pid or (not force and not cfg["snapEvery"]):
+            return {"ok": False, "error": "no snapshot"}
+        self.snapped[name] = time.time()
+        key = (rem["host"], rem["user"], rem["port"])
+        try:
+            if key not in self.installed:
+                src = guard_source()
+                self._call(rem, ["install"], stdin=src.encode("utf-8"))
+                self.installed.add(key)
+            r = self._call(rem, ["snap", rem["path"], pid, str(cfg["snapEvery"]), str(max(1, cfg["snapKeep"])),
+                                 str(sg.DEFAULTS["snapDays"]), "1" if force else "0"] + self._ignores(sess), timeout=1800)
+        except ApiError as e:
+            r = {"ok": False, "error": str(e)}
+        r = r if isinstance(r, dict) else {"ok": False, "error": "bad answer"}
+        if r.get("ok") and not r.get("skipped"):
+            self.log(name, "snapshot on the server: " + str(r.get("path") or r.get("name")))
+        elif not r.get("ok"):
+            self.log(name, "snapshot failed: " + str(r.get("error"))[:200])
+        return r
+
+    def check_resume(self, sess: dict) -> str:
+        """Before a resume: '' = go on (a snapshot was taken first), else why it stays paused (and the alert)."""
+        name = sess.get("name") or ""
+        if not self.cfg()["on"]:
+            return ""
+        kind, why = self.verify(sess)
+        if kind:
+            self.pause(name, kind, why)
+            return why
+        self.snapshot(sess, force=True)
+        with self.lock:
+            self.alerts.pop(name, None)
+            self._save()
+        for side in ("local", "remote"):
+            self.drops.pop((name, side), None)
+        self.tops.pop(name, None)
+        return ""
+
+    def approve(self, sess: dict) -> str:
+        """Resume anyway (the user checked): the counts start again from now. A missing folder is never overridden;
+        a missing marker on one side is written from the other side."""
+        name = sess.get("name") or ""
+        loc, rem, _, _ = self._sides(sess)
+        if not loc:
+            return "not a synced project"
+        if not os.path.isdir(loc["path"]):
+            return "The folder on this computer is missing: mount the disk first (" + loc["path"] + ")"
+        why = sg.foreign_owner(loc["path"]) or \
+            (sg.mount_verdict(loc["path"], self.root(name).get("mount") or {}, sg.mount_of(loc["path"]))
+             if (self.root(name).get("mount") or {}).get("uuid") else None)
+        if why:
+            return why + " — fix this first; Resume anyway cannot skip it"
+        rst = self.remote_stat(name, rem, rem["path"], self._ignores(sess), force=True)
+        if rst is None:
+            return "Cannot reach the server"
+        if rst["marker"]["state"] == "noroot":
+            return "The folder on the server is missing"
+        lm, rm = sg.read_marker(loc["path"]), rst["marker"]
+        if lm["state"] == "ok" and rm["state"] == "ok" and lm["id"] != rm["id"]:
+            return ("The two folders belong to different projects. If this is the right folder, delete " +
+                    os.path.join(loc["path"], sg.MARKER) + " and press Resume anyway again")
+        pid = (rm.get("id") if rm["state"] == "ok" else "") or (lm.get("id") if lm["state"] == "ok" else "") or sg.new_id()
+        if rm["state"] != "ok":
+            try:
+                self._call(rem, ["marker-write", rem["path"], pid, name])
+            except ApiError as e:
+                return "Cannot write the server's .simab-root: " + str(e)
+        if lm["state"] != "ok":
+            sg.write_marker(loc["path"], pid, name)
+        self.remote.pop(name, None)
+        with self.lock:
+            self.roots[name] = {"id": pid, "local": loc["path"], "fresh": True}    # counts: start again
+            self._remember_disk(self.roots[name], loc["path"])
+            self.alerts.pop(name, None)
+            self._save()
+        for side in ("local", "remote"):
+            self.drops.pop((name, side), None)
+        self.tops.pop(name, None)
+        self.snapshot(sess, force=True)
+        self.log(name, "resumed anyway by the user")
+        return "" if self._mutagen("resume", name, timeout=60) else "mutagen could not resume the session"
+
+    # the watch -----------------------------------------------------------
+    def precheck(self) -> list:
+        """Before the sync service starts (no ssh): the sessions whose folder here lost its marker."""
+        bad = []
+        if not self.cfg()["on"]:
+            return bad
+        for name, r in list(self.roots.items()):
+            if r.get("id") and r.get("local"):
+                m = sg.read_marker(r["local"])
+                if m["state"] != "ok" or m["id"] != r["id"]:
+                    bad.append((name, "The folder on this computer lost its .simab-root (disk not mounted?): " + r["local"]))
+                else:
+                    why = self.disk(r["local"], r)
+                    if why:
+                        bad.append((name, why))
+        return bad
+
+    def tick(self, sessions: list, now: float = None):
+        """The fast checks (local only). Slow ones (ssh) go to a thread per session."""
+        now = time.time() if now is None else now
+        cfg = self.cfg()
+        if not cfg["on"]:
+            return
+        for s in sessions or []:
+            name = s.get("name") or ""
+            loc, rem, lst, rstate = self._sides(s)
+            if not name or not loc or s.get("paused") or self._busy(name):
+                continue
+            if self.adding and name not in self.roots:
+                continue
+            r = self.root(name)
+            ign = self._ignores(s)
+            lm = sg.read_marker(loc["path"])
+            if lm["state"] == "noroot":
+                self.pause(name, "marker", "The folder on this computer is missing (disk not mounted?): " + loc["path"])
+                continue
+            if r.get("id") and (lm["state"] != "ok" or lm["id"] != r["id"]):
+                self.pause(name, "marker", "The folder on this computer lost its .simab-root (disk not mounted or the "
+                                           "folder replaced?): " + loc["path"])
+                continue
+            why = self.disk(loc["path"], r)
+            if why:
+                self.pause(name, "disk", why)
+                continue
+            lf, rf = self._files(lst), self._files(rstate)
+            if r.get("fresh") and lf is not None and rf is not None and max(lf, rf) > 0 and \
+                    abs(lf - rf) * 100 <= cfg["dropPct"] * max(lf, rf) and not sg.lopsided(lf, rf, cfg):
+                with self.lock:
+                    r.pop("fresh", None)
+                    r["balanced"] = True
+                    self._save()
+            if r.get("id") and not r.get("fresh"):
+                why = sg.lopsided(lf, rf, cfg)
+                if why:
+                    self.pause(name, "lopsided", why)
+                    continue
+                hit = None
+                for side, n in (("local", lf), ("remote", rf)):
+                    w = self.drops.setdefault((name, side), sg.DropWatch())
+                    d = w.check(n, cfg, now)
+                    if d and not hit:
+                        hit = ("On this computer: " if side == "local" else "On the server: ") + d
+                if hit:
+                    self.pause(name, "drop", hit + ". Check it was meant, then Resume anyway")
+                    continue
+                cur = sg.top_dirs(loc["path"], ign)
+                gone = sorted(self.tops.get(name, cur) - cur) if cfg["topDirs"] else []
+                self.tops[name] = cur
+                if gone:
+                    self.pause(name, "topdir", "Top folder" + ("s" if len(gone) > 1 else "") + " deleted on this computer: "
+                               + ", ".join(gone[:5]) + ". Check it was meant, then Resume anyway")
+                    continue
+            t, _ = self.remote.get(name) or (0, None)
+            due_verify = not r.get("id") or now - t >= self.REMOTE_EVERY
+            due_snap = r.get("id") and not r.get("fresh") and cfg["snapEvery"] and \
+                now - self.snapped.get(name, 0) >= cfg["snapEvery"] * 60
+            if (due_verify or due_snap) and name not in self.running:
+                self.running.add(name)
+                threading.Thread(target=self._slow, args=(s, due_verify, due_snap), daemon=True).start()
+
+    def _slow(self, sess: dict, verify: bool, snap: bool):
+        name = sess.get("name") or ""
+        try:
+            if verify:
+                kind, why = self.verify(sess, count=False)
+                if kind and kind != "unreachable":
+                    self.pause(name, kind, why)
+                    return
+            if snap and self.root(name).get("id"):
+                self.snapshot(sess)
+        except Exception as e:      # noqa: BLE001 — a guard bug must never stop the watch
+            log_line(f"sync guard {name}: {e}")
+        finally:
+            self.running.discard(name)
+
+    def loop(self):
+        while not self.stop:
+            try:
+                self.tick(mutagen_sessions(timeout=8))
+            except Exception as e:  # noqa: BLE001
+                log_line(f"sync guard: {e}")
+            time.sleep(self.TICK)
+
+
+def guarded_daemon_start(guard: SyncGuard, wait=True) -> list:
+    """Start the sync service, but a session whose folder here lost its marker is paused the same moment
+    (Mutagen resumes every unpaused session when its daemon starts)."""
+    exe = which("mutagen")
+    if not exe:
+        return []
+    bad = guard.precheck()
+    env = dict(os.environ, PATH=tool_path())
+    for name, why in bad:            # `sync pause` starts the daemon itself and pauses before the first cycle ends
+        guard.pause(name, "marker", why)
+    try:
+        argv = [exe, "daemon", "start"]
+        if wait:
+            subprocess.run(argv, capture_output=True, timeout=60, env=env)
+        else:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return bad
+
+
 def fs_local():
     """The FS_PY functions, loaded once into this process."""
     if not _FS:
@@ -5859,7 +6312,7 @@ class Tunnel:
 # A project is built on the computers only when the user chose it ("Builds run on"):
 # ~/.cache/simabworkspace/pc/projects.json {real server path: "computers"}; then every chat in
 # it gets PC_HINT as extra system prompt (chat_remote_script asks `onpc --hint`).
-PC_ASK_WAIT = 120
+PC_ASK_WAIT = 90          # under Claude's 2 min Bash timeout: onpc answers "not allowed" instead of hanging
 PC_MODES = ("chat", "every", "new", "all")       # chat = like the Claude chat that asks (auto → no question)
 PC_OUTPUTS = ("chat", "panel")
 PC_ANSWERS = ("once", "always", "hour", "deny")
@@ -6052,7 +6505,8 @@ def send(d, cwd, cmd):
         return NOT_HERE
     s.settimeout(None)
     body = json.dumps({"cwd": cwd, "cmd": cmd, "chat": os.environ.get("SIMAB_CHAT", "")[:64],
-                       "hooked": bool(project_on(cwd)[0])}).encode()
+                       "hooked": bool(project_on(cwd)[0]),
+                       **({"rewrite": False} if os.environ.get("SIMAB_NO_REWRITE") == "1" else {})}).encode()
     head = ("POST /pc/run HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
             "Content-Length: %d\r\nConnection: close\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(body))
     try:
@@ -8305,16 +8759,19 @@ class PcHub:
         project, local, root = hit
         if not os.path.isdir(local):
             return h._json(404, {"error": f"{cwd} is not on {c['name']} yet (sync not finished?)"})
-        paths = []
+        paths, rewrote = [], []
         verdict, why = pc_decide(c, project["name"], cmd, self.hour, time.time())
         if project.get("localOnly") or b.get("hooked") is True:
             # Local only / My computers: the hook sends every Bash command here; the server's paths mean
             # this computer's folder, and back in the output. Claude's own modes decide ("same as chat")
             # only for projects marked HERE — "hooked" comes from the server, anyone there can send it.
             lroot = project["local"].replace("\\", "/") if IS_WIN else project["local"]
-            for sv in {root, (self.home + project["remote"][1:]) if self.home and project["remote"].startswith("~/") else ""} - {""}:
-                cmd = cmd.replace(sv, lroot)
-            paths = [(project["local"].encode(), root.encode()), (lroot.encode(), root.encode())]
+            if b.get("rewrite") is not False:      # onpc with SIMAB_NO_REWRITE=1: the command as it was typed
+                for sv in {root, (self.home + project["remote"][1:]) if self.home and project["remote"].startswith("~/") else ""} - {""}:
+                    if sv in cmd and sv != lroot:
+                        cmd = cmd.replace(sv, lroot)
+                        rewrote.append((sv, lroot))
+                paths = [(project["local"].encode(), root.encode()), (lroot.encode(), root.encode())]
             if c.get("mode") == "chat" and (project.get("localOnly") or project["name"] in (c.get("trusted") or [])):
                 why = pc_guard(c, project["name"], cmd)
                 verdict = "deny" if why else "allow"
@@ -8347,8 +8804,12 @@ class PcHub:
                     h.wfile.write(kind + struct.pack(">i", len(data)) + data)
                 h.wfile.flush()
         try:
+            for sv, lv in rewrote:                 # never hidden: the output is mapped back too, so say it
+                frame(b"e", (f"onpc: on {c['name']} the server path {sv} is {lv} — rewritten in the command, and back in "
+                             f"the output (SIMAB_NO_REWRITE=1 onpc … keeps the command as typed)\n").encode())
             if verdict == "ask":
-                frame(b"e", f"onpc: waiting for the user to approve it on {c['name']}…\n".encode())
+                frame(b"e", f"onpc: waiting for the user to approve it on {c['name']} "
+                            f"(up to {PC_ASK_WAIT} s; not answered = NOT run)…\n".encode())
                 if not self.ask(project["name"], cmd.strip(), run, why):
                     run.update(state="denied", end=time.time(), out="denied by the user")
                     frame(b"e", f"onpc: the user did not allow this command on {c['name']} — it was NOT run.\n".encode())
@@ -9910,6 +10371,11 @@ def autostart_enabled() -> bool:
     return any(RC_MARK_BEGIN in (home_path(rc).read_text(errors="replace") if home_path(rc).is_file() else "") for rc in (".bashrc", ".zshrc"))
 
 
+# through the sync guard (simabworkspace guard-start); plain Mutagen only when the command is not installed
+AUTOSTART_LINE = ("if command -v simabworkspace >/dev/null 2>&1; then simabworkspace guard-start >/dev/null 2>&1; "
+                  "elif command -v mutagen >/dev/null 2>&1; then mutagen daemon start >/dev/null 2>&1; fi")
+
+
 def set_autostart(on: bool):
     if IS_WIN:                  # a tiny script in the Startup folder starts the sync service at sign-in
         f = windows_startup_file()
@@ -9918,7 +10384,10 @@ def set_autostart(on: bool):
             if not exe:
                 raise ApiError(400, "mutagen is not installed yet")
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(f'@echo off\r\n"{exe}" daemon start >nul 2>&1\r\n')
+            py = Path(sys.executable)
+            py = py.with_name("pythonw.exe") if py.with_name("pythonw.exe").is_file() else py
+            # through the sync guard: a session whose folder lost its marker stays paused
+            f.write_text(f'@echo off\r\n"{py}" "{HERE / "server.py"}" guard-start >nul 2>&1 || "{exe}" daemon start >nul 2>&1\r\n')
         elif f.is_file():
             f.unlink()
         return
@@ -9928,7 +10397,7 @@ def set_autostart(on: bool):
             continue
         text = strip_block(f.read_text(errors="replace"))
         if on:
-            text = text.rstrip("\n") + f"\n\n{RC_MARK_BEGIN}\ncommand -v mutagen >/dev/null 2>&1 && mutagen daemon start >/dev/null 2>&1\n{RC_MARK_END}\n"
+            text = text.rstrip("\n") + f"\n\n{RC_MARK_BEGIN}\n{AUTOSTART_LINE}\n{RC_MARK_END}\n"
         f.write_text(text)
 
 
@@ -9997,6 +10466,9 @@ class App:
         self._shared_ignores = {}                # layout_key(remote) -> Not synced list another device set
         self._copies_checked = False
         self.pc = PcHub(self)                    # builds on this computer (onpc)
+        self.guard = SyncGuard(self.store.path.parent, settings=lambda: self.store.settings, conf=lambda: self.conf,
+                               activity=lambda k, n, t: self.activity.add(k, n, t), changed=self.invalidate,
+                               busy=lambda n: bool(self.copies.get(n) and not self.copies[n].done))
         self._pc_unlock = {}                     # web: computer id -> (MFA unlock token, until) — memory only
 
     @property
@@ -10009,6 +10481,11 @@ class App:
         if time.time() - t < max_age:
             return cached
         p = merge_projects([] if self.web else mutagen_sessions(), self.store.manual(), self.store.data["projects"])
+        for x in p:
+            al = None if self.web or not x.get("sync") else self.guard.alert_for(x["name"])
+            if al:                      # paused by the sync guard: shown under the project, Resume anyway asks first
+                x["sync"].update(guard={"kind": al.get("kind"), "reason": al.get("reason"), "t": al.get("t")},
+                                 state="err", label="Paused: check")
         have = {x["name"] for x in p} | {x.get("remote") for x in p if x.get("remote")}
         hidden = set(self.store.db.get("hiddenShared", []) or [])      # shared projects removed from this device's list
         for sp in self._share_projects:
@@ -11179,12 +11656,18 @@ class App:
             streams = 0
         if streams:
             argv += ["--paused"]
-        code, out = self.run_script(argv, timeout=180)
+        self.guard.adding += 1               # a session that appears now is a first copy, not a wiped folder
+        try:
+            code, out = self.run_script(argv, timeout=180)
+            added = re.search(r"Project '([^']+)' added", out)
+            pname = added.group(1) if added else name
+            if code == 0 and pname:
+                self.guard.note_created(pname)
+        finally:
+            self.guard.adding -= 1
         if code != 0:
             raise ApiError(400, self.script_error(out, "could not add the project"))
         self.invalidate()
-        added = re.search(r"Project '([^']+)' added", out)
-        pname = added.group(1) if added else name
         if streams and pname:
             self.start_copy(pname, mode, ignores, git == "on", streams)
         self.activity.add("add-" + mode, pname, ("downloaded from " + remote) if mode == "download" else ("uploaded " + local))
@@ -11274,13 +11757,24 @@ class App:
                  "stop": [["sync", "pause", "--all"], ["daemon", "stop"]], "start": [["daemon", "start"], ["sync", "resume", "--all"]]}.get(action)
         if not steps:
             raise ApiError(400, "unknown action")
+        kept = []
         for st in steps:
-            subprocess.run([exe] + st, capture_output=True, timeout=60, env=env)
+            if st == ["daemon", "start"]:
+                kept += [n for n, _ in guarded_daemon_start(self.guard)]
+            elif st == ["sync", "resume", "--all"]:
+                for sess in mutagen_sessions(timeout=20):
+                    if sess.get("paused") and sess.get("name") and sess["name"] not in kept:
+                        if self.guard.check_resume(sess):
+                            kept.append(sess["name"])
+                        else:
+                            subprocess.run([exe, "sync", "resume", sess["name"]], capture_output=True, timeout=60, env=env)
+            else:
+                subprocess.run([exe] + st, capture_output=True, timeout=60, env=env)
         self.invalidate()
         self._status["checked"] = 0
         self.activity.add("sync-" + action, "", {"pause-all": "paused all syncing", "resume-all": "resumed all syncing",
                                                "stop": "stopped the sync service", "start": "started the sync service"}[action])
-        return {"daemon": daemon_running()}
+        return {"daemon": daemon_running(), "kept": kept}
 
     def stop_sync(self, name: str) -> dict:
         p = next((x for x in self.projects(max_age=5) if x["name"] == name), None)
@@ -11293,6 +11787,7 @@ class App:
         # keep it in the list as a server-only project, with both folders
         self.store.add_manual({"name": name if valid_name(name) else re.sub(r"[^A-Za-z0-9._-]", "-", name), "local": p.get("local") or "", "remote": p.get("remote") or ""})
         self.invalidate()
+        self.guard.forget(name)
         self.activity.add("sync-stop", name, "stopped syncing (files kept on both sides)")
         return {"ok": True}
 
@@ -11319,6 +11814,7 @@ class App:
             r = subprocess.run([exe, "sync", "terminate", name], capture_output=True, text=True, timeout=60, env=dict(os.environ, PATH=tool_path()))
             if r.returncode != 0:
                 raise ApiError(500, (r.stderr or r.stdout).strip()[-300:] or "could not stop the sync")
+            self.guard.forget(name)
         self.pc_forget_local(name)
         self.store.remove_manual(name)
         with self.store.lock:
@@ -11387,7 +11883,11 @@ class App:
             def side(ch):
                 return [{"path": i.get("path", ""), "was": self._kind(i.get("old")), "now": self._kind(i.get("new"))} for i in ch]
             conflicts.append({"path": c.get("root", ""), "local": side(lc), "server": side(rc)})
-        return {"name": name, "state": cls, "label": label, "status": x.get("status") or "", "paused": bool(x.get("paused")),
+        al = self.guard.alert_for(name)
+        if al:
+            cls, label = "err", "Paused: check"
+        return {"guard": {"kind": al.get("kind"), "reason": al.get("reason"), "t": al.get("t")} if al else None,
+                "name": name, "state": cls, "label": label, "status": x.get("status") or "", "paused": bool(x.get("paused")),
                 "local": loc["path"], "remote": rem["path"], "server": f"{rem['user'] or self.conf.user}@{rem['host']}",
                 "error": x.get("lastError") or "", "cycles": int(x.get("successfulCycles") or 0),
                 "ignores": cfg.get("ignores") or [], "defaultIgnores": default_ignores(), "git": str(cfg.get("ignoreVCSMode") or "default") not in ("ignore", "1"),
@@ -12558,6 +13058,12 @@ class App:
             raise ApiError(400, "mutagen not found")
         argv = [exe, "sync", action, name]
         env = dict(os.environ, PATH=tool_path())
+        if action == "resume":           # the guard checks both folders and takes a snapshot first
+            sess = next((x for x in mutagen_sessions() if x.get("name") == name), None)
+            why = self.guard.check_resume(sess) if sess else ""
+            if why:
+                self.invalidate()
+                raise ApiError(409, "Kept paused: " + why)
         if action == "flush":
             subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True, env=env)
@@ -12567,6 +13073,18 @@ class App:
                 raise ApiError(500, (r.stderr or r.stdout).strip()[:300] or "failed")
         self.invalidate()
         self.activity.add("sync-" + action, name, {"flush": "sync now", "pause": "sync paused", "resume": "sync resumed"}[action])
+        return {"ok": True}
+
+    def sync_approve(self, name: str) -> dict:
+        """Resume anyway, after a guard pause the user checked."""
+        sess = next((x for x in mutagen_sessions() if x.get("name") == name), None)
+        if not sess:
+            raise ApiError(404, "this project is not synced")
+        why = self.guard.approve(sess)
+        self.invalidate()
+        if why:
+            raise ApiError(409, why)
+        self.activity.add("sync-resume", name, "sync resumed anyway (guard)")
         return {"ok": True}
 
     def state(self) -> dict:
@@ -15053,6 +15571,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.chat_history_page(parts[1], int(b) if b.isdigit() else 0)
         if route == ("GET", "claude-sessions"):
             return {"sessions": app.claude_sessions(parts[1] if len(parts) > 1 else "")}
+        if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "approve":
+            return app.sync_approve(parts[1])
         if route == ("POST", "sync") and len(parts) == 3:
             return app.sync_action(parts[1], parts[2])
         if route == ("POST", "quit"):
@@ -15215,7 +15735,7 @@ def windows_reaches(port: int) -> bool:
 def code_fingerprint() -> str:
     """Changes whenever the GUI files change — a running older copy is then replaced."""
     h = hashlib.sha1()
-    for f in [HERE / "server.py"] + sorted(p for p in STATIC.glob("*") if p.is_file()):
+    for f in [HERE / "server.py", HERE / "syncguard.py"] + sorted(p for p in STATIC.glob("*") if p.is_file()):
         try:
             h.update(f.name.encode() + f.read_bytes())
         except OSError:
@@ -15322,10 +15842,13 @@ def serve(foreground_msg=True):
     tmp.write_text(json.dumps(st))
     os.chmod(tmp, 0o600)
     os.replace(tmp, state_file())
-    exe = which("mutagen")
-    if exe:
-        subprocess.Popen([exe, "daemon", "start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         stdin=subprocess.DEVNULL, env=dict(os.environ, PATH=tool_path()))
+    guarded_daemon_start(app.guard, wait=False)
+    try:                          # an older autostart line started Mutagen without the guard
+        if autostart_enabled():
+            set_autostart(True)
+    except (OSError, ApiError):
+        pass
+    threading.Thread(target=app.guard.loop, daemon=True).start()
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
     threading.Thread(target=app.docker_watch_loop, daemon=True).start()
     threading.Thread(target=app.start_tunnels, daemon=True).start()
@@ -15493,6 +16016,22 @@ def main(argv):
         print("  ✓ GUI stopped" if stop_running(read_state()) else "  GUI is not running")
     elif cmd == "pair" and len(argv) > 2:      # install.sh / install.ps1 with SIMAB_PAIR
         return pair_computer(argv[2])
+    elif cmd in ("guard-start", "guard-check"):   # the bash script: autostart and resume go through the sync guard
+        store = Store()
+        guard = SyncGuard(store.path.parent, settings=lambda: store.settings, conf=load_server_conf)
+        if cmd == "guard-start":
+            for name, why in guarded_daemon_start(guard):
+                print(f"  ! {name}: kept paused — {why}")
+            return 0
+        sess = next((x for x in mutagen_sessions(timeout=20) if x.get("name") == (argv[2] if len(argv) > 2 else "")), None)
+        if not sess:
+            print("no such sync")
+            return 2
+        why = guard.check_resume(sess)
+        if why:
+            print(why)
+            return 3
+        return 0
     elif cmd == "shortcut" and IS_WIN:        # used by install.ps1
         print("  ✓ Added to the " + make_windows_shortcut())
     elif cmd == "shortcut":                   # install.sh: the app-menu entry with the logo (Linux desktops)

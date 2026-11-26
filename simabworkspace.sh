@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.69.0  2026-11-26  Sync guard: a .simab-root marker on both sides; a folder that lost it (disk not mounted), a nearly empty side, a folder made by root (docker) or on the wrong disk (DISK2 → DISK21), a mass delete or a lost top folder pauses the sync; the root is never auto-created; onpc says when it rewrites a path (Resume anyway asks); server snapshots before each resume and every 30 min, syncguard.py restore
 #    1.65.18 2026-11-23  A project added on another device can be removed from this list; setting "Keep the message box shown" in chats
 #    1.65.17 2026-11-23  Mac: a project put in a group no longer jumps back for a moment (a refresh asked before the move is dropped)
 #    1.65.16 2026-11-23  A project group never vanishes by itself (last project moved out, or a refresh with an older list); only Ungroup removes it
@@ -411,7 +412,7 @@
 
 set -u -o pipefail
 
-VERSION="1.68.0"
+VERSION="1.69.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -951,6 +952,23 @@ setup_ssh() {
 # ----------------------------------------------------------------------------- mutagen helpers
 daemon_start() { mutagen daemon start >/dev/null 2>&1 || true; }
 
+# Sync guard (gui/syncguard.py): a folder here that lost its .simab-root (disk not mounted, folder replaced),
+# a nearly empty side or a mass delete keeps the session paused. Exit 3 = kept paused.
+guard_ok() {
+  local out rc
+  out=$(run_gui_cmd guard-check "$1" 2>/dev/null); rc=$?
+  [ $rc -eq 0 ] && return 0
+  [ $rc -eq 3 ] && { err "'$1' kept paused: $out"; return 1; }
+  [ $rc -eq 2 ] && return 0
+  warn "Sync guard not available (Python 3 or the gui folder missing): resuming '$1' without the check."
+  return 0
+}
+# start the daemon; sessions whose folder here lost its marker are paused at once
+guard_start() {
+  daemon_running && return 0
+  run_gui_cmd guard-start 2>/dev/null || daemon_start
+}
+
 daemon_running() {
   # `daemon start` is idempotent; we only want to know without starting it
   if [ $IS_WIN -eq 1 ]; then
@@ -1282,7 +1300,12 @@ add_project() {
     if [ $yes -eq 1 ]; then err "Not merging automatically — pick an empty or new local folder."; return 1; fi
     confirm "Continue?" n || return 1
   fi
-  mkdir -p "$lpath" || { err "Cannot create $lpath"; return 1; }
+  # never make the parents: a missing /media/…/DISK2 means the disk is not mounted, not "create it"
+  if [ ! -d "$(dirname "$lpath")" ]; then
+    err "$(dirname "$lpath") does not exist (a disk not mounted?). Create it or mount the disk, then try again."
+    return 1
+  fi
+  mkdir "$lpath" 2>/dev/null || [ -d "$lpath" ] || { err "Cannot create $lpath"; return 1; }
 
   local ignores="$DEFAULT_IGNORES" extra
   [ $ign_given -eq 1 ] && ignores="$ign_list"
@@ -1380,7 +1403,7 @@ project_action() {
   fi
   case "$act" in
     pause)   mutagen sync pause "$name"  && ok "'$name' paused (nothing syncs until you resume)." ;;
-    resume)  mutagen sync resume "$name" && ok "'$name' resumed." ;;
+    resume)  guard_ok "$name" && mutagen sync resume "$name" && ok "'$name' resumed." ;;
     flush)   info "Syncing '$name' now…"; wait_sync "$name" flush && ok "'$name' is in sync." ;;
     info)    mutagen sync list --long "$name" ;;
     monitor) info "Live view — Ctrl+C to go back"; mutagen sync monitor "$name" || true ;;
@@ -1722,7 +1745,7 @@ all_action() {
   while IFS= read -r n; do
     case "$act" in
       pause)  mutagen sync pause "$n"  >/dev/null && ok "paused  $n" ;;
-      resume) mutagen sync resume "$n" >/dev/null && ok "resumed $n" ;;
+      resume) guard_ok "$n" && mutagen sync resume "$n" >/dev/null && ok "resumed $n" ;;
     esac
   done <<< "$names"
 }
@@ -1738,7 +1761,7 @@ disconnect_all() {
 
 reconnect_all() {
   title "Reconnect"
-  daemon_start
+  guard_start
   daemon_running && ok "Sync daemon running" || { err "Could not start the daemon."; return 1; }
   all_action resume
 }
@@ -1755,7 +1778,7 @@ toggle_autostart() {
   else
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
       [ -f "$rc" ] || continue
-      printf '\n%s\ncommand -v mutagen >/dev/null 2>&1 && mutagen daemon start >/dev/null 2>&1\n%s\n' \
+      printf '\n%s\nif command -v simabworkspace >/dev/null 2>&1; then simabworkspace guard-start >/dev/null 2>&1; elif command -v mutagen >/dev/null 2>&1; then mutagen daemon start >/dev/null 2>&1; fi\n%s\n' \
         "$RC_MARK_BEGIN" "$RC_MARK_END" >> "$rc"
     done
     ok "Autostart enabled: syncing starts automatically when you open a terminal."
@@ -2022,6 +2045,7 @@ main() {
     # used by the window: never start the interactive setup for these
     install)   [ -x "$BIN_DIR/mutagen" ] && ensure_path; install_one "${2:-}"; exit $? ;;
     gui)       [ -x "$BIN_DIR/mutagen" ] && ensure_path; run_gui "${2:-open}"; exit $? ;;
+    guard-start) [ -x "$BIN_DIR/mutagen" ] && ensure_path; type -P mutagen >/dev/null 2>&1 && guard_start; exit 0 ;;
     web)       shift; run_web "$@"; exit $? ;;
     pair)      run_gui_cmd pair "${2:-}"; exit $? ;;
     shortcut)  run_gui_cmd shortcut; exit $? ;;   # install.sh: the app-menu entry with the logo
@@ -2042,7 +2066,7 @@ main() {
   self_install
 
   case "$cmd" in
-    menu)        daemon_start; menu ;;
+    menu)        guard_start; menu ;;
     status)      show_status ;;
     add)         add_project_menu ;;
     add-local)   shift; add_local_project "$@" ;;

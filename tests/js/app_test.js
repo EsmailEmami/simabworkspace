@@ -47,6 +47,7 @@ const state = {
   ]
 };
 let offline = false;
+let guardAlert = null;          // sync guard pause shown in Sync details
 let extraSessions = [];
 const CONV_VS = '11111111-aaaa-bbbb-cccc-000000000001', CONV_OLD = '11111111-aaaa-bbbb-cccc-000000000002';
 let fakeRunning = { cheshmeh: [{ pid: 4242, sessionId: CONV_VS, cwd: '/home/esi/cheshmeh', status: 'busy', owner: 'vscode', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 600, updated: Date.now() / 1000 - 5 }] };
@@ -122,7 +123,8 @@ global.fetch = (url, opts) => {
   else if (url === '/api/prereqs' && method === 'GET') res = { items: [{ name: 'mutagen', ok: true, version: '0.18', why: 'sync', sudo: false }, { name: 'jq', ok: false, version: '', why: 'scripts', sudo: false }], docker: false, wsl: false, sudoWithoutPassword: false };
   else if (url.startsWith('/api/prereqs/')) res = { ok: true };
   else if (url.startsWith('/api/move/')) res = { ok: true };
-  else if (url === '/api/sync/cheshmeh/details') res = { name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
+  else if (url === '/api/sync/cheshmeh/approve') { res = { ok: true }; guardAlert = null; }
+  else if (url === '/api/sync/cheshmeh/details') res = { guard: guardAlert, name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
     server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
   else if (url === '/api/sync/cheshmeh/resolve') res = { ok: true };
@@ -1162,6 +1164,27 @@ const tests = {
     await settle();
     assert.ok(!calls.slice(n).some((c) => c.url.indexOf('/preview') > 0));
     assert.deepStrictEqual(calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop().body, { ignores: [], delete: {} });
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
+
+  async 'sync guard: the pause reason shows in Sync details; Resume anyway asks, then approves'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    guardAlert = { kind: 'marker', reason: 'The folder on this computer lost its .simab-root (disk not mounted?)', t: 1 };
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync details') === 0).click();
+    await settle();
+    const md = q('.modal').pop();
+    assert.match(md.textContent, /Paused by the sync guard: The folder on this computer lost its \.simab-root/);
+    q('button', md).find((b) => b.textContent === 'Resume anyway…').click();
+    await settle();
+    const ask = q('.modal').pop();
+    assert.match(ask.textContent, /Resume cheshmeh\?/);
+    assert.match(ask.textContent, /snapshot of the server folder/);
+    const n = calls.length;
+    q('button', ask).find((b) => b.textContent === 'Resume anyway').click();
+    await settle();
+    assert.ok(calls.slice(n).some((c) => c.url === '/api/sync/cheshmeh/approve' && c.method === 'POST'));
+    guardAlert = null;
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

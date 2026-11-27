@@ -263,6 +263,17 @@ class GuardTest(unittest.TestCase):
             p.write_text("x")
         self.adopt()
 
+    def test_mutagen_018_json_ignores_are_read(self):
+        # Mutagen 0.18: ignore.paths / ignore.vcs, no configuration.ignores — read as empty, every project paused
+        s = sw.mutagen_norm({"name": "cheshmeh", "mode": "two-way-safe",
+                             "ignore": {"paths": ["node_modules", "docker/data"], "vcs": True}})
+        self.assertEqual(sw.SyncGuard._ignores(s), ["node_modules", "docker/data", ".git", ".svn", ".hg", ".bzr"])
+        self.assertEqual(s["configuration"]["synchronizationMode"], "two-way-safe")
+        off = sw.mutagen_norm({"ignore": {"paths": [], "vcs": False}})
+        self.assertEqual(sw.SyncGuard._ignores(off), [])
+        old = sw.mutagen_norm({"configuration": {"ignores": ["x"], "ignoreVCSMode": "ignore"}})
+        self.assertEqual(old["configuration"], {"ignores": ["x"], "ignoreVCSMode": "ignore"})
+
     def test_app_start_checks_every_paused_project_again(self):
         # the ones that look right now resume (a normal resume = the guard checks), the rest stay paused
         tried, logged = [], []

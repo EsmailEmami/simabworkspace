@@ -743,9 +743,28 @@ def mutagen_sessions(timeout=8) -> list:
                            capture_output=True, text=True, timeout=timeout,
                            env=dict(os.environ, PATH=tool_path()))
         d = json.loads(r.stdout or "[]")
-        return d if isinstance(d, list) else []
+        return [mutagen_norm(x) for x in d] if isinstance(d, list) else []
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
+
+
+def mutagen_norm(s):
+    """Mutagen 0.18 JSON has the Not synced list at ignore.paths and Git at ignore.vcs (bool), not
+    configuration.ignores / ignoreVCSMode: read as empty, the sync guard counted node_modules & co
+    and paused every project ("This computer has 85344 files, the server 37654")."""
+    if not isinstance(s, dict):
+        return s
+    cfg = s.get("configuration") if isinstance(s.get("configuration"), dict) else {}
+    ign = s.get("ignore") if isinstance(s.get("ignore"), dict) else {}
+    if ign and "ignores" not in cfg:
+        cfg = dict(cfg, ignores=[str(x) for x in (ign.get("paths") or [])])
+    if ign and "ignoreVCSMode" not in cfg and "vcs" in ign:
+        cfg["ignoreVCSMode"] = "ignore" if ign.get("vcs") is True or str(ign.get("vcs")).lower() == "ignore" else "propagate"
+    if "synchronizationMode" not in cfg and isinstance(s.get("mode"), str):
+        cfg["synchronizationMode"] = s["mode"]
+    if cfg:
+        s["configuration"] = cfg
+    return s
 
 
 _RATE = {}   # session -> [(time, bytes received so far)], for the time left

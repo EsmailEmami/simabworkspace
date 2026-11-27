@@ -1083,7 +1083,7 @@ show_status() {
       (.alpha.path // ""),
       (.beta.path // ""),
       ((.conflicts // []) | length | tostring),
-      ((.configuration.ignoreVCSMode // "default") | tostring),
+      ((.configuration.ignoreVCSMode // (if .ignore.vcs == true then "ignore" else null end) // "default") | tostring),
       ((.lastError // "") | gsub("[\t\n]"; " ") | if . == "" then "-" else . end)
     ] | @tsv')
 }
@@ -1439,7 +1439,7 @@ create_session() {
 # session_git <session json> -> "on" | "off"
 #   Mutagen's default (no flag) syncs VCS folders; only "ignore" skips them.
 session_git() {
-  case "$(printf '%s' "$1" | jq -r '(.configuration.ignoreVCSMode // "default") | tostring')" in
+  case "$(printf '%s' "$1" | jq -r '(.configuration.ignoreVCSMode // (if .ignore.vcs == true then "ignore" else null end) // "default") | tostring')" in
     ignore|1) printf 'off' ;;
     *)        printf 'on' ;;
   esac
@@ -1508,7 +1508,7 @@ move_project() {
   r_user=$(printf '%s' "$s" | jq -r ".$rside.user // empty"); r_user="${r_user:-$SSH_USER}"
   r_host=$(printf '%s' "$s" | jq -r ".$rside.host // empty"); r_host="${r_host:-$SSH_HOST}"
   r_port=$(printf '%s' "$s" | jq -r ".$rside.port // 0")
-  ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
+  ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // .ignore.paths // []) | join(",")')
   local git; git=$(session_git "$s")
   if [ "$r_host" != "$SSH_HOST" ] || [ "$r_user" != "$SSH_USER" ]; then
     err "'$name' syncs with $r_user@$r_host, not with your configured server ($SSH_USER@$SSH_HOST)."
@@ -1663,7 +1663,7 @@ git_toggle() {
   r_user=$(printf '%s' "$s" | jq -r ".$rside.user // empty"); r_user="${r_user:-$SSH_USER}"
   r_host=$(printf '%s' "$s" | jq -r ".$rside.host // empty"); r_host="${r_host:-$SSH_HOST}"
   r_port=$(printf '%s' "$s" | jq -r ".$rside.port // 0"); [ "$r_port" = "0" ] && r_port="$SSH_PORT"
-  ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
+  ignores=$(printf '%s' "$s" | jq -r '(.configuration.ignores // .ignore.paths // []) | join(",")')
   url="$r_user@$r_host:$r_port:$rpath"
   new_name=$(sanitize_name "$name")
   case "$name" in sync_*) new_name=$(sanitize_name "$(basename "$rpath")") ;; esac
@@ -1707,7 +1707,7 @@ ignore_set() {
     lside=beta; rside=alpha
   fi
   local cur git lpath rpath r_user r_host r_port url new_name
-  cur=$(printf '%s' "$s" | jq -r '(.configuration.ignores // []) | join(",")')
+  cur=$(printf '%s' "$s" | jq -r '(.configuration.ignores // .ignore.paths // []) | join(",")')
   git=$(session_git "$s")
   lpath=$(printf '%s' "$s" | jq -r ".$lside.path // empty")
   rpath=$(printf '%s' "$s" | jq -r ".$rside.path // empty")

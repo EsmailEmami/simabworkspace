@@ -4709,10 +4709,70 @@ def prune_delete(root, patterns, paths):
     return {"deleted": done, "errors": errors[:20]}
 
 
+def gitignore_line(rel_dir, line):
+    # one .gitignore line -> a Mutagen pattern from the project root ("" = skip). Git: a pattern with a "/"
+    # inside is relative to the .gitignore's folder, one without matches at any depth below it.
+    line = line.rstrip("\n\r")
+    if not line.strip() or line.startswith("#"):
+        return ""
+    line = line.rstrip() if not line.endswith("\\ ") else line
+    neg = line.startswith("!")
+    p = line[1:] if neg else line
+    if p.startswith("\\"):
+        p = p[1:]
+    dir_only = p.endswith("/")
+    body = p.rstrip("/")
+    if not body or body in ("*", "**"):
+        return ""
+    anchored = "/" in body
+    body = body.lstrip("/")
+    if rel_dir:
+        out = rel_dir + "/" + body if anchored or body.startswith("**/") else rel_dir + "/**/" + body
+    else:
+        out = "/" + body if anchored and not body.startswith("**/") else body
+    return ("!" if neg else "") + out + ("/" if dir_only else "")
+
+
+def prune_gitignore(root, patterns):
+    # every .gitignore under root (nested git repos too), skipping .git and what is already not synced
+    root = os.path.realpath(os.path.expanduser(root))
+    if not os.path.isdir(root):
+        return {"entries": [], "files": [], "missing": True}
+    skip = prune_compile(patterns)
+    entries, files, budget, stack = [], [], [MAX_SCAN], [""]
+    while stack and budget[0] > 0:
+        rel_dir = stack.pop()
+        d = os.path.join(root, rel_dir) if rel_dir else root
+        gi = os.path.join(d, ".gitignore")
+        if os.path.isfile(gi):
+            try:
+                with open(gi, encoding="utf-8", errors="replace") as f:
+                    lines = f.read().splitlines()[:2000]
+            except OSError:
+                lines = []
+            files.append((rel_dir + "/" if rel_dir else "") + ".gitignore")
+            new = [x for x in (gitignore_line(rel_dir, ln) for ln in lines) if x and x not in entries]
+            entries += new
+            skip += prune_compile(new)
+        try:
+            subs = sorted(e.name for e in os.scandir(d) if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
+        budget[0] -= len(subs) + 1
+        for n in reversed(subs):
+            rel = rel_dir + "/" + n if rel_dir else n
+            if n in (".git", ".svn", ".hg") or prune_match(skip, rel, True):
+                continue
+            stack.append(rel)
+    return {"entries": entries[:500], "files": files[:200], "truncated": budget[0] <= 0}
+
+
 def prune_main(argv):
     try:
         op, root, patterns = argv[0], argv[1], json.loads(argv[2])
-        if op == "find":
+        if op == "gitignore":
+            print(json.dumps(prune_gitignore(root, patterns)))
+        elif op == "find":
             print(json.dumps(prune_find(root, patterns)))
         elif op == "delete":
             print(json.dumps(prune_delete(root, patterns, json.loads(argv[3]))))
@@ -4768,7 +4828,7 @@ def prune_call(app, project: dict, where: str, op: str, patterns: list, paths: l
             ns = {"__name__": "simab_prune"}
             exec(compile(PRUNE_PY, "<prune>", "exec"), ns)
             _PRUNE.update(ns)
-        f = _PRUNE["prune_find"] if op == "find" else _PRUNE["prune_delete"]
+        f = _PRUNE["prune_find"] if op == "find" else _PRUNE["prune_gitignore"] if op == "gitignore" else _PRUNE["prune_delete"]
         res = f(*([args[1], patterns] + ([paths or []] if op == "delete" else [])))
     else:
         res = remote_python(app._project_conf(project), PRUNE_PY, args,
@@ -11510,6 +11570,26 @@ class App:
                 out[w] = {"items": [], "total": 0, "truncated": False, "error": e.message}
         return out
 
+    def gitignore_entries(self, name: str, ignores) -> dict:
+        """Not synced suggestions from every .gitignore in the project (nested repos too): this machine's
+        folder, the server's when this one is not here."""
+        p = self._synced(name)
+        cur = self._clean_ignores(ignores) if ignores else []
+        err = ""
+        for w in ("local", "server"):
+            if w not in self._sides(p):
+                continue
+            try:
+                r = prune_call(self, p, w, "gitignore", cur)
+            except ApiError as e:
+                err = e.message
+                continue
+            if not r.get("missing"):
+                r["entries"] = [x for x in r.get("entries") or [] if x not in cur]
+                r["where"] = w
+                return r
+        raise ApiError(400, err or "the project folder is not here")
+
     def set_ignores(self, name: str, ignores, delete=None) -> dict:
         """What is never synced for a project (Mutagen ignore patterns); the sync is recreated.
         delete = {"server": [paths], "local": [paths]}: copies of newly added patterns to remove
@@ -15520,6 +15600,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.set_ignores(parts[1], b.get("ignores"), b.get("delete"))
         if route == ("POST", "sync") and len(parts) == 4 and parts[2] == "ignores" and parts[3] == "preview":
             return app.ignores_preview(parts[1], self._body().get("ignores"))
+        if route == ("POST", "sync") and len(parts) == 4 and parts[2] == "ignores" and parts[3] == "gitignore":
+            return app.gitignore_entries(parts[1], self._body().get("ignores"))
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "resolve":
             b = self._body()
             return app.resolve_conflict(parts[1], b.get("path") or "", b.get("keep") or "")

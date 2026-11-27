@@ -2176,6 +2176,20 @@ class PruneScript(unittest.TestCase):
         self.assertEqual(f["total"], 6)
         self.assertEqual(self.ns["prune_find"](self.root + "/nope", ["x"])["items"], [])
 
+    def test_gitignore_nested_repos(self):
+        # several git repos in one project: each .gitignore's lines become patterns from the project root;
+        # an already not-synced folder (node_modules) and .git are never read
+        for d, text in (("", "# c\n*.log\n/build\n.env\n!keep.log\n"), ("api", "vendor/\n/tmp\nsub/cache\n"),
+                        ("a/node_modules/x", "never\n"), (".git", "never2\n")):
+            os.makedirs(os.path.join(self.root, d), exist_ok=True)
+            Path(self.root, d, ".gitignore").write_text(text)
+        r = self.ns["prune_gitignore"](self.root, ["node_modules"])
+        self.assertEqual(r["entries"], ["*.log", "/build", ".env", "!keep.log", "api/**/vendor/", "api/tmp", "api/sub/cache"])
+        self.assertEqual(r["files"], [".gitignore", "api/.gitignore"])
+        self.assertTrue(self.ns["prune_gitignore"](self.root + "/nope", [])["missing"])
+        self.assertEqual(self.ns["gitignore_line"]("", "  "), "")
+        self.assertEqual(self.ns["gitignore_line"]("w", "**/dist"), "w/**/dist")
+
     def test_delete_only_listed_and_matching_never_follows_links(self):
         r = self.ns["prune_delete"](self.root, ["node_modules", "lnk"], ["a/node_modules", "web/lnk", ".git/node_modules", "out", "../x"])
         self.assertEqual(r, {"deleted": 2, "errors": []})

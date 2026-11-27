@@ -124,6 +124,8 @@ class MarkerTest(unittest.TestCase):
             self.assertTrue(sg._ignored("a/b/node_modules", ["node_modules"]))
             self.assertTrue(sg._ignored("dist", ["/dist"]))
             self.assertFalse(sg._ignored("web/dist", ["/dist"]))
+            self.assertTrue(sg._ignored("api/vendor", ["api/**/vendor/"]))      # from a nested .gitignore
+            self.assertTrue(sg._ignored("api/x/vendor", ["api/**/vendor/"]))
             vcs = sw.SyncGuard._ignores({"configuration": {"ignores": ["x"], "ignoreVCSMode": "ignore"}})
             self.assertIn(".git", vcs)
             self.assertNotIn(".git", sw.SyncGuard._ignores({"configuration": {"ignores": ["x"]}}))

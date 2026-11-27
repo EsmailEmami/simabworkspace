@@ -4525,7 +4525,7 @@
         var any = ['server', 'local'].some(function (w) { return r[w] && (r[w].items.length || r[w].error); });
         if (!any) return send(list);
         step = 2;
-        back.classList.remove('hidden'); addDef.classList.add('hidden');
+        back.classList.remove('hidden'); addDef.classList.add('hidden'); addGit.classList.add('hidden');
         body.replaceChildren(
           h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:6px' }, 'Copies of the new entries (' + r.added.join(', ') + ') that are already there:'),
           side('server', 'On the server'), side('local', 'On this machine'),
@@ -4539,18 +4539,30 @@
       defaults.forEach(function (x) { if (have.indexOf(x) < 0) have.push(x); });
       ta.value = have.join('\n');
     } }, 'Add defaults');
+    // every .gitignore in the project (nested repos too) → its entries, from the project root
+    var addGit = h('button', { class: 'btn', disabled: true, onclick: function () {
+      addGit.disabled = true; errBox.textContent = '';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores/gitignore', { ignores: listOf() }).then(function (r) {
+        addGit.disabled = false;
+        var have = listOf(), n = 0;
+        (r.entries || []).forEach(function (x) { if (have.indexOf(x) < 0) { have.push(x); n++; } });
+        ta.value = have.join('\n');
+        var files = r.files || [];
+        toast(files.length ? 'Added ' + n + ' from ' + files.join(', ') : 'No .gitignore in this project', files.length ? 'ok' : '');
+      }).catch(function (e) { addGit.disabled = false; errBox.textContent = e.message; });
+    } }, 'Add from .gitignore');
     var back = h('button', { class: 'btn hidden', onclick: function () {
-      step = 1; boxes = {}; back.classList.add('hidden'); addDef.classList.remove('hidden');
+      step = 1; boxes = {}; back.classList.add('hidden'); addDef.classList.remove('hidden'); addGit.classList.remove('hidden');
       save.className = 'btn primary'; busy(false, 'Save'); errBox.textContent = '';
       body.replaceChildren.apply(body, first.concat([errBox]));
     } }, 'Back');
     var md = openModal({ title: 'Not synced — ' + p.name, body: body,
-      foot: [addDef, back, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), save] });
+      foot: [addDef, addGit, back, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), save] });
     api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
       current = d.ignores || [];
       ta.value = current.join('\n');
       defaults = d.defaultIgnores || [];
-      save.disabled = false; addDef.disabled = !defaults.length;
+      save.disabled = false; addDef.disabled = !defaults.length; addGit.disabled = false;
     }).catch(function (e) { errBox.textContent = e.message; });
   }
 

@@ -283,7 +283,8 @@ def _ignored(rel: str, ignores) -> bool:
         p = str(pat).strip().strip("/")
         if not p or str(pat).strip().startswith("!"):
             continue
-        if fnmatch.fnmatch(rel if "/" in p or str(pat).strip().startswith("/") else name, p):
+        s = rel if "/" in p or str(pat).strip().startswith("/") else name
+        if fnmatch.fnmatch(s, p) or ("/**/" in p and fnmatch.fnmatch(s, p.replace("/**/", "/"))):
             return True
     return False
 

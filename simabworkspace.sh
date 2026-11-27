@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.71.0  2026-11-27  Two computers: a chat runs only on the computer it was opened on and its tab stays there; each computer gets its own server copy (folder@computer), changes cross via git push / pull, a Pull notice after the other one pushes
 #    1.70.2  2026-11-27  Linux Wayland: the window opens under XWayland so the dock shows the logo, not a gear
 #    1.70.1  2026-11-27  Tab drag: a gap shows where the tab lands and the tabs slide; a tab dragged out opens a smaller window under the mouse that fades in
 #    1.70.0  2026-11-27  Sidebar: no file tree; a Files button under Usage opens the Files tab of the active project
@@ -418,7 +419,7 @@
 
 set -u -o pipefail
 
-VERSION="1.70.2"
+VERSION="1.71.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1483,9 +1484,10 @@ move_project() {
   title "Change project folders"
   ssh_ok || { err "No SSH connection — run Setup first."; return 1; }
   daemon_running || daemon_start
-  local name="" yes=0 nowait=0 arg_l="" arg_r=""
+  local name="" yes=0 nowait=0 arg_l="" arg_r="" merge=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --merge-server) merge=1; shift ;;   # the new server folder already has the same files (own copy / back)
       --local)   arg_l="${2:-}"; shift 2 ;;
       --remote)  arg_r="${2:-}"; shift 2 ;;
       --yes|-y)  yes=1; shift ;;
@@ -1574,8 +1576,8 @@ move_project() {
     case "$new_r/" in "$old_r"/*) err "The new server folder cannot be inside the old one."; return 1 ;; esac
     if rssh "test -d $q_new && [ -n \"\$(ls -A $q_new 2>/dev/null)\" ]"; then
       warn "$new_r already has files on the server — it will be used as is and MERGED."
-      [ $yes -eq 1 ] && { err "$new_r already has files on the server — pick a new or empty folder."; return 1; }
-      confirm "Use that server folder (the old one is left untouched)?" n || return 1
+      [ $yes -eq 1 ] && [ $merge -eq 0 ] && { err "$new_r already has files on the server — pick a new or empty folder."; return 1; }
+      [ $merge -eq 1 ] || confirm "Use that server folder (the old one is left untouched)?" n || return 1
       rmode=use
     elif rssh "test -e $q_new && ! test -d $q_new"; then
       err "$new_r exists on the server and is not a folder."; return 1

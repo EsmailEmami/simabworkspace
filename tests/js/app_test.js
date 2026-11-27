@@ -916,10 +916,12 @@ const tests = {
     devs.self = 'b2';
     st = global.SWComputers.buildState('cheshmeh', devs, '');
     assert.strictEqual(st.dev, 'desk', 'the computer the app runs on comes first');
-    assert.match(st.text, /desk \(this computer; if it goes off, the next connected one/);
+    assert.match(st.text, /desk \(this computer; files synced/);
     assert.strictEqual(global.SWComputers.buildState('cheshmeh', devs, '', 'a1b2c3d4e5f6').dev, 'laptop', 'a chat opened on laptop stays there');
     devs.devices[1].online = false;
-    assert.strictEqual(global.SWComputers.buildState('cheshmeh', devs, '').dev, 'laptop', 'this one off: the next connected one');
+    st = global.SWComputers.buildState('cheshmeh', devs, '');
+    assert.deepStrictEqual([st.dev, st.ok], ['desk', false], 'this one off: never the other computer (user 2026-11-27)');
+    assert.match(st.text, /desk \(this computer\) is not connected/);
     devs.devices[1].online = true;
     devs.self = 'ffffffffffff';
     pr.pcs = [];
@@ -989,6 +991,38 @@ const tests = {
     await settle();
     const post = calls.filter((c) => c.url === '/api/move/cheshmeh').pop();
     assert.deepStrictEqual(post.body, { local: '/l/new-cheshmeh', remote: '' });
+  },
+
+  async 'own server copy per computer: ⋯ menu switches, a push from the other computer shows a Pull notice'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const pr = global.SW.project('cheshmeh');
+    pr.pcs = ['a1', 'b2'];
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    assert.ok(!q('button').find((b) => b.textContent.trim().indexOf('Back to the shared folder') === 0));
+    q('button').find((b) => b.textContent.trim() === 'Own copy on the server…').click();
+    await settle();
+    q('.btn', q('.modal').pop()).pop().click();
+    await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/own-copy/cheshmeh').pop().body, { on: true });
+    document.body.querySelector('#modal-root').replaceChildren();
+    pr.copyOf = '~/cheshmeh';
+    global.SW.renderProjects();
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    assert.ok(!q('button').find((b) => b.textContent.trim() === 'Own copy on the server…'));
+    assert.ok(q('button').find((b) => b.textContent.trim().indexOf('Back to the shared folder…') === 0));
+    document.body.click();
+    const n = () => q('.toast').filter((t) => /cheshmeh: 2 new commits pushed — click to Pull/.test(t.textContent)).length;
+    global.SW.pushedNotice({ cheshmeh: { behind: 0 } }, { cheshmeh: { behind: 2 } });
+    assert.strictEqual(n(), 1);
+    global.SW.pushedNotice(undefined, { cheshmeh: { behind: 2 } });
+    global.SW.pushedNotice({ shop: { behind: 0 } }, { shop: { behind: 3 } });
+    assert.strictEqual(q('.toast').filter((t) => /shop: 3/.test(t.textContent)).length, 0, 'a project on one computer only: no notice');
+    global.SW.S.settings.copyPull = 'off';
+    global.SW.pushedNotice({ cheshmeh: { behind: 0 } }, { cheshmeh: { behind: 5 } });
+    assert.ok(!q('.toast').some((t) => /5 new commits/.test(t.textContent)));
+    delete global.SW.S.settings.copyPull;
+    delete pr.copyOf; delete pr.pcs;
+    q('.toast').forEach((t) => t.remove());
   },
 
   async 'sync details show conflicts and resolve one'() {

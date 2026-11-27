@@ -2672,6 +2672,8 @@
         });
       } } : null,
       sync ? { label: 'Not synced…', action: function () { ignoresDialog(p); } } : null,
+      sync && !p.copyOf && (p.pcs || []).length > 1 ? { label: 'Own copy on the server…', action: function () { ownCopyDialog(p, true); } } : null,
+      sync && p.copyOf ? { label: 'Back to the shared folder…', k: 'own copy', action: function () { ownCopyDialog(p, false); } } : null,
       sync ? { label: 'Move folders…', action: function () { moveDialog(p); } } : null,
       sync ? { label: 'Stop syncing…', action: function () {
         confirmDlg('Stop syncing “' + p.name + '”? Files stay on both sides; they just stop syncing. It stays in the list as a server project.', 'Stop syncing', true).then(function (ok) {
@@ -2887,8 +2889,32 @@
     return h('span', { class: 'gbs' }, out);
   }
 
+  // A computer's own server copy (folder@computer): the other computers keep theirs, git push / pull carries changes
+  function ownCopyDialog(p, on) {
+    confirmDlg(on ? '“' + p.name + '” is synced on several computers in one server folder, so each one gets the other’s changes at once. '
+      + 'Give this computer its own server copy (' + p.remote.replace(/\/+$/, '') + '@…)? Changes then go across only when you push and pull.'
+      : 'Sync “' + p.name + '” with the shared server folder ' + p.copyOf + ' again? Both must have nothing uncommitted and be on the same commits. Your copy stays on the server.',
+    on ? 'Own copy' : 'Back to shared').then(function (ok) {
+      if (!ok) return;
+      toast(p.name + ': switching the server folder…', 'ok');
+      api('POST', 'own-copy/' + encodeURIComponent(p.name), { on: on }).then(function (d) {
+        toast(p.name + (on ? ': own copy ' : ': shared folder ') + d.remote + (d.left ? ' (the copy stays at ' + d.left + ')' : ''), 'ok', { timeout: 7000 });
+        refreshProjects();
+      }).catch(fail);
+    });
+  }
+  function pushedNotice(old, now) {
+    if (!old || (S.settings && S.settings.copyPull || 'notify') !== 'notify') return;
+    Object.keys(now).forEach(function (k) {
+      var a = old[k], b = now[k], p = (S.projects || []).filter(function (x) { return x.name === k; })[0];
+      if (!a || !b || !p || !(b.behind > (a.behind || 0)) || !(p.copyOf || (p.pcs || []).length > 1)) return;
+      toast(k + ': ' + plural(b.behind, 'new commit') + ' pushed — click to Pull', 'ok', { sticky: true, onclick: function () { gitDialog(p); } });
+    });
+  }
+
   function refreshGit(name) {
     return api('GET', 'git-summary' + (name ? '?project=' + encodeURIComponent(name) + '&force=1' : '')).then(function (d) {
+      pushedNotice(S.git, d.summary);
       var key = JSON.stringify(Object.keys(d.summary).map(function (k) { var g = d.summary[k]; return [k, g.changes, g.ahead, g.behind, g.conflicts, g.repos, g.branch, g.branches]; }));
       S.git = d.summary;
       if (key !== S.gitKey) { S.gitKey = key; renderProjects(); }
@@ -4471,6 +4497,8 @@
         snd.el,
         chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
       chk('shareDevices', 'Same projects and tabs on every device', 'The installed app and the web version show each other’s projects; chats, Files, Changes and Tasks tabs open and close on all of them.'),
+        chk('ownCopy', 'Own server copy on each computer', 'A project another computer already syncs gets its own server folder (folder@this-computer). Changes go across only with git push / pull.'),
+        h('div', { class: 'row' }, field('When another computer pushes', sel('copyPull', [['notify', 'Tell me (Pull button)'], ['auto', 'Pull by itself when nothing is changed here'], ['off', 'Nothing']]))),
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
           h('button', { class: 'btn sm danger', onclick: uninstallDialog }, 'Uninstall…'))
@@ -5690,7 +5718,7 @@
     confirmDlg: confirmDlg, promptDlg: promptDlg, openModal: openModal, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, sound: sound, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
-    gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
+    pushedNotice: pushedNotice, gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     settingsDialog: function () { settingsDialog(); }, healthDialog: function () { return healthDialog(); },
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }

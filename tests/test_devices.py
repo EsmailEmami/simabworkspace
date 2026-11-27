@@ -1,4 +1,5 @@
 """Projects and open tabs shared between devices (installed app ↔ web) through devices.json on the server."""
+import json
 import os
 import sys
 import tempfile
@@ -147,6 +148,146 @@ class Devices(base.TmpHome):
         self.fake(None, sw.SHARE_PY, [], stdin=b'{"device": "x", "add": [{"key": "files:nope", "spec": {"kind": "files", "project": "nope"}}]}')
         self.assertEqual(self.web.share_sync()["opened"], [])
         self.assertEqual(self.web.sessions, {})
+
+    def test_a_chat_of_another_computer_does_not_open_here_only_on_the_web(self):
+        """Two computers on: a chat opened on one does not open (and work) in the other's app (user 2026-11-27)."""
+        chat = {"kind": "chat", "project": "shop", "resume": "c1"}
+        self.fake(None, sw.SHARE_PY, [], stdin=json.dumps({"device": "desk", "name": "desk", "add": [{"key": "chat:c1", "spec": chat}]}).encode())
+        self.fake(None, sw.SHARE_PY, [], stdin=json.dumps({"device": "webdev", "name": "Web", "add": [{"key": "chat:c2", "spec": dict(chat, resume="c2")}]}).encode())
+        self.fake(None, sw.SHARE_PY, [], stdin=json.dumps({"device": "desk", "name": "desk", "add": [{"key": "files:shop", "spec": {"kind": "files", "project": "shop"}}]}).encode())
+        made = []
+        for app in (self.laptop, self.web):
+            app.store.add_manual({"name": "shop", "remote": "~/shop"}) if "shop" not in self.names(app) else None
+            app._create_session = lambda body, app=app: made.append((app.web, body.get("resume") or body["kind"])) or {}
+            app.share_sync()
+            app.share_sync()
+        self.assertEqual(sorted(x for w, x in made if not w), ["c2", "files"], "the desk's chat stays on the desk")
+        self.assertEqual(sorted(x for w, x in made if w), ["c1", "c2", "files"], "the web follows every chat")
+
+    def share(self, dev, name, projects=(), add=()):
+        self.fake(None, sw.SHARE_PY, [], stdin=json.dumps({"device": dev, "name": name, "projects": list(projects), "add": list(add)}).encode())
+
+    def git_repo(self, d):
+        import subprocess
+        os.makedirs(d)
+        g = ["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(["git", "init", "-q", d], check=True)
+        Path(d, "a.txt").write_text("1")
+        subprocess.run(g + ["add", "."], check=True)
+        subprocess.run(g + ["commit", "-qm", "one"], check=True)
+        return g
+
+    def test_own_copy_names(self):
+        self.assertEqual(sw.copy_base("~/shop@esipc"), "~/shop")
+        self.assertEqual(sw.copy_base("/home/esi/shop"), "")
+        self.assertEqual(sw.layout_key("/home/esi/shop@desk"), "shop", "a copy shares the layout of its folder")
+        self.assertEqual(sw.copy_suffix("ESI-PC.local"), "esi-pc-local")
+        self.assertEqual(sw.home_rel("/home/esi/shop@desk"), "shop@desk")
+
+    def test_own_copy_script_makes_and_checks_the_copy(self):
+        import subprocess
+        g = self.git_repo(os.path.join(self.server_home.name, "shop"))
+        self.assertEqual(self.fake(None, sw.OWN_COPY_PY, ["make", "~/shop", "~/shop@desk"]), {"ok": True})
+        copy = os.path.join(self.server_home.name, "shop@desk")
+        self.assertEqual(Path(copy, "a.txt").read_text(), "1")
+        self.assertIn("already exists", self.fake(None, sw.OWN_COPY_PY, ["make", "~/shop", "~/shop@desk"])["error"])
+        self.assertTrue(self.fake(None, sw.OWN_COPY_PY, ["check", "~/shop", "~/shop@desk"])["ok"])
+        Path(copy, "a.txt").write_text("2")
+        r = self.fake(None, sw.OWN_COPY_PY, ["check", "~/shop", "~/shop@desk"])
+        self.assertFalse(r["ok"])
+        self.assertIn("uncommitted", r["why"][0])
+        gc = ["git", "-C", copy] + g[3:]
+        subprocess.run(gc + ["commit", "-qam", "two"], check=True)
+        self.assertIn("same commit", self.fake(None, sw.OWN_COPY_PY, ["check", "~/shop", "~/shop@desk"])["why"][0])
+
+    def test_a_project_another_computer_syncs_gets_its_own_server_copy(self):
+        """User 2026-11-27: each computer keeps syncing with the server, but gets the other's changes only via git."""
+        self.git_repo(os.path.join(self.server_home.name, "shop"))
+        self.share("lap", "laptop", [{"name": "shop", "remote": "~/shop", "here": True}])
+        desk = self.laptop
+        desk.device_name = lambda: "desk"
+        desk.share_sync()
+        runs = []
+        desk.run_script = lambda argv, **kw: runs.append(argv) or (0, "Project 'shop' added")
+        desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+        self.assertEqual(runs[-1][:2], ["add-server", "~/shop@desk"])
+        self.assertTrue(os.path.isdir(os.path.join(self.server_home.name, "shop@desk")))
+        desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+        self.assertEqual(runs[-1][1], "~/shop@desk", "the copy made before is used again")
+        desk.store.settings["ownCopy"] = False
+        desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+        self.assertEqual(runs[-1][1], "~/shop", "setting off: the shared folder")
+        desk.add_project({"mode": "download", "remote": "~/blog", "name": "blog"})
+        self.assertEqual(runs[-1][1], "~/blog")
+
+    def test_own_copy_and_back_to_the_shared_folder(self):
+        import subprocess
+        self.git_repo(os.path.join(self.server_home.name, "shop"))
+        desk = self.laptop
+        desk.device_name = lambda: "desk"
+        p = {"name": "shop", "remote": "~/shop", "source": "mutagen"}
+        desk._synced = lambda name: p
+        runs = []
+        desk.run_script = lambda argv, **kw: runs.append(argv) or (0, "")
+        self.assertEqual(desk.own_copy("shop", True)["remote"], "~/shop@desk")
+        self.assertEqual(runs[-1], ["move", "shop", "--remote", "~/shop@desk", "--yes", "--no-wait", "--merge-server"])
+        p["remote"] = "~/shop@desk"
+        with self.assertRaises(sw.ApiError):
+            desk.own_copy("shop", True)
+        Path(self.server_home.name, "shop@desk", "a.txt").write_text("changed")
+        with self.assertRaises(sw.ApiError) as e:
+            desk.own_copy("shop", False)
+        self.assertIn("uncommitted", e.exception.message if hasattr(e.exception, "message") else str(e.exception))
+        subprocess.run(["git", "-C", os.path.join(self.server_home.name, "shop@desk"), "checkout", "-q", "a.txt"], check=True)
+        r = desk.own_copy("shop", False)
+        self.assertEqual((r["remote"], r["left"]), ("~/shop", "~/shop@desk"))
+        self.assertEqual(runs[-1][3], "~/shop")
+        self.assertTrue(os.path.isdir(os.path.join(self.server_home.name, "shop@desk")), "the copy stays")
+        import shutil
+        shutil.rmtree(os.path.join(self.server_home.name, "shop@desk"))
+        p["remote"] = "~/shop"
+        desk.run_script = lambda argv, **kw: (1, "boom")
+        with self.assertRaises(sw.ApiError):
+            desk.own_copy("shop", True)
+        self.assertFalse(os.path.isdir(os.path.join(self.server_home.name, "shop@desk")), "the sync could not switch: the new copy is removed")
+
+    def test_web_lists_a_computers_own_copy_and_opens_its_chats_there(self):
+        self.share("lap", "laptop", [{"name": "shop", "remote": "~/shop", "here": True}])
+        self.share("desk", "desk", [{"name": "shop", "remote": "~/shop@desk", "here": True}],
+                   [{"key": "chat:c9", "spec": {"kind": "chat", "project": "shop", "resume": "c9", "remote": "~/shop@desk"}}])
+        made = []
+        self.web._create_session = lambda body: made.append(body["project"]) or {}
+        self.web.share_sync()
+        self.web.share_sync()
+        self.assertIn("shop@desk", self.names(self.web))
+        self.assertEqual(next(p for p in self.web.projects(max_age=0) if p["name"] == "shop@desk")["remote"], "~/shop@desk")
+        self.assertEqual(made, ["shop@desk"], "the desk's chat opens in the desk's copy, not in the laptop's folder")
+        self.laptop.share_sync()
+        self.assertNotIn("shop@desk", self.names(self.laptop), "the installed app does not list another computer's copy")
+
+    def test_auto_pull_only_when_new_commits_and_nothing_changed_here(self):
+        calls = []
+
+        class Repo:
+            def __init__(self, app, p, r, where):
+                self.r = r
+
+            def status(self):
+                return {"behind": 2, "ahead": 0, "files": [] if self.r != "dirty" else ["x"]}
+
+            def run(self, args, timeout=60):
+                calls.append((self.r, args[0]))
+                return 0, ""
+
+        p = {"name": "shop"}
+        with mock.patch.object(sw, "git_repos", return_value={"repos": ["", "dirty"], "where": "server"}), mock.patch.object(sw, "GitRepo", Repo):
+            self.assertTrue(self.laptop._auto_pull(p, {"behind": 0}, {"behind": 2}))
+            self.assertEqual(calls, [("", "pull")], "a repo with changes is left alone")
+            calls.clear()
+            self.assertFalse(self.laptop._auto_pull(p, {"behind": 2}, {"behind": 2}), "nothing new")
+            self.assertFalse(self.laptop._auto_pull(p, {"behind": 0}, {"behind": 2, "changes": 1}))
+            self.assertFalse(self.laptop._auto_pull(p, {"behind": 0}, {"behind": 2, "ahead": 1}))
+            self.assertEqual(calls, [])
 
     def proj(self, app, name):
         return next(p for p in app.projects(max_age=0) if p["name"] == name)

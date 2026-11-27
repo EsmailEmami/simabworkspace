@@ -2041,6 +2041,19 @@ wait_sync() {{ echo "WAIT $*"; return 0; }}
             self.assertNotIn("terminate", r.stdout)
             self.assertTrue(os.path.isdir(old_l))
 
+    def test_move_to_own_server_copy_with_merge_server(self):
+        """Own copy (folder@computer): the server folder already has the same files — used as is, local untouched."""
+        with tempfile.TemporaryDirectory() as home:
+            old_l, old_r = os.path.join(home, "shop"), os.path.join(home, "server", "shop")
+            os.makedirs(old_l); os.makedirs(old_r)
+            copy = old_r + "@desk"; os.makedirs(copy); Path(copy, "a").write_text("1")
+            r = self.run_move(home, ["shop", "--remote", copy, "--yes", "--no-wait"], old_l, old_r)
+            self.assertNotEqual(r.returncode, 0, "without --merge-server a full folder is refused")
+            r = self.run_move(home, ["shop", "--remote", copy, "--yes", "--no-wait", "--merge-server"], old_l, old_r)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn(f"CREATE name=shop local={old_l} url=esi@h:225:{copy} git=on", r.stdout)
+            self.assertTrue(os.path.isdir(old_r) and os.path.isdir(old_l), "the shared folder stays for the other computer")
+
     def run_ignore(self, args, ignores=("node_modules",), create_fails=False):
         sess = json.dumps([{"name": "shop", "alpha": {"path": "/l/shop"}, "beta": {"host": "h", "user": "esi", "port": 225, "path": "/r/shop"},
                             "configuration": {"ignores": list(ignores)}}])
@@ -2548,7 +2561,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.70.2"', text)
+        self.assertIn('VERSION="1.71.0"', text)
 
 
 if __name__ == "__main__":

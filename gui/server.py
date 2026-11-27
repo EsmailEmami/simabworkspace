@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.70.2"
+VERSION = "1.71.0"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -357,6 +357,8 @@ DEFAULT_SETTINGS = {
     "gitAutoFetch": True,        # …and `git fetch` every few minutes so "behind" is current
     "dockerWatch": True,         # check the projects' docker containers; tell me when one crashes
     "shareDevices": True,        # same projects + open tabs on every device (installed app ↔ web)
+    "ownCopy": True,             # a project another computer already syncs gets its own server copy (<folder>@<computer>)
+    "copyPull": "notify",        # the other computer pushed: notify (Pull button) | auto (pull when clean) | off
     "port": 0,                   # remembered so the window keeps the same address
     "starred": [],               # starred commands (Ctrl+Shift+P) and project ⋯ menu entries, shown first
 }
@@ -366,6 +368,7 @@ SETTING_CHOICES = {
     "composer": ("always", "claude", "never"),
     "chatMode": ("default", "acceptEdits", "plan", "auto"),
     "chatEffort": ("low", "medium", "high", "xhigh", "max"),
+    "copyPull": ("notify", "auto", "off"),
 }
 SETTING_RANGES = {"fontSize": (9, 32), "scrollback": (1000, 100000), "port": (0, 65535), "guardDropPct": (1, 100),
                   "guardDropFiles": (0, 10 ** 7), "guardSnapEvery": (0, 1440), "guardSnapKeep": (1, 500)}
@@ -2744,6 +2747,51 @@ try:
 except (OSError, subprocess.SubprocessError) as e:
     print(json.dumps({"error": "the computer of this project cannot be reached: " + str(e)[:200]}))
 '''
+
+
+# A computer's own copy of a shared project folder on the server (<folder>@<computer>):
+# make <copy> from <base> | check both are clean and on the same commits (before going back) | remove <copy>
+OWN_COPY_PY = r"""
+import json, os, shutil, subprocess, sys
+op, base, copy = sys.argv[1], os.path.expanduser(sys.argv[2]), os.path.expanduser(sys.argv[3])
+def repos(top):
+    out = []
+    for d, subs, _ in os.walk(top):
+        if ".git" in subs:
+            out.append(os.path.relpath(d, top))
+        subs[:] = [x for x in subs if x not in (".git", "node_modules", "vendor", "dist")]
+        if d[len(top):].count(os.sep) >= 4:
+            subs[:] = []
+    return out
+def git(d, *a):
+    r = subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True, timeout=60)
+    return r.stdout.strip() if r.returncode == 0 else None
+if op == "make":
+    if os.path.lexists(copy):
+        print(json.dumps({"error": copy + " already exists on the server"})); sys.exit()
+    if not os.path.isdir(base):
+        print(json.dumps({"error": "not a folder on the server: " + base})); sys.exit()
+    try:
+        shutil.copytree(base, copy, symlinks=True)
+    except (OSError, shutil.Error) as e:
+        shutil.rmtree(copy, ignore_errors=True)
+        print(json.dumps({"error": "could not copy: " + str(e)[:200]})); sys.exit()
+    print(json.dumps({"ok": True}))
+elif op == "check":
+    bad = []
+    for r in sorted(set(repos(copy)) | set(repos(base))):
+        c, b = os.path.join(copy, r), os.path.join(base, r)
+        name = os.path.basename(base) if r == "." else r
+        if git(c, "status", "--porcelain", "--untracked-files=no") or git(b, "status", "--porcelain", "--untracked-files=no"):
+            bad.append(name + ": uncommitted changes — commit them first")
+        elif git(c, "rev-parse", "HEAD") != git(b, "rev-parse", "HEAD"):
+            bad.append(name + ": not on the same commit — push here and pull in the shared folder (or the other way)")
+    print(json.dumps({"ok": not bad, "why": bad[:20]}))
+elif op == "remove":
+    if os.path.isdir(copy) and copy.rstrip("/") != base.rstrip("/"):
+        shutil.rmtree(copy, ignore_errors=True)
+    print(json.dumps({"ok": True}))
+"""
 
 
 def remote_python(conf: ServerConf, code: str, args: list, multiplex=True, timeout=30, stdin: bytes = None):
@@ -5755,8 +5803,29 @@ def share_run_commands(p: dict) -> list:
     return out[:50]
 
 
+COPY_RE = re.compile(r"^(.*[^/@])@([a-z0-9][a-z0-9-]{0,39})$")
+
+
+def copy_suffix(device_name: str) -> str:
+    """The computer's part of its own server copy: <folder>@<this>."""
+    return (re.sub(r"[^a-z0-9-]+", "-", str(device_name or "").lower()).strip("-")[:40] or "pc").lstrip("-") or "pc"
+
+
+def copy_base(remote) -> str:
+    """~/shop@desk → ~/shop (a computer's own copy of a shared folder); else ""."""
+    m = COPY_RE.match(str(remote or "").strip().rstrip("/"))
+    return m.group(1) if m else ""
+
+
 def layout_key(remote) -> str:
-    """Groups / order are shared by the project's server folder: devices may name the same folder differently."""
+    """Groups / order are shared by the project's server folder: devices may name the same folder differently.
+    A computer's own copy (<folder>@<computer>) counts as that folder."""
+    r = str(remote or "").strip().rstrip("/")
+    return home_rel(copy_base(r) or r)
+
+
+def home_rel(remote) -> str:
+    """~/x, /home/esi/x → x (the same server folder written two ways)."""
     r = str(remote or "").strip().rstrip("/")
     if r.startswith("~/"):
         r = r[2:]
@@ -6533,6 +6602,9 @@ def pinned(cwd, why=False):
     how = "project" if dev else ""
     if not dev and isinstance(m.get("*"), str) and m["*"]:
         dev, how = m["*"], "default"
+    me = os.environ.get("SIMAB_PREFER", "")
+    if not dev and me.isalnum() and any(d["id"] == me for d in devices()):
+        dev, how = me, "own"                       # a chat belongs to the computer it was opened on: never another one
     return (dev, how) if why else dev
 
 
@@ -6542,7 +6614,7 @@ def first_here(devs):
     return sorted(devs, key=lambda d: d["id"] != me) if me else devs
 
 
-CHOSEN = {"chat": "chosen for this chat", "project": "chosen for this project", "default": "your default computer"}
+CHOSEN = {"own": "the computer this chat was opened on", "chat": "chosen for this chat", "project": "chosen for this project", "default": "your default computer"}
 
 
 class RunNote:
@@ -10569,6 +10641,8 @@ class App:
             return cached
         p = merge_projects([] if self.web else mutagen_sessions(), self.store.manual(), self.store.data["projects"])
         for x in p:
+            if copy_base(x.get("remote")):
+                x["copyOf"] = copy_base(x.get("remote"))      # this computer's own server copy of a shared folder
             al = None if self.web or not x.get("sync") else self.guard.alert_for(x["name"])
             if al:                      # paused by the sync guard: shown under the project, Resume anyway asks first
                 x["sync"].update(guard={"kind": al.get("kind"), "reason": al.get("reason"), "t": al.get("t")},
@@ -10576,6 +10650,11 @@ class App:
         have = {x["name"] for x in p} | {x.get("remote") for x in p if x.get("remote")}
         hidden = set(self.store.db.get("hiddenShared", []) or [])      # shared projects removed from this device's list
         for sp in self._share_projects:
+            sp = dict(sp)
+            if (self.web and copy_base(sp["remote"]) and sp["remote"] not in have and sp["remote"] not in hidden
+                    and sp["name"] in have):           # web: a computer's own copy is a project of its own
+                sp["name"] = sp["name"] + "@" + COPY_RE.match(sp["remote"].rstrip("/")).group(2)
+                sp["title"] = sp.get("title") or ""
             if sp["name"] in have or sp["remote"] in have or sp["remote"] in hidden:
                 continue
             have |= {sp["name"], sp["remote"]}
@@ -10849,8 +10928,11 @@ class App:
             mine = self._share_tabs_mine()
             first = self._share_seen is None          # first round: only read (what is open / closed elsewhere)
             seen = set() if first else self._share_seen
+            rems = {x["name"]: x.get("remote") or "" for x in self.projects(max_age=10)}
             add = [] if first else [
-                {"key": k, "title": s.title, "spec": {x: s.spec.get(x) for x in ("kind", "project", "resume", "named") if s.spec.get(x)}}
+                {"key": k, "title": s.title, "spec": dict({x: s.spec.get(x) for x in ("kind", "project", "resume", "named") if s.spec.get(x)},
+                                                          **({"remote": rems[s.spec["project"]]} if s.spec.get("kind") == "chat"
+                                                             and rems.get(s.spec.get("project") or "") else {}))}
                 for k, s in mine.items() if k not in seen]
             # only tabs the user closed here (quitting / a restart closes nothing elsewhere)
             keep = dict(self._share_keep)
@@ -10905,9 +10987,19 @@ class App:
             for k, t in (res.get("tabs") or {}).items():
                 if k in mine or k in seen or not isinstance(t, dict):
                     continue
-                sp = t.get("spec") or {}
+                sp = dict(t.get("spec") or {})
+                if sp.get("remote"):            # a chat works in its server folder: a computer's own copy has its own name here
+                    same = [x["name"] for x in self.projects(max_age=10) if home_rel(x.get("remote")) == home_rel(sp["remote"])]
+                    if same:
+                        sp["project"] = same[0]
+                    elif copy_base(sp["remote"]):
+                        continue               # another computer's own copy, not listed here
                 if sp.get("project") and sp["project"] not in names:
                     continue                   # that project is not here
+                by = (res.get("devices") or {}).get(t.get("by")) or {}
+                if (sp.get("kind") == "chat" and not self.web and t.get("by") not in ("", None, me)
+                        and isinstance(by, dict) and by.get("name") != "Web"):
+                    continue                   # a chat belongs to the computer it was opened on: only web / phone follow it
                 body = {x: sp.get(x) for x in ("kind", "project", "resume", "mode", "model", "effort", "named") if sp.get(x)}
                 if body.get("kind") == "chat":
                     body["where"] = "server"
@@ -11548,6 +11640,46 @@ class App:
         self.activity.add("move", name, "moved folders" + (" → " + local if local else "") + (" | server → " + remote if remote else ""))
         return {"ok": True, "output": out[-1500:]}
 
+    def _copy_of_other(self, remote: str) -> bool:
+        """Another computer of mine already syncs this server folder (its devices.json snapshot says `here`)."""
+        k = layout_key(remote)
+        return bool(k) and any(sp.get("here") and layout_key(sp.get("remote")) == k for sp in self._share_projects)
+
+    def _make_copy(self, conf, base: str, reuse=False) -> str:
+        new = base.rstrip("/") + "@" + copy_suffix(self.device_name())
+        r = remote_python(conf, OWN_COPY_PY, ["make", base, new], multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=900)
+        err = (r or {}).get("error") if isinstance(r, dict) else "no answer from the server"
+        if err and not (reuse and "already exists" in err):
+            raise ApiError(400, err)
+        return new
+
+    def own_copy(self, name: str, on: bool) -> dict:
+        """on: this computer syncs its own server copy <folder>@<computer>, the other computers keep theirs;
+        changes go across only with git push / pull. off: back to the shared folder (only when both are clean
+        and on the same commits; the copy stays on the server)."""
+        p = self._synced(name)
+        remote = str(p.get("remote") or "")
+        base, conf = copy_base(remote), self._project_conf(p)
+        if on:
+            if base:
+                raise ApiError(400, "this computer already has its own copy")
+            target = self._make_copy(conf, remote)
+        else:
+            if not base:
+                raise ApiError(400, "this project already uses the shared folder")
+            r = remote_python(conf, OWN_COPY_PY, ["check", base, remote], multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=120)
+            if not isinstance(r, dict) or not r.get("ok"):
+                raise ApiError(409, "Not yet — " + "; ".join((r or {}).get("why") or ["could not check the folders"]))
+            target = base
+        code, out = self.run_script(["move", name, "--remote", target, "--yes", "--no-wait", "--merge-server"], timeout=900)
+        self.invalidate()
+        if code != 0:
+            if on:
+                remote_python(conf, OWN_COPY_PY, ["remove", remote, target], multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=300)
+            raise ApiError(400, self.script_error(out, "could not switch the server folder"))
+        self.activity.add("own-copy" if on else "shared-folder", name, ("own copy " if on else "shared folder ") + target)
+        return {"ok": True, "remote": target, "left": "" if on else remote}
+
     @staticmethod
     def _clean_ignores(ignores) -> list:
         if not isinstance(ignores, list) or len(ignores) > 200:
@@ -11740,6 +11872,9 @@ class App:
         if mode == "download":
             if not remote:
                 raise ApiError(400, "pick a server folder")
+            if (body.get("ownCopy", self.store.settings.get("ownCopy", True)) and not copy_base(remote)
+                    and self._copy_of_other(remote)):
+                remote = self._make_copy(self.conf, remote, reuse=True)      # another computer syncs it: own copy
             argv += ["add-server", remote, "--yes", "--no-wait", "--git", git]
             if local:
                 argv += ["--local", os.path.abspath(os.path.expanduser(local))]
@@ -12249,6 +12384,24 @@ class App:
                 cache[project] = self.git_summary_one(p)
         return dict(cache)
 
+    def _auto_pull(self, p: dict, before: dict, now: dict) -> bool:
+        """Setting copyPull = auto: new commits came (pushed from another computer) and nothing is changed
+        or unpushed here → git pull --ff-only in every repo that is behind."""
+        if not now.get("behind") or now.get("behind", 0) <= before.get("behind", 0) or now.get("changes") or now.get("ahead") or now.get("conflicts"):
+            return False
+        info, done = git_repos(self, p), False
+        for r in info["repos"]:
+            repo = GitRepo(self, p, r, info["where"])
+            try:
+                st = repo.status()
+                if st.get("behind") and not st.get("ahead") and not st.get("files"):
+                    code, out = repo.run(["pull", "--ff-only", "--quiet"], timeout=120)
+                    done = done or code == 0
+                    self.activity.add("git-pull", p["name"], "pulled by itself (pushed from another computer)" if code == 0 else out[-200:], repo=r)
+            except ApiError:
+                continue
+        return done
+
     def git_watch_loop(self, interval=30, fetch_every=300):
         last_fetch = {}
         while not getattr(self, "_stopping", False):
@@ -12258,9 +12411,14 @@ class App:
                 for p in self.projects(max_age=20):
                     if not (p.get("localExists") or p.get("remote")):
                         continue
-                    fetch = bool(s.get("gitAutoFetch", True)) and time.time() - last_fetch.get(p["name"], 0) > fetch_every
+                    many = len(p.get("pcs") or []) > 1 or bool(p.get("copyOf"))      # pushed from another computer
+                    every = min(fetch_every, 60) if many and s.get("copyPull", "notify") != "off" else fetch_every
+                    fetch = bool(s.get("gitAutoFetch", True)) and time.time() - last_fetch.get(p["name"], 0) > every
                     try:
+                        before = cache.get(p["name"]) or {}
                         cache[p["name"]] = self.git_summary_one(p, fetch=fetch)
+                        if many and s.get("copyPull") == "auto" and self._auto_pull(p, before, cache[p["name"]]):
+                            cache[p["name"]] = self.git_summary_one(p)
                         if fetch:
                             last_fetch[p["name"]] = time.time()
                     except Exception:  # noqa: BLE001 - a bad repo must not stop the watcher
@@ -15659,6 +15817,8 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "move") and len(parts) == 2:
             b = self._body()
             return app.move_project(parts[1], b.get("local"), b.get("remote"))
+        if route == ("POST", "own-copy") and len(parts) == 2:
+            return app.own_copy(parts[1], bool(self._body().get("on")))
         if route == ("POST", "uninstall"):
             if self._body().get("confirm") != "uninstall":
                 raise ApiError(400, "type uninstall to confirm")

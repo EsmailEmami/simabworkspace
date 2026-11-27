@@ -65,8 +65,15 @@
       return isOn(pd) ? { on: 'computers', ok: true, dev: pn, text: 'Commands run on ' + pn + ' (' + why + '; files synced with the server)' }
         : { on: 'computers', ok: false, dev: pn, text: pn + ' (' + why + ') is not connected — Claude cannot run its commands' };
     }
-    var on = online(d).filter(function (x) { return hasProject(name, x.id); });
     var me = prefer === undefined ? d.self : prefer;
+    var md = (d.devices || []).filter(function (x) { return x.id === me; })[0];
+    if (md) {                                        // a chat belongs to the computer it was opened on: never another one
+      var mw = md.id === d.self ? 'this computer' : 'the computer this chat was opened on';
+      return !isOn(md) ? { on: 'computers', ok: false, dev: md.name, text: md.name + ' (' + mw + ') is not connected — Claude cannot run its commands there' }
+        : !hasProject(name, md.id) ? { on: 'computers', ok: false, dev: md.name, text: md.name + ' (' + mw + ') has not got this project — sync it there or pick another computer (⚒)' }
+        : { on: 'computers', ok: true, dev: md.name, text: 'Commands run on ' + md.name + ' (' + mw + '; files synced with the server)' };
+    }
+    var on = online(d).filter(function (x) { return hasProject(name, x.id); });
     var one = on.filter(function (x) { return x.id === me; })[0] || on[0];
     return one ? { on: 'computers', ok: true, dev: one.name, text: 'Commands run on ' + one.name
         + (one.id === d.self ? ' (this computer' : one.id === me ? ' (the computer this chat was opened on' : me ? ' (the computer this chat was opened on is off' : ' (the first connected one')

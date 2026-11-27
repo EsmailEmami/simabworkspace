@@ -283,7 +283,8 @@ class EndToEnd(unittest.TestCase):
 
     def onpc_proc(self, *args, cwd=None, chat="", env=None):
         return subprocess.Popen([sys.executable, self.onpc_file] + list(args), cwd=cwd or os.path.join(self.srv_dir, "web"),
-                                env=dict(os.environ, HOME=self.home, SIMAB_CHAT=chat, **(env or {})),
+                                env=dict({k: v for k, v in os.environ.items() if k not in ("SIMAB_PREFER", "SIMAB_PC")},
+                                         HOME=self.home, SIMAB_CHAT=chat, **(env or {})),   # never this session's own computer
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def onpc(self, *args, cwd=None, chat="", env=None):
@@ -492,6 +493,19 @@ class EndToEnd(unittest.TestCase):
         Path(self.pcdir, "chatpins.json").write_text(json.dumps({key: me}))
         self.assertEqual(self.onpc("echo x", chat=key)[:2], (0, "x\n"), "the chat beats the project")
         self.assertIn("chosen for this project", self.onpc("echo x")[2], "another chat keeps the project's choice")
+
+    def test_a_chat_runs_only_on_the_computer_it_was_opened_on(self):
+        """Two computers on: a chat opened on one never sends commands to the other (user 2026-11-27)."""
+        me, other = self.hub.cfg()["id"], "ffffffffffff"
+        Path(self.pcdir, other + ".json").write_text(json.dumps({"id": other, "name": "desk"}))   # known, not connected
+        code, out, err = self.onpc("echo x", env={"SIMAB_PREFER": other})
+        self.assertEqual((code, out), (0, "x\n"), "its computer is off, the folder is here: the server, not this one")
+        self.assertIn("the computer this chat was opened on", err)
+        self.assertEqual(self.onpc("echo x", env={"SIMAB_PREFER": me})[:2], (0, "x\n"))
+        self.assertEqual(self.onpc("echo x", env={"SIMAB_PREFER": "0123456789ab"})[:2], (0, "x\n"),
+                         "a computer removed since: any connected one")
+        Path(self.pcdir, "pins.json").write_text(json.dumps({os.path.realpath(self.srv_dir): me}))
+        self.assertEqual(self.onpc("echo x", env={"SIMAB_PREFER": other})[:2], (0, "x\n"), "a computer chosen by the user wins")
 
     def test_web_and_phone_see_and_answer_the_question(self):
         """PC_BRIDGE_PY (on the server as the user) asks the computer over its socket."""

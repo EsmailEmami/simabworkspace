@@ -2309,6 +2309,19 @@ class SyncDetailsAndConflicts(TmpHome):
                 with self.assertRaises(sw.ApiError):
                     self.app.resolve_conflict("shop", *bad)
 
+    def test_linux_window_on_wayland_uses_xwayland(self):
+        # Wayland ignores --class → the dock showed a gear; XWayland keeps WM_CLASS = StartupWMClass
+        with mock.patch.object(sw, "is_wsl", return_value=False), mock.patch.object(sw.sys, "platform", "linux"), \
+                mock.patch.object(sw.shutil, "which", side_effect=lambda b: "/usr/bin/" + b if b == "google-chrome" else None):
+            with mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}):
+                c = sw.browser_candidates("http://127.0.0.1:1/#t=a", "P")
+            self.assertEqual(c[0][0], "google-chrome")
+            self.assertIn("--class=simabworkspace", c[0])
+            self.assertIn("--ozone-platform=x11", c[0])
+            with mock.patch.dict(os.environ, {"DISPLAY": ":0"}), mock.patch.dict(os.environ):
+                os.environ.pop("WAYLAND_DISPLAY", None)
+                self.assertNotIn("--ozone-platform=x11", sw.browser_candidates("http://127.0.0.1:1/", "P")[0])
+
     def test_linux_shortcut(self):
         with mock.patch.dict(os.environ, {"HOME": self.tmp.name}), mock.patch.object(sw, "is_wsl", return_value=False), \
                 mock.patch.object(sw.sys, "platform", "linux"):
@@ -2535,7 +2548,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.70.1"', text)
+        self.assertIn('VERSION="1.70.2"', text)
 
 
 if __name__ == "__main__":

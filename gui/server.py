@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.70.1"
+VERSION = "1.70.2"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -16068,6 +16068,9 @@ def browser_candidates(url: str, profile: str) -> list:
                 out.append(["open", "-na", name, "--args"] + app_args)
         out.append(["open", url])
     else:
+        if os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"):
+            # Wayland ignores --class (app_id = chrome-127.0.0.1…: a gear in the dock); XWayland keeps it
+            app_args = app_args + ["--ozone-platform=x11"]
         for b in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
                   "microsoft-edge", "microsoft-edge-stable", "brave-browser", "vivaldi"):
             if shutil.which(b):

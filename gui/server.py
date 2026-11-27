@@ -13160,6 +13160,24 @@ class App:
         self.activity.add("sync-" + action, name, {"flush": "sync now", "pause": "sync paused", "resume": "sync resumed"}[action])
         return {"ok": True}
 
+    def guard_recheck_all(self, delay: float = 20) -> list:
+        """App start: every project the guard paused is checked again (a normal resume); the ones that look right
+        now (the disk came back, a fixed count rule) go on by themselves, the rest stay paused. Returns the resumed."""
+        if delay:
+            time.sleep(delay)
+        done = []
+        for name in list(self.guard.alerts):
+            try:
+                self.sync_action(name, "resume")
+                done.append(name)
+            except ApiError:
+                pass
+            except Exception:  # noqa: BLE001 — never let one project stop the others
+                pass
+        if done:
+            self.activity.add("sync-resume", ", ".join(done), "resumed after a check at start")
+        return done
+
     def sync_approve(self, name: str) -> dict:
         """Resume anyway, after a guard pause the user checked."""
         sess = next((x for x in mutagen_sessions() if x.get("name") == name), None)
@@ -15936,6 +15954,7 @@ def serve(foreground_msg=True):
     except (OSError, ApiError):
         pass
     threading.Thread(target=app.guard.loop, daemon=True).start()
+    threading.Thread(target=app.guard_recheck_all, daemon=True).start()
     threading.Thread(target=app.git_watch_loop, daemon=True).start()
     threading.Thread(target=app.docker_watch_loop, daemon=True).start()
     threading.Thread(target=app.start_tunnels, daemon=True).start()

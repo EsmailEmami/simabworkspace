@@ -2371,6 +2371,14 @@
       foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Keep paused'), go] });
   }
 
+  // Check again: a normal resume — the guard checks both folders again and resumes only when they look right
+  function guardRecheck(p, btn, done) {
+    if (btn) btn.disabled = true;
+    api('POST', 'sync/' + encodeURIComponent(p.name) + '/resume').then(function () {
+      toast(p.name + ': looks right now, sync resumed', 'ok'); setTimeout(refreshProjects, 600); if (done) done();
+    }).catch(function (e) { if (btn) btn.disabled = false; fail(e); if (done) done(); });
+  }
+
   function syncAction(p, action) {
     api('POST', 'sync/' + encodeURIComponent(p.name) + '/' + action).then(function () {
       toast({ flush: 'Syncing…', pause: 'Sync paused', resume: 'Sync resumed' }[action], 'ok');
@@ -2545,6 +2553,7 @@
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
       sync ? { header: 'Sync · ' + (p.sync ? p.sync.label : '') } : null,
+      sync && p.sync.guard ? { label: 'Check again', action: function () { guardRecheck(p); } } : null,
       sync && p.sync.guard ? { label: 'Resume anyway…', action: function () { guardApprove(p); } } : null,
       sync ? { label: 'Sync now', action: function () { syncAction(p, 'flush'); } } : null,
       sync ? (p.sync && p.sync.paused ? { id: 'Pause / resume sync', label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { id: 'Pause / resume sync', label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
@@ -4602,6 +4611,7 @@
             d.error ? kv('last error', d.error, 'err') : null,
             isErr ? h('div', { class: 'kv' }, h('span', { class: 'k' }), h('span', { class: 'v muted', style: 'font-size:12px' }, 'Click Reconnect to restore the sync after a network outage.')) : null)];
         if (d.guard) rows.unshift(h('div', { class: 'add-err', style: 'margin-bottom:10px' }, 'Paused by the sync guard: ' + d.guard.reason + ' ',
+          h('button', { class: 'btn sm', onclick: function (ev) { guardRecheck(d, ev.currentTarget, load); } }, 'Check again'), ' ',
           h('button', { class: 'btn sm', onclick: function () { guardApprove(d, load); } }, 'Resume anyway…')));
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
           h('span', null, progressLabel(d.progress))));

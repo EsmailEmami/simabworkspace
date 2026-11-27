@@ -255,6 +255,23 @@ class GuardTest(unittest.TestCase):
         self.assertIn("lost its .simab-root", self.f.g.alert_for("p")["reason"])
         self.assertTrue(Path(self.rem, "api/f0.txt").exists())
 
+    def test_app_start_checks_every_paused_project_again(self):
+        # the ones that look right now resume (a normal resume = the guard checks), the rest stay paused
+        tried, logged = [], []
+
+        def action(name, act):
+            tried.append((name, act))
+            if name == "bad":
+                raise sw.ApiError(409, "Kept paused: differ")
+            if name == "boom":
+                raise RuntimeError("x")
+            return {"ok": True}
+        stub = mock.Mock(guard=mock.Mock(alerts={"ok1": {}, "bad": {}, "boom": {}, "ok2": {}}), sync_action=action)
+        stub.activity.add = lambda *a, **k: logged.append(a)
+        self.assertEqual(sw.App.guard_recheck_all(stub, 0), ["ok1", "ok2"])
+        self.assertEqual(sorted(tried), [(n, "resume") for n in ("bad", "boom", "ok1", "ok2")])
+        self.assertEqual(logged[0][1], "ok1, ok2")
+
     def test_missing_folder_pauses(self):
         self.adopt()
         shutil.rmtree(self.loc)

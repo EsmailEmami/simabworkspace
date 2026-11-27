@@ -1175,6 +1175,11 @@ const tests = {
     await settle();
     const md = q('.modal').pop();
     assert.match(md.textContent, /Paused by the sync guard: The folder on this computer lost its \.simab-root/);
+    const n0 = calls.length;
+    q('button', md).find((b) => b.textContent === 'Check again').click();      // a normal resume: the guard checks again
+    await settle();
+    assert.ok(calls.slice(n0).some((c) => c.url === '/api/sync/cheshmeh/resume' && c.method === 'POST'));
+    assert.ok(!calls.slice(n0).some((c) => c.url === '/api/sync/cheshmeh/approve'));
     q('button', md).find((b) => b.textContent === 'Resume anyway…').click();
     await settle();
     const ask = q('.modal').pop();

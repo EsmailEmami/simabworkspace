@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.69.0"
+VERSION = "1.69.1"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -5147,7 +5147,12 @@ class SyncGuard:
 
     @staticmethod
     def _ignores(sess: dict) -> list:
-        return [str(x) for x in ((sess.get("configuration") or {}).get("ignores") or [])][:200]
+        """The session's Not synced list (+ .git etc. when Git is off): what the file counts must skip too."""
+        cfg = sess.get("configuration") or {}
+        ign = [str(x) for x in (cfg.get("ignores") or [])][:200]
+        if str(cfg.get("ignoreVCSMode") or "default") in ("ignore", "1"):
+            ign += [".git", ".svn", ".hg", ".bzr"]
+        return ign
 
     def disk(self, path: str, r: dict, strict=False):
         """Why this folder is not the synced one on its disk: made by another user (docker / sudo), its disk

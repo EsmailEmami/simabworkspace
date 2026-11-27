@@ -274,10 +274,16 @@ class DropWatch:
         return None
 
 
-def _ignored(name: str, ignores) -> bool:
+def _ignored(rel: str, ignores) -> bool:
+    """Mutagen's rule: a pattern with a "/" inside (docker/data, /dist) matches the path from the root,
+    one without matches the name at any depth. rel is the path from the root ("a/b/c") or just a name."""
+    rel = rel.replace(os.sep, "/").strip("/")
+    name = rel.rsplit("/", 1)[-1]
     for pat in ignores or ():
         p = str(pat).strip().strip("/")
-        if p and not p.startswith("!") and fnmatch.fnmatch(name, p):
+        if not p or str(pat).strip().startswith("!"):
+            continue
+        if fnmatch.fnmatch(rel if "/" in p or str(pat).strip().startswith("/") else name, p):
             return True
     return False
 
@@ -294,16 +300,17 @@ def count_files(root: str, ignores=(), cap: int = 500000) -> int:
     """Files under root (ignored names skipped), -1 when the folder cannot be read. Stops counting at cap."""
     if not os.path.isdir(root):
         return -1
-    n, stack = 0, [root]
+    n, stack = 0, [(root, "")]
     while stack and n < cap:
-        d = stack.pop()
+        d, rel = stack.pop()
         try:
             with os.scandir(d) as it:
                 for e in it:
-                    if _ignored(e.name, ignores):
+                    r = rel + "/" + e.name if rel else e.name
+                    if _ignored(r, ignores):
                         continue
                     if e.is_dir(follow_symlinks=False):
-                        stack.append(e.path)
+                        stack.append((e.path, r))
                     else:
                         n += 1
         except OSError:
@@ -334,11 +341,12 @@ def _copy_linked(src: str, dst: str, prev: str, excludes):
     """Python fallback for rsync --link-dest: unchanged files are hard links to the previous snapshot."""
     for cur, dirs, files in os.walk(src):
         rel = os.path.relpath(cur, src)
-        dirs[:] = [x for x in dirs if not _ignored(x, excludes)]
+        base = "" if rel == "." else rel + "/"
+        dirs[:] = [x for x in dirs if not _ignored(base + x, excludes)]
         out = os.path.normpath(os.path.join(dst, rel))
         os.makedirs(out, exist_ok=True)
         for fn in files:
-            if _ignored(fn, excludes):
+            if _ignored(base + fn, excludes):
                 continue
             s, t = os.path.join(cur, fn), os.path.join(out, fn)
             try:

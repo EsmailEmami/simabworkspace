@@ -109,6 +109,25 @@ class MarkerTest(unittest.TestCase):
             self.assertEqual(sg.count_files(t, ["node_modules"]), 41)
             self.assertEqual(sg.count_files(t + "/nope"), -1)
 
+    def test_count_skips_path_patterns_and_vcs(self):
+        # docker/data (a "/" inside) and .git with Git off are not synced: counting them made every
+        # project look "This computer has 87331 files, the server 15262"
+        with tempfile.TemporaryDirectory() as t:
+            tree(t)
+            for d in ("docker/data/pg", ".git/objects", "web/docker/data"):
+                os.makedirs(os.path.join(t, d), exist_ok=True)
+                for i in range(5):
+                    Path(t, d, f"f{i}").write_text("x")
+            ign = ["node_modules", "docker/data"]
+            self.assertEqual(sg.count_files(t, ign), 41 + 5 + 5)    # web/docker/data stays (rooted pattern)
+            self.assertEqual(sg.count_files(t, ign + [".git"]), 41 + 5)
+            self.assertTrue(sg._ignored("a/b/node_modules", ["node_modules"]))
+            self.assertTrue(sg._ignored("dist", ["/dist"]))
+            self.assertFalse(sg._ignored("web/dist", ["/dist"]))
+            vcs = sw.SyncGuard._ignores({"configuration": {"ignores": ["x"], "ignoreVCSMode": "ignore"}})
+            self.assertIn(".git", vcs)
+            self.assertNotIn(".git", sw.SyncGuard._ignores({"configuration": {"ignores": ["x"]}}))
+
 
 class DiskTest(unittest.TestCase):
     """pc: docker made /media/me/DISK2/sync/shop (root) before udisks mounted the disk → DISK21."""

@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.69.1  2026-11-27  Sync guard: file counts skip what the sync skips (docker/data and other paths with a /, .git when Git is off) — no more "This computer has N files, the server M" pause on every project
 #    1.69.0  2026-11-26  Sync guard: a .simab-root marker on both sides; a folder that lost it (disk not mounted), a nearly empty side, a folder made by root (docker) or on the wrong disk (DISK2 → DISK21), a mass delete or a lost top folder pauses the sync; the root is never auto-created; onpc says when it rewrites a path (Resume anyway asks); server snapshots before each resume and every 30 min, syncguard.py restore
 #    1.65.18 2026-11-23  A project added on another device can be removed from this list; setting "Keep the message box shown" in chats
 #    1.65.17 2026-11-23  Mac: a project put in a group no longer jumps back for a moment (a refresh asked before the move is dropped)
@@ -412,7 +413,7 @@
 
 set -u -o pipefail
 
-VERSION="1.69.0"
+VERSION="1.69.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

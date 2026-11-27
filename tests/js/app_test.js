@@ -1535,6 +1535,60 @@ const tests = {
     assert.ok(calls.some((c) => c.method === 'DELETE' && c.url === '/api/sessions/' + chat.id), 'closed');
   },
 
+  async 'tab drag: a gap opens where the tab lands, the tab moves there on drop'() {
+    const SW = global.SW, S = SW.S;
+    for (let i = 0; i < 3; i++) { await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle(); }
+    const g = S.active.group;
+    const [a, b, c] = g.tabs.slice(-3);
+    const place = () => g.tabs.forEach((t, k) => { t.el.getBoundingClientRect = () => ({ left: k * 100, top: 0, width: 100, height: 30, right: k * 100 + 100, bottom: 30 }); });
+    place();
+    const dt = { data: {}, types: ['text/plain', 'application/x-sw-tab'], setData(k, v) { this.data[k] = v; }, getData(k) { return this.data[k]; }, setDragImage() { this.img = true; } };
+    a.el.dispatch('dragstart', { dataTransfer: dt, clientX: 10, clientY: 5 });
+    assert.ok(dt.img, 'the tab itself is the drag picture');
+    await new Promise((r) => setTimeout(r, 5));
+    assert.ok(a.el.classList.contains('drag-src'), 'the tab leaves its place');
+    const gapEl = () => g.tabsEl.children.find((x) => x.classList.contains('tab-gap'));
+    assert.ok(gapEl(), 'a gap in its place');
+    const n = g.tabs.length, ai = g.tabs.indexOf(a);
+    // over the right half of c: the gap goes after c
+    const ci = g.tabs.indexOf(c);
+    g.bar.dispatch('dragover', { target: c.el, clientX: ci * 100 + 80, dataTransfer: dt });
+    assert.strictEqual(g.tabsEl.children.indexOf(gapEl()), g.tabsEl.children.indexOf(c.el) + 1, 'gap after c');
+    g.bar.dispatch('drop', { target: c.el, clientX: ci * 100 + 80, dataTransfer: dt });
+    a.el.dispatch('dragend', { dataTransfer: Object.assign(dt, { dropEffect: 'move' }) });
+    assert.strictEqual(g.tabs.length, n);
+    assert.strictEqual(g.tabs[g.tabs.length - 1], a, 'a is last now');
+    assert.ok(!gapEl(), 'gap gone');
+    assert.ok(!a.el.classList.contains('drag-src') && !a.el.classList.contains('dragging'));
+    assert.ok(ai < g.tabs.length - 1);
+    // over the panes: no gap in the strip, the split box shows instead
+    place();
+    b.el.dispatch('dragstart', { dataTransfer: dt, clientX: 10, clientY: 5 });
+    await new Promise((r) => setTimeout(r, 5));
+    assert.ok(gapEl());
+    g.el.dispatch('dragover', { target: g.panesEl, clientX: 400, clientY: 300, dataTransfer: dt });
+    assert.ok(!gapEl(), 'gap closed over the panes');
+    b.el.dispatch('dragend', { dataTransfer: Object.assign(dt, { dropEffect: 'none' }), screenX: 0, screenY: 0 });
+    assert.ok(!b.el.classList.contains('drag-src'), 'cancelled: the tab is back');
+  },
+
+  async 'tab dragged out: the new window opens under the mouse, smaller, inside the screen'() {
+    const SW = global.SW, S = SW.S;
+    await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();
+    const opened = [];
+    global.open = (url, name, feat) => { opened.push(feat); return {}; };
+    const keep = global.screen;
+    global.screen = { availWidth: 1920, availHeight: 1080, availLeft: 0, availTop: 0 };
+    global.outerWidth = 1600; global.outerHeight = 1000;
+    try {
+      SW.moveToNewWindow(S.active, 500, 200, true);
+      assert.match(opened[0], /width=1280,height=800,left=430,top=150/);
+      await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();
+      SW.moveToNewWindow(S.active, 1900, 1070, true);          // near the corner: kept on the screen
+      assert.match(opened[1], /left=640,top=280/);
+    } finally { global.screen = keep; delete global.outerWidth; delete global.outerHeight; }
+  },
+
   async 'extra windows: move a tab out, get it back, never twice'() {
     const SW = global.SW, S = SW.S;
     await SW.openSession({ kind: 'shell', where: 'local', project: '' }); await settle();

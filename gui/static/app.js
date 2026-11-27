@@ -58,6 +58,17 @@
   var km = location.hash.match(/[#&]take=([a-f0-9,]+)/);
   var WID = wm ? wm[1] : (sessionStorage.getItem('sw-win') || '');
   var TAKE = km ? km[1].split(',').filter(Boolean) : [];
+  // a window made by dragging a tab out stays dark until its tab is in, then fades in (no half-drawn page)
+  if (TAKE.length && document.documentElement) {
+    document.documentElement.classList.add('tear-wait');
+    setTimeout(tearIn, 2500);
+  }
+  function tearIn() {
+    var de = document.documentElement;
+    if (!de || !de.classList.contains('tear-wait')) return;
+    de.classList.remove('tear-wait'); de.classList.add('tear-in');
+    setTimeout(function () { de.classList.remove('tear-in'); }, 400);
+  }
   if (wm) sessionStorage.setItem('sw-win', WID);
   if (tm) {
     token = tm[1];
@@ -1362,13 +1373,6 @@
     this.tabs = [];
     this.active = null;
     this.tabsEl = h('div', { class: 'gtabs' });
-    this.tabsEl.addEventListener('dragover', function (e) { if (dragTab || foreignDrag(e)) e.preventDefault(); });
-    this.tabsEl.addEventListener('drop', function (e) {
-      if (e.target === g.tabsEl && foreignDrag(e)) { e.preventDefault(); takeDropped(e, g, null); return; }
-      if (!dragTab || e.target !== g.tabsEl) return;
-      e.preventDefault();
-      moveTab(dragTab, g, g.tabs.length);
-    });
     this.closeBtn = h('button', { class: 'icon-btn', title: 'Close section (tabs move to the next one)', onclick: function () { closeGroup(g); } }, '✕');
     this.bar = h('div', { class: 'gbar' }, h('button', { class: 'icon-btn menu-btn', title: 'Projects', onclick: function () { openDrawer(); } }, '☰'), this.tabsEl,
       h('button', { class: 'icon-btn newtab', title: 'New tab (Alt+T)', onclick: function (e) { focusGroup(g); newTabMenu(e.currentTarget); } }, '+'),
@@ -1378,6 +1382,22 @@
         h('button', { class: 'icon-btn', title: 'Split down (Alt+-)', onclick: function () { splitGroup(g, 'bottom'); } }, '⊟'),
         this.closeBtn));
     this.bar.addEventListener('dblclick', function (e) { if (e.target === g.bar || e.target === g.tabsEl) toggleZoom(g); });
+    // the whole tab bar is one drop target: a gap opens where the tab will land and the other tabs slide
+    this.bar.addEventListener('dragover', function (e) {
+      if (!(dragTab || foreignDrag(e))) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      placeGap(g, stripIndex(g, e.clientX));
+    });
+    this.bar.addEventListener('drop', function (e) {
+      if (!(dragTab || foreignDrag(e))) return;
+      e.preventDefault(); e.stopPropagation();
+      var i = gap.g === g ? gap.i : stripIndex(g, e.clientX);
+      clearGap(true);
+      if (foreignDrag(e)) { takeDropped(e, g, null, i); return; }
+      var t = dragTab; endTabDrag(t);
+      moveTab(t, g, i);
+    });
     this.emptyEl = h('div', { class: 'gempty' }, 'Drop a tab here, or press +');
     this.panesEl = h('div', { class: 'gpanes' }, this.emptyEl);
     this.dropEl = h('div', { class: 'drop-ind hidden' });
@@ -1386,6 +1406,8 @@
     this.el.addEventListener('dragover', function (e) {
       if (!(dragTab || foreignDrag(e)) || g.bar.contains(e.target)) return;
       e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      if (gap.g) clearGap();
       g.showDrop(dropZone(g, e));
     });
     this.el.addEventListener('dragleave', function (e) { if (!g.el.contains(e.relatedTarget)) g.showDrop(null); });
@@ -1395,9 +1417,9 @@
       e.preventDefault();
       var z = dropZone(g, e);
       g.showDrop(null);
-      if (z === 'center') moveTab(dragTab, g, g.tabs.length);
+      var t = dragTab; endTabDrag(t);
+      if (z === 'center') moveTab(t, g, g.tabs.length);
       else {
-        var t = dragTab;
         if (t.group === g && g.tabs.length === 1) return;
         var ng = splitGroup(g, z, true);
         moveTab(t, ng, 0);
@@ -1761,10 +1783,20 @@
     return location.pathname + '#' + (token ? 't=' + token + '&' : '') + 'w=' + wid + (take ? '&take=' + take : '');
   }
 
-  function moveToNewWindow(tab, x, y) {
+  // at: x/y is the mouse where the tab was let go — the new window opens with its tab right under it
+  function moveToNewWindow(tab, x, y, at) {
     var wid = newWid();
-    var W = Math.max(640, window.outerWidth || 1200), H = Math.max(480, window.outerHeight || 800);
+    var sc = window.screen || {};
+    var aw = sc.availWidth || 1600, ah = sc.availHeight || 1000, al = sc.availLeft || 0, at0 = sc.availTop || 0;
+    // a bit smaller than this window, so it reads as a new window and not a jump of this one
+    var W = Math.round(Math.max(640, Math.min(aw, (window.outerWidth || 1200) * 0.8)));
+    var H = Math.round(Math.max(480, Math.min(ah, (window.outerHeight || 800) * 0.8)));
     if (x === undefined) { x = (window.screenX || 0) + 60; y = (window.screenY || 0) + 60; }
+    else if (at) { x -= 70; y -= 50; }
+    if (sc.availWidth) {
+      x = Math.min(Math.max(x, al), al + aw - W);
+      y = Math.min(Math.max(y, at0), at0 + ah - H);
+    }
     var w = window.open(windowUrl(wid, tab.id), 'sw-' + wid,
       'popup=yes,width=' + W + ',height=' + H + ',left=' + Math.round(x) + ',top=' + Math.round(y));
     if (!w) { toast('The new window was blocked — allow pop-ups for this app and try again', 'err'); return null; }
@@ -2024,6 +2056,66 @@
   }
 
   var dragTab = null;
+  var gap = { el: null, g: null, i: -1, w: 120 };
+
+  // where in g's strip a tab dropped at clientX lands (the dragged tab itself not counted)
+  function stripIndex(g, x) {
+    var i = 0;
+    g.tabs.forEach(function (t) {
+      if (t === dragTab) return;
+      var r = t.el.getBoundingClientRect();
+      if (x > r.left + r.width / 2) i++;
+    });
+    return i;
+  }
+
+  // FLIP: the tabs of the strip slide from where they were to where they are now
+  function slideTabs(els, before) {
+    els.forEach(function (el, k) {
+      var dx = before[k] - el.getBoundingClientRect().left;
+      if (!dx || !el.style) return;
+      el.style.transition = 'none';
+      el.style.transform = 'translateX(' + dx + 'px)';
+    });
+    requestAnimationFrame(function () {
+      els.forEach(function (el) { if (!el.style) return; el.style.transition = 'transform .15s ease-out'; el.style.transform = ''; });
+    });
+  }
+
+  function placeGap(g, i) {
+    if (gap.g === g && gap.i === i) return;
+    var groups = gap.g && gap.g !== g ? [gap.g, g] : [g];
+    var els = [];
+    groups.forEach(function (x) { x.tabs.forEach(function (t) { if (t !== dragTab) els.push(t.el); }); });
+    var before = els.map(function (el) { return el.getBoundingClientRect().left; });
+    if (!gap.el) {
+      gap.el = h('div', { class: 'tab-gap' });
+    }
+    gap.el.style.width = gap.w + 'px';
+    var rest = g.tabs.filter(function (t) { return t !== dragTab; });
+    var ref = rest[i];
+    if (ref && ref.el.parentNode === g.tabsEl) g.tabsEl.insertBefore(gap.el, ref.el); else g.tabsEl.append(gap.el);
+    gap.g = g; gap.i = i;
+    slideTabs(els, before);
+  }
+
+  function clearGap(quiet) {
+    if (!gap.el || !gap.g) { gap.g = null; gap.i = -1; return; }
+    var g = gap.g;
+    var els = g.tabs.filter(function (t) { return t !== dragTab; }).map(function (t) { return t.el; });
+    var before = els.map(function (el) { return el.getBoundingClientRect().left; });
+    gap.el.remove();
+    gap.g = null; gap.i = -1;
+    if (!quiet) slideTabs(els, before);
+  }
+
+  function endTabDrag(tab) {
+    clearGap(true);
+    if (tab) tab.el.classList.remove('dragging', 'drag-src');
+    document.body.classList.remove('dragging-tab');
+    L.groups.forEach(function (g) { g.showDrop(null); });
+  }
+
   function setupDrag(tab) {
     var el = tab.el;
     el.addEventListener('dragstart', function (e) {
@@ -2031,40 +2123,30 @@
       e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', tab.id);
       e.dataTransfer.setData('application/x-sw-tab', tab.id);
       document.body.classList.add('dragging-tab');
+      var r = el.getBoundingClientRect();
+      gap.w = Math.round(r.width) || 120;
+      if (e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(el, Math.max(0, e.clientX - r.left) || 20, Math.max(0, e.clientY - r.top) || 12);
+      // the tab leaves its place for a gap of the same width (after the browser has taken its picture)
+      setTimeout(function () {
+        if (dragTab !== tab || !tab.group) return;
+        el.classList.add('drag-src');
+        placeGap(tab.group, tab.group.tabs.indexOf(tab));
+      }, 0);
     });
     el.addEventListener('dragend', function (e) {
       // dropped outside every window (on the desktop, the other monitor…): a new window, like VS Code
       var dt = e && e.dataTransfer;
+      endTabDrag(tab);
       if (dt && dt.dropEffect === 'none' && outsideWindow(e) && !compact() && S.tabs.indexOf(tab) >= 0) {
-        moveToNewWindow(tab, e.screenX - 80, e.screenY - 20);
+        moveToNewWindow(tab, e.screenX, e.screenY, true);
       } else if (dt && dt.dropEffect === 'move') setTimeout(syncTabs, 400);      // maybe taken by another window
-      el.classList.remove('dragging'); dragTab = null;
-      document.body.classList.remove('dragging-tab');
-      S.tabs.forEach(function (t) { t.el.classList.remove('drop-before', 'drop-after'); });
-      L.groups.forEach(function (g) { g.showDrop(null); });
-    });
-    el.addEventListener('dragover', function (e) {
-      if (!(dragTab || foreignDrag(e)) || dragTab === tab) return;
-      e.preventDefault();
-      var r = el.getBoundingClientRect();
-      var after = e.clientX > r.left + r.width / 2;
-      el.classList.toggle('drop-after', after);
-      el.classList.toggle('drop-before', !after);
-    });
-    el.addEventListener('dragleave', function () { el.classList.remove('drop-before', 'drop-after'); });
-    el.addEventListener('drop', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      var after = el.classList.contains('drop-after');
-      el.classList.remove('drop-before', 'drop-after');
-      if (foreignDrag(e)) { takeDropped(e, tab.group, null, tab.group.tabs.indexOf(tab) + (after ? 1 : 0)); return; }
-      if (!dragTab || dragTab === tab) return;
-      var g = tab.group, t = dragTab;
-      var idx = g.tabs.indexOf(tab) + (after ? 1 : 0);
-      if (t.group === g && g.tabs.indexOf(t) < idx) idx--;
-      moveTab(t, g, idx);
+      dragTab = null;
     });
   }
+
+  // the drag left the window: close the gap, the tab will go to a new window
+  document.addEventListener('dragleave', function (e) { if (!e.relatedTarget && gap.g) clearGap(); });
+  document.addEventListener('drop', function () { if (!dragTab) setTimeout(function () { clearGap(true); }, 0); });
 
   // ------------------------------------------------------------------ project actions
   function sessionTitle(c) { return (c.title || c.first || c.last || c.id).replace(/\s+/g, ' ').slice(0, 70); }
@@ -5753,6 +5835,7 @@
       applyCompact();
       var t = S.tabs.find(function (x) { return x.id === want; }) || (L.focused && L.focused.active) || S.tabs[0];
       if (t) activate(t); else renderEmpty();
+      requestAnimationFrame(tearIn);
       refreshStatus(true);
       startWindows(st);
       // first run on a new machine: everything is set up in Settings

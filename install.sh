@@ -58,6 +58,15 @@ elif [ ! -f "$CONFIG" ] && [ -r /dev/tty ] && [ -z "${SIMAB_NO_SETUP:-}" ]; then
   "$BIN" setup </dev/tty || say "Setup did not finish — run: simabworkspace setup"
 fi
 
+# git commits on this computer (deploy scripts, Claude via onpc) fail without a name and email
+if command -v git >/dev/null 2>&1 && { [ -z "$(git config --global user.name 2>/dev/null)" ] || [ -z "$(git config --global user.email 2>/dev/null)" ]; }; then
+  say ""
+  say "! git has no name/email on this computer — commits here will fail. Set them once:"
+  say "    git config --global user.name \"Your Name\""
+  say "    git config --global user.email you@example.com"
+  say "  (or in the window: ⚙ → Setup check)"
+fi
+
 # the app menu entry (with the logo): open it from there, no command needed (Linux desktops)
 menu=0
 if [ "$(uname -s)" = Linux ] && [ -z "${WSL_DISTRO_NAME:-}" ] && "$BIN" shortcut >/dev/null 2>&1; then menu=1; fi

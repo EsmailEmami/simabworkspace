@@ -22,7 +22,7 @@ INSTALL_PATH = "~/.simabworkspace/syncguard.py"
 SNAP_EXCLUDES = ("node_modules", "dist", "build", ".next", ".nuxt", ".svelte-kit", ".output", "target", "__pycache__",
                  ".venv", "venv", ".cache", ".gradle", ".turbo", "coverage", ".parcel-cache", ".dev-run", "*.pyc")
 DEFAULTS = {"on": True, "dropPct": 20, "dropMin": 20, "dropFiles": 500, "emptyFiles": 3, "fullFiles": 30,
-            "topDirs": True, "snapEvery": 30, "snapKeep": 12, "snapDays": 7}
+            "topDirs": True, "snapEvery": 30, "snapKeep": 12, "snapDays": 7, "pausedMin": 10}
 WINDOW = 180          # seconds: a drop is measured against the most files seen in this window
 
 

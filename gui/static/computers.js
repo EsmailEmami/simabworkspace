@@ -470,6 +470,14 @@
         });
         case 'login': return go('Sign in', function () { md.close(); SW.openSession({ kind: 'claude', where: 'server' }); toast('Sign in to Claude in this terminal (it asks the first time), then close it', 'ok', { timeout: 9000 }); });
         case 'computer': return go('Connect', function () { api('POST', 'pc', { on: true }).then(function () { S.pc = { on: true }; setTimeout(run, 4000); }).catch(fail); });
+        case 'git-identity': {
+          var gn = h('input', { class: 'inp', placeholder: 'Your name', value: it.name || '' });
+          var ge = h('input', { class: 'inp', placeholder: 'you@example.com', value: it.email || '' });
+          return h('span', { class: 'setup-git' }, gn, ge, go('Save', function (e) {
+            var btn = e.currentTarget; btn.disabled = true;
+            api('POST', 'setup-check/git', { name: gn.value, email: ge.value }).then(run).catch(function (er) { btn.disabled = false; fail(er); });
+          }));
+        }
         case 'sshfs': return go('Prepare now', function (e) { e.currentTarget.disabled = true; e.currentTarget.textContent = 'Fetching…'; api('POST', 'setup-check/sshfs').then(run).catch(fail); });
         default: return null;
       }

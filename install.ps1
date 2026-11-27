@@ -170,6 +170,17 @@ function Install-SimabWorkspace {
   # --- 4. Start menu, then open the window
   & $py $server shortcut
   if ($LASTEXITCODE -ne 0) { Say '! Could not add the Start menu entry (the window can do it: Settings).' }
+  # git commits on this computer fail without a name and email
+  if (Get-Command git -ErrorAction SilentlyContinue) {
+    $gn = (& git config --global user.name 2>$null); $ge = (& git config --global user.email 2>$null)
+    if (-not $gn -or -not $ge) {
+      Say ''
+      Say '! git has no name/email on this computer - commits here will fail. Set them once:'
+      Say '    git config --global user.name "Your Name"'
+      Say '    git config --global user.email you@example.com'
+      Say '  (or in the window: Settings -> Setup check)'
+    }
+  }
   Say ''
   Say '✓ Done. Open "Simab Workspace" from the Start menu,'
   Say '  or run in a new PowerShell:  simabworkspace gui'

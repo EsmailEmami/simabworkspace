@@ -1182,7 +1182,7 @@ const tests = {
     save.click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop();
-    assert.deepStrictEqual(post.body, { ignores: ['node_modules', '*.log', '/tmp', 'dist'], delete: { server: ['web/dist'] } });
+    assert.deepStrictEqual(post.body, { ignores: ['node_modules', '*.log', '/tmp', 'dist'], delete: { server: ['web/dist'] }, winner: '' });
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
@@ -1197,7 +1197,7 @@ const tests = {
     q('.btn.primary', modal).pop().click();
     await settle();
     assert.ok(!calls.slice(n).some((c) => c.url.indexOf('/preview') > 0));
-    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop().body, { ignores: [], delete: {} });
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/sync/cheshmeh/ignores').pop().body, { ignores: [], delete: {}, winner: '' });
     document.body.querySelector('#modal-root').replaceChildren();
   },
 

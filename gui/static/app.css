@@ -1340,6 +1340,7 @@ body.compact .snd-name { flex-basis: 140px; }
 .setup-list { display: flex; flex-direction: column; }
 .setup-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid var(--line); }
 .setup-row:first-child { border-top: 0; }
+.setup-git { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; } .setup-git .inp { width: 150px; }
 .setup-ic { width: 18px; text-align: center; font-weight: 700; }
 .setup-row.ok .setup-ic { color: var(--ok); } .setup-row.bad .setup-ic { color: var(--err); } .setup-row.opt .setup-ic { color: var(--muted); }
 .setup-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 12.5px; }

@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.72.0  2026-11-27  Not synced: a change is safe (snapshot, recreate, guard counts start again, optional winner for the first round, then two-way-safe); new defaults (graphify-out, .dev-run, *.log); guard: a new list / recreated session / CLI resume is no mass delete, every pause logged, a long pause told; Mutagen left-out conflicts counted + one side wins all; sync list never blocks; git name/email check; onpc keeps remote URLs and ssh commands; a new project takes run commands from my other computers
 #    1.71.0  2026-11-27  Two computers: a chat runs only on the computer it was opened on and its tab stays there; each computer gets its own server copy (folder@computer), changes cross via git push / pull, a Pull notice after the other one pushes
 #    1.70.2  2026-11-27  Linux Wayland: the window opens under XWayland so the dock shows the logo, not a gear
 #    1.70.1  2026-11-27  Tab drag: a gap shows where the tab lands and the tabs slide; a tab dragged out opens a smaller window under the mouse that fades in
@@ -419,7 +420,7 @@
 
 set -u -o pipefail
 
-VERSION="1.71.0"
+VERSION="1.72.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -428,7 +429,7 @@ DEFAULT_HOST="${SIMAB_HOST:-}"
 DEFAULT_PORT="${SIMAB_PORT:-22}"
 
 # Folders that are never synced (rebuilt locally / too big / server-only data).
-DEFAULT_IGNORES="node_modules,.angular,dist,tmp,docker/data,.dart_tool,build,.next,.nuxt,.cache,__pycache__,.venv,.gradle"
+DEFAULT_IGNORES="node_modules,.angular,dist,tmp,docker/data,.dart_tool,build,.next,.nuxt,.cache,__pycache__,.venv,.gradle,graphify-out,.dev-run,*.log"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -1427,18 +1428,24 @@ project_action() {
 #   git on  (default): .git folders are synced too
 #   git off          : .git / .svn / .hg are skipped (--ignore-vcs)
 #   ignores ""       : nothing is ignored
+#   winner local|server: one first round where that side wins every conflict (two-way-resolved: alpha wins,
+#     so the winner is made alpha); callers recreate it two-way-safe once it is in sync (ignore_set --winner)
 create_session() {
-  local vcs="--no-ignore-vcs" ign=()
+  local vcs="--no-ignore-vcs" ign=() mode=two-way-safe a="$2" b="$3"
   [ "${5:-on}" = "off" ] && vcs="--ignore-vcs"
   [ -n "$4" ] && ign=(--ignore "$4")
   [ "${6:-0}" = "1" ] && ign+=(--paused)   # not an ignore — rides along in the same array
+  case "${7:-}" in
+    local)  mode=two-way-resolved ;;
+    server) mode=two-way-resolved; a="$3"; b="$2" ;;
+  esac
   mutagen sync create \
     --name "$1" \
     --label "$LABEL" \
-    --sync-mode two-way-safe \
+    --sync-mode "$mode" \
     "$vcs" \
     ${ign[@]+"${ign[@]}"} \
-    "$2" "$3"
+    "$a" "$b"
 }
 
 # session_git <session json> -> "on" | "off"
@@ -1695,14 +1702,27 @@ git_toggle() {
   wait_sync "$new_name" && ok "In sync."
 }
 
-# ignore_set [name] [list|--default] — what is never synced for a project (comma list of
-# Mutagen ignore patterns: "node_modules" anywhere, "/dist" only at the top, "*.log"…).
+# ignore_set [name] [list|--default] [--winner local|server] [--force] — what is never synced for a project
+# (comma list of Mutagen ignore patterns: "node_modules" anywhere, "/dist" only at the top, "*.log"…).
 # Mutagen cannot change this on a live session, so it is recreated with the same name,
 # folders and git setting. Files already copied stay where they are.
+# A new session has no history: every file that differs on the two sides is a conflict (two-way-safe).
+#   --winner local|server: the first round lets that side win them all (two-way-resolved), then the
+#                          session is recreated two-way-safe (the sides are equal then: no conflicts)
+#   --force              : recreate even when the list is the same (a winner round, back to two-way-safe)
 ignore_set() {
   title "Not synced"
   daemon_running || daemon_start
-  local name="${1:-}" want="${2-__ask__}"
+  local name="${1:-}" want="${2-__ask__}" winner="" force=0
+  shift 2 2>/dev/null || shift $#
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --winner) winner="${2:-}"; shift ;;
+      --force)  force=1 ;;
+    esac
+    shift
+  done
+  case "$winner" in ""|local|server) ;; *) err "--winner: local or server"; return 1 ;; esac
   [ -z "$name" ] && { name=$(pick_project "Project") || return 1; }
   local s
   s=$(sessions_json | jq -c --arg n "$name" 'first(.[] | select((.name // .identifier) == $n)) // empty')
@@ -1731,15 +1751,25 @@ ignore_set() {
   case "$want" in --default|-) want="$DEFAULT_IGNORES" ;; esac
   # tidy: split on commas/new lines, trim, drop empty and repeated entries, keep the order
   want=$(printf '%s' "$want" | tr '\n' ',' | awk -v RS=',' '{ gsub(/^[ \t\r]+|[ \t\r]+$/, ""); if ($0 != "" && !seen[$0]++) printf "%s%s", (n++ ? "," : ""), $0 }')
-  [ "$want" = "$cur" ] && { ok "No change."; return 0; }
+  [ "$want" = "$cur" ] && [ -z "$winner" ] && [ $force -eq 0 ] && { ok "No change."; return 0; }
 
   info "Syncing pending changes first…"
   wait_sync "$name" flush || { confirm "Continue anyway?" n || return 1; }
   mutagen sync terminate "$name" >/dev/null || { err "Could not stop the old sync."; return 1; }
-  if ! create_session "$new_name" "$lpath" "$url" "$want" "$git" >/dev/null; then
+  if ! create_session "$new_name" "$lpath" "$url" "$want" "$git" 0 "$winner" >/dev/null; then
     err "Could not recreate the sync (check the list). Restoring the old one."
     create_session "$new_name" "$lpath" "$url" "$cur" "$git" >/dev/null
     return 1
+  fi
+  if [ -n "$winner" ]; then
+    info "First round: $( [ "$winner" = local ] && echo "this computer's" || echo "the server's") version wins every conflict…"
+    if ! wait_sync "$new_name"; then
+      warn "The first round did not finish: '$new_name' stays two-way-resolved — run: simabworkspace ignore $new_name '$want' --force"
+      return 1
+    fi
+    mutagen sync terminate "$new_name" >/dev/null || { err "Could not stop the first round."; return 1; }
+    create_session "$new_name" "$lpath" "$url" "$want" "$git" >/dev/null || { err "Could not recreate the sync two-way-safe."; return 1; }
+    ok "Both sides equal — back to two-way-safe."
   fi
   ok "'$new_name': not synced: ${want:-(nothing)}"
   info "Copies made before stay on both sides — delete them by hand where they are not needed."

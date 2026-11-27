@@ -4471,6 +4471,7 @@
           field('Snapshot every (min)', inp('guardSnapEvery', { type: 'number', min: 0, class: 'inp mono' })),
           field('Snapshots kept', inp('guardSnapKeep', { type: 'number', min: 1, class: 'inp mono' }))),
         chk('guardTopDirs', 'Pause when a top folder disappears'),
+        field('Tell me when a sync stays paused (min, 0 = off)', inp('guardPausedMin', { type: 'number', min: 0, class: 'inp mono' })),
         otherPcsRow(),
 
         h('div', { class: 'sec' }, 'This machine'),
@@ -4613,8 +4614,14 @@
   }
 
   // ------------------------------------------------------------------ not synced (ignores)
+  // the restarted sync has no history: every file that differs is a conflict, unless one side wins the first round
+  var WINNERS = [['', 'Ask me for each file (safe)'], ['local', 'This computer’s version wins'], ['server', 'The server’s version wins']];
+  function winnerSelect() {
+    return h('select', { class: 'inp' }, WINNERS.map(function (w) { return h('option', { value: w[0] }, w[1]); }));
+  }
   function ignoresDialog(p) {
     var ta = h('textarea', { class: 'inp mono', rows: 10, spellcheck: 'false', placeholder: 'node_modules\n/dist\n*.log' });
+    var winSel = winnerSelect(), sharedBox = h('div');
     var errBox = h('div', { class: 'add-err' });
     var defaults = [], current = [], step = 1, found = null, boxes = {};
     function listOf() { return ta.value.split(/[\n,]/).map(function (x) { return x.trim(); }).filter(Boolean); }
@@ -4623,8 +4630,8 @@
     function send(list) {
       var del = {};
       ['server', 'local'].forEach(function (w) { if (boxes[w] && boxes[w].checked) del[w] = found[w].items.map(function (x) { return x.path; }); });
-      busy(true, 'Saving…'); errBox.textContent = '';
-      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: list, delete: del }).then(function (r) {
+      busy(true, winSel.value ? 'Syncing…' : 'Saving…'); errBox.textContent = '';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: list, delete: del, winner: winSel.value }).then(function (r) {
         md.close();
         var bits = [], errs = [];
         Object.keys(r.deleted || {}).forEach(function (w) {
@@ -4656,7 +4663,9 @@
         h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ', h('span', { class: 'mono' }, '/dist'), ' only at the top, ',
         h('span', { class: 'mono' }, '*.log'), ' by name.'),
       ta,
-      h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Saving restarts this project’s sync. Copies made before stay unless you delete them in the next step.')];
+      h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Saving restarts this project’s sync (a snapshot of the server folder first). Copies made before stay unless you delete them in the next step.'),
+      h('label', { class: 'field', style: 'margin-top:10px' }, h('span', null, 'A file that differs on the two sides'), winSel),
+      sharedBox];
     body.replaceChildren.apply(body, first.concat([errBox]));
     var save = h('button', { class: 'btn primary', disabled: true, onclick: function () {
       var list = listOf();
@@ -4707,6 +4716,11 @@
       ta.value = current.join('\n');
       defaults = d.defaultIgnores || [];
       save.disabled = false; addDef.disabled = !defaults.length; addGit.disabled = false;
+      var sh = d.sharedIgnores;
+      if (sh && sh.slice().sort().join('\n') !== current.slice().sort().join('\n'))
+        sharedBox.replaceChildren(h('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, 'Your other computer skips: ',
+          h('span', { class: 'mono' }, sh.join(', ') || 'nothing'), ' ',
+          h('a', { href: '#', onclick: function (e) { e.preventDefault(); ta.value = sh.join('\n'); } }, 'Use this list')));
     }).catch(function (e) { errBox.textContent = e.message; });
   }
 
@@ -4724,6 +4738,15 @@
         toast(c.path + ': kept the ' + (keep === 'local' ? 'local' : 'server') + ' version', 'ok');
         setTimeout(load, 1500);
       }).catch(function (e) { btn.disabled = false; fail(e); });
+    }
+    // the sync restarted with the same list: one side wins every conflict (first round), or two-way-safe again
+    function recreate(d, winner, btn) {
+      var what = winner ? (winner === 'local' ? 'this computer’s' : 'the server’s') + ' version wins every conflict' : 'back to two-way-safe';
+      if (winner && !confirm(p.name + ': ' + what + ' — the other side’s version of each conflicting file is overwritten. A snapshot of the server folder is taken first. Go on?')) return;
+      btn.disabled = true; btn.textContent = 'Syncing…';
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: d.ignores || [], winner: winner, force: true }).then(function () {
+        toast(p.name + ': ' + what, 'ok', { timeout: 8000 }); refreshProjects(); load();
+      }).catch(function (e) { btn.disabled = false; fail(e); load(); });
     }
     function change(list) {
       if (!list.length) return h('span', { class: 'muted' }, 'unchanged');
@@ -4750,7 +4773,19 @@
           h('button', { class: 'btn sm', onclick: function () { guardApprove(d, load); } }, 'Resume anyway…')));
         if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
           h('span', null, progressLabel(d.progress))));
-        rows.push(h('div', { class: 'sec' }, d.conflicts.length ? plural(d.conflicts.length, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
+        var nconf = d.conflicts.length + (d.moreConflicts || 0);
+        if (d.mode === 'two-way-resolved') rows.push(h('div', { class: 'add-err', style: 'margin:10px 0' },
+          'One side wins every conflict now (two-way-resolved). ',
+          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, '', ev.currentTarget); } }, 'Back to two-way-safe')));
+        var sh = d.sharedIgnores;
+        if (sh && sh.slice().sort().join('\n') !== (d.ignores || []).slice().sort().join('\n')) rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin:8px 0' },
+          'Your other computer skips: ', h('span', { class: 'mono' }, sh.join(', ') || 'nothing'), ' ',
+          h('a', { href: '#', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Compare…')));
+        rows.push(h('div', { class: 'sec' }, nconf ? plural(nconf, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
+        if (nconf) rows.push(h('div', { class: 'cacts', style: 'margin-bottom:8px' },
+          d.moreConflicts ? h('span', { class: 'muted', style: 'font-size:12px' }, 'Mutagen lists ' + d.conflicts.length + ' of them; the rest appear as these are solved. ') : null,
+          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'local', ev.currentTarget); } }, 'This computer wins all'),
+          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'server', ev.currentTarget); } }, 'The server wins all')));
         if (d.conflicts.length) {
           rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, 'Nothing was overwritten. Pick which version to keep — it is copied over the other one. For folders, or to merge by hand, open VS Code.'));
           rows.push(h('div', { class: 'conflicts' }, d.conflicts.map(function (c) {
@@ -5512,6 +5547,14 @@
           }
           // notify once when sync transitions into an error state
           var prev = (S.syncStates || {})[p.name];
+          var pk = p.sync && p.sync.pausedSince;
+          if (pk && (S.pausedSeen || {})[p.name] !== pk) {
+            (S.pausedSeen = S.pausedSeen || {})[p.name] = pk;
+            var mins = Math.max(1, Math.round((Date.now() / 1000 - pk) / 60));
+            toast(p.name + ': sync paused for ' + mins + ' min — nothing is copied between this computer and the server' +
+              (p.sync.guard ? ' (' + p.sync.guard.reason + ')' : ''), 'err', { sticky: true, onclick: (function (q) { return function () { syncDetails(q); }; })(p) });
+            notify('Sync still paused', p.name + ': paused for ' + mins + ' min');
+          }
           var gk = p.sync && p.sync.guard ? p.sync.guard.t : 0;
           if (gk && (S.guardSeen || {})[p.name] !== gk) {
             (S.guardSeen = S.guardSeen || {})[p.name] = gk;

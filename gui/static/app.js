@@ -735,10 +735,22 @@
   // ------------------------------------------------------------------ toasts
   function toast(msg, type, opts) {
     opts = opts || {};
-    var el = h('div', { class: 'toast ' + (type || '') }, msg);
+    var key = (type || '') + '|' + (typeof msg === 'string' ? msg : '');
+    // the same message again: one toast with a ×N count instead of a pile
+    var same = typeof msg === 'string' && Array.prototype.find.call($('#toasts').children, function (x) { return x._key === key; });
+    if (same) {
+      same._n = (same._n || 1) + 1;
+      same.querySelector('.toast-n').textContent = '×' + same._n;
+      if (same._timer) { clearTimeout(same._timer); same._timer = setTimeout(function () { same.remove(); }, same._ms); }
+      return same;
+    }
+    var x = h('span', { class: 'toast-x', title: 'Close', 'aria-label': 'Close', onclick: function (e) { e.stopPropagation(); el.remove(); } });   // × drawn by CSS: textContent stays the message
+    var el = h('div', { class: 'toast ' + (type || '') }, x, h('span', { class: 'toast-n' }), msg);
+    el._key = key;
     el.addEventListener('click', function () { if (opts.onclick) opts.onclick(); el.remove(); });
     $('#toasts').append(el);
-    if (!opts.sticky) setTimeout(function () { el.remove(); }, opts.timeout || (type === 'err' ? 7000 : 3500));
+    el._ms = opts.timeout || (type === 'err' ? 7000 : 3500);
+    if (!opts.sticky) el._timer = setTimeout(function () { el.remove(); }, el._ms);
     return el;
   }
   function fail(e) { if (e && e.offline) return; toast(e && e.message ? e.message : String(e), 'err'); }

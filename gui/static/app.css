@@ -240,6 +240,11 @@ body.resizing-h .xterm, body.resizing-v .xterm, body.dragging-tab .xterm, body.d
 .toast.err { border-left-color: var(--err); }
 .toast.ok { border-left-color: var(--ok); }
 .toast.warn { border-left-color: var(--warn); }
+.toast-x { float: right; margin: -3px -4px 0 8px; padding: 0 5px; color: var(--muted); font-size: 15px; line-height: 1; border-radius: 4px; }
+.toast-x::before { content: "\00d7"; }
+.toast-x:hover { color: var(--text); background: var(--bg2); }
+.toast-n { float: right; margin-left: 6px; color: var(--muted); font-size: 11.5px; }
+.toast-n:empty { display: none; }
 
 /* Claude chat */
 .chat-body { flex-direction: column; }

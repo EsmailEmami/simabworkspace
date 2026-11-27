@@ -255,6 +255,14 @@ class GuardTest(unittest.TestCase):
         self.assertIn("lost its .simab-root", self.f.g.alert_for("p")["reason"])
         self.assertTrue(Path(self.rem, "api/f0.txt").exists())
 
+    def test_node_modules_on_one_side_only_is_not_a_wrong_folder(self):
+        # cheshmeh: no Not synced list, 65k node_modules files only on the computer → paused as "differ"
+        for i in range(200):
+            p = Path(self.loc, "web/node_modules/x", f"{i}.js")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x")
+        self.adopt()
+
     def test_app_start_checks_every_paused_project_again(self):
         # the ones that look right now resume (a normal resume = the guard checks), the rest stay paused
         tried, logged = [], []

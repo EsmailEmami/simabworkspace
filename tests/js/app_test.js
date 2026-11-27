@@ -1167,6 +1167,22 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  async 'toasts: the same message again is one toast with ×N; × closes it without its click action'() {
+    const box = document.body.querySelector('#toasts');
+    box.replaceChildren();
+    let clicked = 0;
+    const t = global.SW.toast('cheshmeh: sync paused', 'err', { sticky: true, onclick: () => clicked++ });
+    global.SW.toast('cheshmeh: sync paused', 'err', { sticky: true });
+    global.SW.toast('cheshmeh: sync paused', 'err', { sticky: true });
+    global.SW.toast('aista: sync paused', 'err', { sticky: true });
+    assert.strictEqual(box.children.length, 2);
+    assert.strictEqual(t.querySelector('.toast-n').textContent, '×3');
+    t.querySelector('.toast-x').click();
+    assert.strictEqual(clicked, 0);
+    assert.strictEqual(box.children.length, 1);
+    box.replaceChildren();
+  },
+
   async 'sync guard: the pause reason shows in Sync details; Resume anyway asks, then approves'() {
     document.body.querySelector('#modal-root').replaceChildren();
     guardAlert = { kind: 'marker', reason: 'The folder on this computer lost its .simab-root (disk not mounted?)', t: 1 };

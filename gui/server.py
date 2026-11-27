@@ -5237,6 +5237,9 @@ class SyncGuard:
         if not loc:
             return None, None
         cfg, ign = self.cfg(), self._ignores(sess)
+        # "do both folders look alike" never counts dependency / build folders (node_modules, dist, …): each side
+        # installs its own (cheshmeh: 65k node_modules files only here, 10k only there), it says nothing about a wrong folder
+        ign = ign + [x for x in default_ignores() if x not in ign]
         lm = sg.read_marker(loc["path"])
         if lm["state"] == "noroot":
             return "marker", "The folder on this computer is missing (disk not mounted?): " + loc["path"]

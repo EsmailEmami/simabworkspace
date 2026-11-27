@@ -2535,7 +2535,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.69.3"', text)
+        self.assertIn('VERSION="1.70.0"', text)
 
 
 if __name__ == "__main__":

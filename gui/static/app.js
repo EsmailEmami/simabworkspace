@@ -1842,7 +1842,6 @@
       L.groups.forEach(function (x) { x.el.classList.toggle('focused', x === g && L.groups.length > 1); });
     }
     S.active = tab;
-    if (window.sideFilesPanel) window.sideFilesPanel.onActivate(tab);
     $('#empty').classList.add('hidden');
     g.renderEmpty();
     tab.el.classList.remove('activity', 'bell', 'done');
@@ -1863,6 +1862,7 @@
     return w ? w.n : 0;
   }
   function renderTitle() {
+    renderFilesBtn();
     var n = windowNumber();
     document.title = (S.active ? S.active.info.title + ' — ' : '') + 'Simab Workspace' + (n ? ' · window ' + n : '');
   }
@@ -2506,6 +2506,18 @@
 
   function hasRemote(p) { return !!p.remote && serverReady(); }
   function openFiles(p) { return openSession({ kind: 'files', project: p.name }); }
+  // sidebar "Files" button under Usage: opens the Files tab of the active tab's project (same as ⋯ → Files)
+  function filesBtnProject() {
+    var n = S.active && S.active.info && S.active.info.spec && S.active.info.spec.project;
+    var p = n ? project(n) : null;
+    return p && (hasRemote(p) || p.localExists) ? p : null;
+  }
+  function renderFilesBtn() {
+    var b = $('#side-files-btn'), p = filesBtnProject();
+    if (!b) return;
+    b.classList.toggle('hidden', !p);
+    b.replaceChildren.apply(b, p ? [h('b', null, 'Files'), h('span', null, p.name)] : []);
+  }
   function openTerminal(p) { openSession({ kind: 'shell', where: hasRemote(p) && !p.localOnly ? 'server' : 'local', project: p.name }); }
   function openCode(p) { openEditor(p, hasRemote(p) ? 'server' : 'local'); }
 
@@ -3580,6 +3592,7 @@
 
   // ------------------------------------------------------------------ sidebar
   function renderProjects() {
+    renderFilesBtn();
     var root = $('#projects');
     if (!root) return;
     var f = S.filter.trim().toLowerCase();
@@ -5640,7 +5653,7 @@
     $('#btn-hide-side').addEventListener('click', function () { if (compact()) closeDrawer(); else setWorkMode(true); });
     if (COMPACT.addEventListener) COMPACT.addEventListener('change', applyCompact);
     $('#show-side').addEventListener('click', function () { setWorkMode(false); });
-    if (window.SideFilesPanel) { window.sideFilesPanel = new window.SideFilesPanel(); if (S.active) window.sideFilesPanel.onActivate(S.active); }
+    if ($('#side-files-btn')) $('#side-files-btn').addEventListener('click', function () { var p = filesBtnProject(); if (p) openFiles(p); });
     $('#st-ssh').addEventListener('click', function () { refreshStatus(true); });
     $('#proj-filter').addEventListener('input', function (e) { S.filter = e.target.value; renderProjects(); });
     // an extra window starts with the sidebar hidden: it is for the tabs

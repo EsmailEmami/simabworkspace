@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.70.0  2026-11-27  Sidebar: no file tree; a Files button under Usage opens the Files tab of the active project
 #    1.69.3  2026-11-27  Mutagen 0.18: the Not synced list and Git setting are read again (ignore.paths / ignore.vcs) — the sync guard paused every project; the guard never counts node_modules/dist/… when comparing; toasts: ×N for repeats and a close ×
 #    1.69.2  2026-11-27  Not synced: Add from .gitignore (nested git repos too); sync guard: Check again, and every paused project is checked again when the app starts
 #    1.69.1  2026-11-27  Sync guard: file counts skip what the sync skips (docker/data and other paths with a /, .git when Git is off) — no more "This computer has N files, the server M" pause on every project
@@ -415,7 +416,7 @@
 
 set -u -o pipefail
 
-VERSION="1.69.3"
+VERSION="1.70.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

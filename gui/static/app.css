@@ -666,6 +666,9 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 /* Claude usage */
 .usage { display: flex; gap: 10px; margin: 0 10px 8px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); }
 .usage:hover { border-color: var(--line2); color: var(--text); }
+.side-files-btn { justify-content: space-between; font: 11px var(--mono); }
+.side-files-btn b { font-weight: 400; color: var(--text); }
+.side-files-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .um { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; font: 10.5px var(--mono); }
 .um .ub { flex: 1; min-width: 20px; }
 .ub { height: 4px; border-radius: 2px; background: var(--bg3); overflow: hidden; }
@@ -704,22 +707,6 @@ body.compact.side-open #sidebar { left: 54px; width: min(330px, calc(92vw - 54px
 .act .gb.dk { margin-left: 4px; }
 
 /* sidebar Files panel */
-.side-files { display: flex; flex-direction: column; border-top: 1px solid var(--line); min-height: 80px; max-height: 40vh; overflow: hidden; flex: none; }
-.side-files.hidden { display: none; }
-.side-sec-head { display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px; cursor: default; user-select: none; flex: none; }
-.side-sec-title { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); flex: none; }
-.side-sec-proj { font-size: 11px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; padding-left: 4px; }
-.side-sec-close { opacity: .5; }
-.side-sec-close:hover { opacity: 1; }
-.side-files-tree { flex: 1; overflow-y: auto; padding: 2px 0 6px; }
-.side-files-tree.drop-over { background: var(--bg3); outline: 1px solid var(--accent); outline-offset: -1px; }
-.sf-row { display: flex; align-items: center; gap: 3px; padding: 2px 8px 2px 0; cursor: pointer; white-space: nowrap; overflow: hidden; font-size: 12px; color: var(--text); min-height: 20px; }
-.sf-row:hover { background: var(--bg3); }
-.sf-row.drop-over { background: rgba(99,153,215,.18); outline: 1px solid var(--accent); }
-.sf-icon { flex: none; width: 14px; font-style: normal; font-size: 9px; color: var(--muted); text-align: center; }
-.sf-name { flex: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.sf-gc { flex: none; font-size: 10px; }
-.sf-note { font-size: 11px; color: var(--muted); padding: 4px 10px; }
 
 /* web version: sign-in page */
 body.web #st-sync { display: none; }

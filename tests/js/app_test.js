@@ -11,7 +11,7 @@ global.location.hash = '#t=testtoken';
 
 // page skeleton (ids used by app.js)
 ['sidebar', 'projects', 'proj-filter', 'resizer', 'layout', 'empty', 'restore-box', 'toasts', 'menu-root', 'modal-root',
-  'btn-claude', 'btn-tasks', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync', 'pc-net'].forEach((id) => {
+  'btn-claude', 'btn-tasks', 'btn-palette', 'btn-history', 'btn-settings', 'btn-usage', 'update-note', 'usage', 'side-files-btn', 'server-stats', 'btn-hide-side', 'show-side', 'st-ssh', 'st-sync', 'pc-net'].forEach((id) => {
   const el = new Element(id.startsWith('btn') || id === 'show-side' ? 'button' : 'div');
   el.setAttribute('id', id);
   document.body.append(el);

@@ -86,6 +86,9 @@ function tasksOp(op) {
   T.rev++;
   return tasksOp(null);
 }
+// other AI agents (agents.js): Settings → AI
+global.fakeAgents = [{ id: 'opencode', name: 'opencode', command: 'opencode acp', installed: true, on: false, models: [] },
+  { id: 'gemini', name: 'Gemini CLI', command: 'gemini --experimental-acp', installed: false, on: false }];
 // Computers (computers.js): this computer + the server's list of computers
 const fakePc = { posts: [], answers: [],
   me: { config: { on: false, name: 'desk', mode: 'new', allow: [], deny: ['sudo *'], projects: [], always: { cheshmeh: ['npm test'] }, output: 'chat' }, state: 'off', error: '', os: 'windows' },
@@ -243,9 +246,15 @@ global.fetch = (url, opts) => {
     res = { output: '', status: Object.assign({}, gitStatus, { branch: body.create ? body.branch : body.branch.replace(/^origin\//, '') }) };
   }
   else if (/^\/api\/sessions\/[^/]+\/win$/.test(url)) { const id = url.split('/')[3]; winOf[id] = body.win; res = { id, title: 'moved ' + id, alive: true, exitCode: null, url: '', win: body.win, moved: 1e12, spec: { kind: 'shell', project: '', where: 'local' } }; }
+  else if (url === '/api/agents' && method === 'GET') res = { agents: global.fakeAgents };
+  else if (url === '/api/agents' && method === 'POST') {
+    if (body.op === 'connect') global.fakeAgents.forEach((a) => { if (a.id === body.id) a.on = true; });
+    res = { agents: global.fakeAgents, probe: { ok: true } };
+  }
   else if (url === '/api/sessions' && method === 'POST') {
     res = { id: 's' + (++seq), title: body.kind + ' ' + (body.project || 'home'), alive: true, exitCode: null, url: '',
-      spec: Object.assign({ kind: body.kind, project: body.project || '', where: body.where || 'local', cmdId: body.cmdId || '' }, body.resume ? { resume: body.resume } : {}) };
+      spec: Object.assign({ kind: body.kind, project: body.project || '', where: body.where || 'local', cmdId: body.cmdId || '' }, body.resume ? { resume: body.resume } : {},
+        body.agent ? { agent: body.agent, agentName: body.agentName } : {}) };
   }
   if (url === '/api/projects' && global.holdProjects) {     // a slow refresh: answers when the test says so
     const snap = JSON.parse(JSON.stringify(res));
@@ -276,6 +285,7 @@ function loadRest() {
   localStorage.setItem('sw-setup-ok', '1');           // no setup dialog popping up by itself during the tests
   global.SW && require(path.join(ROOT, 'gui/static/computers.js'));
   global.SW && require(path.join(ROOT, 'gui/static/prompts.js'));
+  global.SW && require(path.join(ROOT, 'gui/static/agents.js'));
   document.readyState = 'interactive';
   domReady();
 }
@@ -2792,6 +2802,36 @@ const tests = {
       global.SWFiles = undefined;
       assert.deepStrictEqual(await global.SW._missingParts(1), ['files.js']);    // gives up: said by name
     } finally { body.appendChild = add; global.SWFiles = keep; }
+  },
+
+  async 'other AI: Settings → AI connects opencode, then the project menu opens a chat with it'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    await global.SWAgents.load();
+    q('.act.more')[0].click();
+    const none = q('button').find((b) => b.textContent.indexOf('Other AI (opencode, …)…') === 0);
+    assert.ok(none, 'nothing connected yet: a way to Settings → AI');
+    none.click(); await settle();
+    const modal = q('.modal').pop();
+    assert.strictEqual(q('.set-tab.active', modal)[0].textContent, 'AI');
+    const rows = q('.ag-item', modal);
+    assert.deepStrictEqual(rows.map((r) => r.querySelector('b').textContent), ['opencode', 'Gemini CLI']);
+    assert.match(rows[1].textContent, /not installed/);
+    q('button', rows[0]).find((b) => b.textContent === 'Connect').click(); await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/agents' && c.method === 'POST').pop().body, { op: 'connect', id: 'opencode' });
+    assert.match(q('.ag-item', modal)[0].textContent, /connected/);
+    localStorage.setItem('sw-set-tab', '');
+    document.body.querySelector('#modal-root').replaceChildren();
+    q('.act.more')[0].click();
+    q('button').find((b) => b.textContent.indexOf('New chat: opencode') === 0).click(); await settle();
+    const post = calls.filter((c) => c.url === '/api/sessions' && c.method === 'POST').pop();
+    assert.strictEqual(post.body.agent, 'opencode');
+    assert.strictEqual(post.body.agentName, 'opencode');
+    assert.strictEqual(post.body.project, 'cheshmeh');
+    const tab = global.SW.S.tabs[global.SW.S.tabs.length - 1];
+    assert.strictEqual(tab.who, 'opencode');
+    assert.ok(tab.effortSel.classList.contains('hidden'), 'no Claude effort for another AI');
+    global.SW.closeTab(tab); await settle();
+    global.fakeAgents.forEach((a) => { a.on = false; });
   },
 
 };

@@ -1518,3 +1518,14 @@ body.compact .snd-name { flex-basis: 140px; }
 .sy-rn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sy-rc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 @media (max-width: 640px) { .sy-repo { grid-template-columns: 1fr auto; } .sy-repo > .muted, .sy-rc { grid-column: 1 / -1; } }
+
+/* Settings → AI (agents.js) */
+.ag-list { display: flex; flex-direction: column; gap: 2px; }
+.ag-item { padding: 7px 0; border-bottom: 1px solid var(--line); }
+.ag-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ag-row code { color: var(--faint); }
+.ag-st { font-size: 12px; color: var(--muted); }
+.ag-st.ok { color: var(--ok); }
+.ag-btns { margin-left: auto; display: flex; gap: 6px; }
+.ag-more { margin-top: 5px; font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ag-more .add-err { margin-top: 0; flex: 1 1 100%; }

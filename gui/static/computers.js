@@ -641,6 +641,11 @@
   function decorate() {
     (S.tabs || []).forEach(function (t) {
       if (!t.setWhere || !t.info || !t.info.spec || t.info.spec.kind !== 'chat') return;
+      if (t.info.spec.agent) {             // opencode, …: the whole chat runs on the user's computer (agents.js)
+        var dn = S.web ? ((info && info.devices || []).filter(function (d) { return d.id === t.info.spec.dev; })[0] || {}).name : myName();
+        t.setWhere('⌂ ' + (dn || 'your computer'), (t.info.spec.agentName || 'This AI') + ' runs on ' + (dn || 'your computer') + ', in the project’s folder there', 'lo');
+        return;
+      }
       var p = (S.projects || []).filter(function (x) { return x.name === t.info.spec.project; })[0];
       var st = p ? buildState(p.name, null, t.info.spec.pc, t.info.spec.prefer || (S.web ? '' : undefined)) : null;
       var name = p ? p.name : '';

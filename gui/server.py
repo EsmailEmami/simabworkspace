@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.77.0"
+VERSION = "1.78.0"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -3207,7 +3207,8 @@ class ChatSession:
         self.on_change = on_change
         self.session_id = built.get("resume") or ""
         self.mode = built.get("mode") or "default"
-        self.model = chat_model(built.get("model"))
+        self.agent = built.get("agent") or ""      # another AI agent (opencode, …) instead of Claude
+        self.model = (built.get("model") or "") if self.agent else chat_model(built.get("model"))
         self.effort = chat_effort(built.get("effort"))
         self.busy = False
         self.init = None              # answer to our "initialize" request
@@ -3445,7 +3446,7 @@ class ChatSession:
     def _handle_event(self, ev: dict):
         t = ev.get("type")
         sid = ev.get("session_id")
-        if isinstance(sid, str) and UUID_RE.fullmatch(sid) and sid != self.session_id:
+        if isinstance(sid, str) and sid and (AGENT_SID_RE.fullmatch(sid) if self.agent else UUID_RE.fullmatch(sid)) and sid != self.session_id:
             self.session_id = sid
             self.spec["resume"] = sid
             if self.relay_on:
@@ -3580,8 +3581,8 @@ class ChatSession:
                 self.remember(self.spec.get("project"), mode=self.mode)
             self._request({"subtype": "set_permission_mode", "mode": self.mode})
             self._log({"type": "_mode", "mode": self.mode})
-        elif t == "model" and isinstance(m.get("model"), str) and re.fullmatch(r"[A-Za-z0-9.\[\]_-]{0,60}", m["model"]):
-            self.model = chat_model(m["model"])
+        elif t == "model" and isinstance(m.get("model"), str) and (AGENT_MODEL_RE if self.agent else re.compile(r"[A-Za-z0-9.\[\]_-]{0,60}")).fullmatch(m["model"]):
+            self.model = m["model"] if self.agent else chat_model(m["model"])
             if getattr(self, "remember", None):
                 self.remember(self.spec.get("project"), model=self.model)
             self._request({"subtype": "set_model", "model": self.model})
@@ -3592,7 +3593,7 @@ class ChatSession:
                 self.remember(self.spec.get("project"), effort=self.effort)
             self._request({"subtype": "apply_flag_settings", "settings": {"effortLevel": self.effort}})
             self._log({"type": "_effort", "effort": self.effort})
-        elif t == "pc" and isinstance(m.get("pc"), str) and (m["pc"] == "" or PC_ID_RE.fullmatch(m["pc"])):
+        elif t == "pc" and not self.agent and isinstance(m.get("pc"), str) and (m["pc"] == "" or PC_ID_RE.fullmatch(m["pc"])):
             self.set_pc(m["pc"])
 
     def _pc_arg(self) -> dict:
@@ -3764,7 +3765,7 @@ class ChatSession:
                 self.spec.pop("resume", None)
                 self.spec.pop("named", None)
                 self.title_tries, self.title_hint = 0, ""
-                self.title = "Claude · " + (self.spec.get("project") or "home")
+                self.title = (self.spec.get("agentName") or "Claude") + " · " + (self.spec.get("project") or "home")
             self._broadcast({"t": "clear"})
             self._broadcast({"t": "title", "title": self.title})
             if self.on_change:
@@ -3893,6 +3894,92 @@ class WatchSession:
     def info(self) -> dict:
         return {"id": self.id, "title": self.title, "spec": self.spec, "url": "", "alive": True, "exitCode": None,
                 "started": self.started, "runs": 1, "win": self.win, "moved": self.moved}
+
+
+# ---- other AI agents (opencode, Gemini CLI, Codex, …) beside Claude
+# They run on the user's computer, never on the server (gui/acp_bridge.py: ACP ↔ the chat panel's stream-json).
+# The commands are kept only on that computer: the server / web version names an agent by id, never a command.
+AGENT_PRESETS = (
+    {"id": "opencode", "name": "opencode", "cmd": ["opencode", "acp"], "login": "opencode auth login"},
+    {"id": "gemini", "name": "Gemini CLI", "cmd": ["gemini", "--experimental-acp"], "login": "gemini"},
+    {"id": "codex", "name": "Codex", "cmd": ["codex-acp"], "login": "codex login"},
+    {"id": "qwen", "name": "Qwen Code", "cmd": ["qwen", "--experimental-acp"], "login": "qwen"},
+)
+AGENT_ID_RE = re.compile(r"[a-z][a-z0-9-]{1,30}")
+AGENT_SID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,120}")       # the agent's own conversation id (ses_…, a uuid, …)
+AGENT_MODEL_RE = re.compile(r"[A-Za-z0-9.\[\]_/:@+-]{0,120}")
+
+
+def agent_public(a: dict) -> dict:
+    return {k: a.get(k) for k in ("id", "name", "on", "models", "model", "agent", "version")}
+
+
+def agent_argv(a: dict, cwd: str, mode="", model="", resume="") -> list:
+    mode = mode if mode in CHAT_MODES else "default"
+    model = model if isinstance(model, str) and AGENT_MODEL_RE.fullmatch(model) else ""
+    resume = resume if isinstance(resume, str) and AGENT_SID_RE.fullmatch(resume) else ""
+    return [sys.executable, "-I", str(HERE / "acp_bridge.py"), "--cwd", cwd, "--name", a["name"], "--mode", mode,
+            "--model", model, "--resume", resume, "--"] + list(a["cmd"])
+
+
+def build_agent_chat(spec: dict, app) -> dict:
+    """A chat with an AI agent of the user's computer. In the app: it runs here, in the project's folder on this
+    computer. In the web version: on the chosen computer through the Computers link (onpc --agent), with a
+    one-time ticket of that computer's MFA unlock each time it starts."""
+    aid = spec.get("agent")
+    if not isinstance(aid, str) or not AGENT_ID_RE.fullmatch(aid):
+        raise ApiError(400, "invalid agent")
+    pname = spec.get("project") or ""
+    project = next((p for p in app.projects(max_age=10) if p["name"] == pname), None) if pname else None
+    if pname and not project:
+        raise ApiError(404, f"project {pname} not found")
+    resume = spec.get("resume") or ""
+    if resume and not AGENT_SID_RE.fullmatch(str(resume)):
+        raise ApiError(400, "invalid conversation id")
+    pp = app.store.data["projects"].get(pname or "", {})
+    mode = spec.get("mode") if spec.get("mode") in CHAT_MODES else (pp.get("chatMode") or app.store.settings.get("chatMode", "default"))
+    extra = {}
+    if app.web:
+        dev = spec.get("dev")
+        if not isinstance(dev, str) or not PC_ID_RE.fullmatch(dev):
+            raise ApiError(400, "choose the computer this agent runs on")
+        a = next((x for x in app.agents_list()["agents"] if x["id"] == aid and x.get("dev") == dev), None)
+        name = (a or {}).get("name") or clean_str(spec.get("agentName") or aid, 40, "agent")
+        model = spec.get("model") if isinstance(spec.get("model"), str) and AGENT_MODEL_RE.fullmatch(spec["model"]) else (a or {}).get("model") or ""
+        c = app.conf.with_endpoint(None, None, None)
+        multiplex = bool(app.store.settings.get("sshMultiplex"))
+        extra = {"dev": dev}
+
+        def make_argv(mode_, model_, resume_, effort_="", relay=None, pc=""):
+            t = ""
+            try:
+                r = app.pc_call(dev, {"op": "ticket", "project": pname})
+                t = r.get("ticket") or "" if isinstance(r, dict) else ""
+            except ApiError:
+                pass
+            body = {"project": pname, "agent": aid, "mode": mode_, "model": model_ or "", "resume": resume_ or "", "ticket": t}
+            script = 'exec python3 "$HOME/.local/bin/onpc" --agent ' + shlex.quote(dev) + " " + shlex.quote(json.dumps(body))
+            return ssh_base(c, multiplex=multiplex) + ["-T", c.target, posix_sh(script)]
+        cwd = os.path.expanduser("~")
+    else:
+        a = next((x for x in app.agents_list()["agents"] if x["id"] == aid), None)
+        if not a or not a.get("on"):
+            raise ApiError(400, f"{(a or {}).get('name') or aid} is not set up on this computer — Settings → AI → Connect")
+        if project and not project.get("localExists"):
+            raise ApiError(400, f"{pname} has no folder on this computer — {a['name']} works on this computer's copy")
+        name = a["name"]
+        model = spec.get("model") if isinstance(spec.get("model"), str) and AGENT_MODEL_RE.fullmatch(spec["model"]) else a.get("model") or ""
+        cwd = project["local"] if project else os.path.expanduser("~")
+        extra = {"dev": app.pc.cfg()["id"]}           # the web version follows this tab onto the same computer
+
+        def make_argv(mode_, model_, resume_, effort_="", relay=None, pc=""):
+            return agent_argv(a, cwd, mode_, model_, resume_)
+    title = spec.get("title") if isinstance(spec.get("title"), str) and spec.get("title").strip() else f"{name} · {pname or 'home'}"
+    return {"make_argv": make_argv, "cwd": cwd, "title": title.strip()[:80], "resume": resume, "mode": mode, "model": model,
+            "effort": "", "agent": aid, "relay": "", "conf": None, "rpath": "",
+            "spec": {"kind": "chat", "project": pname, "where": "server", "cmdId": "", "claudeMode": "new", "slot": 0,
+                     "agent": aid, "agentName": name, **extra, **({"resume": resume} if resume else {}),
+                     **({"named": spec["named"]} if spec.get("named") in CHAT_NAMED else {})}}
 
 
 def build_chat(spec: dict, conf: ServerConf, store: Store, projects: list, prefer: str = "") -> dict:
@@ -7163,6 +7250,57 @@ def sftp(dev_id, project):
     return 0
 
 
+def agent(dev, body):
+    """onpc --agent: a chat with an AI agent of the user's computer (opencode, …) — the web version's chat
+    runs this over ssh; stream-json lines both ways. The computer starts it only with a one-time ticket."""
+    import threading
+    d = next((x for x in devices() if x["id"] == dev and x["online"]), None)
+    s = reach(d) if d else None
+    if s is None:
+        sys.stdout.write(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                     "result": "the computer of this chat is not connected"}) + "\n")
+        return 255
+    s.settimeout(None)
+    raw = json.dumps(body).encode()
+    s.sendall((("POST /pc/agent HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-PC: %s\r\nContent-Type: application/json\r\n"
+                "Content-Length: %d\r\n\r\n") % (int(d.get("port") or 0), d.get("secret") or "", len(raw))).encode() + raw)
+    head = b""
+    while not head.endswith(b"\r\n\r\n"):
+        c = s.recv(1)
+        if not c:
+            break
+        head += c
+    if b" 200 " not in head.split(b"\r\n")[0] + b" ":
+        why = ""
+        try:
+            s.settimeout(3)
+            why = json.loads(s.recv(65536).decode("utf-8", "replace") or "{}").get("error") or ""
+        except (OSError, ValueError):
+            pass
+        sys.stdout.write(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                     "result": why or head.split(b"\r\n")[0].decode("latin-1")}) + "\n")
+        return 126
+
+    def down():
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            os.write(1, b)
+        os._exit(0)
+    threading.Thread(target=down, daemon=True).start()
+    while True:
+        b = os.read(0, 65536)
+        if not b:
+            break
+        s.sendall(b)
+    try:
+        s.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    return 0
+
+
 def term(project, ticket=""):
     """A terminal of the user's computer, in this one (the web version's tab runs this over ssh -tt).
     The computer opens it only with a one-time ticket of an MFA unlock (the web version gets one).
@@ -7678,6 +7816,8 @@ def bg(body):
 
 
 def main(a):
+    if a[:1] == ["--agent"] and len(a) == 3:        # --agent DEV JSON (project, agent, mode, model, resume, ticket)
+        return agent(a[1], json.loads(a[2]))
     if a[:1] == ["--term"]:
         t = a[a.index("--ticket") + 1] if "--ticket" in a[:-1] else ""
         rest = [x for i, x in enumerate(a[1:], 1) if x != "--ticket" and a[i - 1] != "--ticket"]
@@ -8158,6 +8298,16 @@ elif sys.argv[1] == "call":          # call DEV|"" [JSON]: that computer, or the
         out = r
         if not (r.get("error") or "").startswith(("this project is not", "this run command is not", "not running here")):
             break
+elif sys.argv[1] == "agents":        # the AI agents (opencode, …) set up on each connected computer
+    out = {"agents": []}
+    for d in devs:
+        try:
+            r = call(d, {"op": "agents"})
+        except (OSError, ValueError):
+            continue
+        for a in r.get("agents") or []:
+            a.update(dev=d["id"], devName=d.get("name") or "")
+            out["agents"].append(a)
 elif sys.argv[1] == "answer":
     d = next((x for x in devs if x["id"] == sys.argv[2]), None)
     out = call(d, {"op": "answer", "id": sys.argv[3], "answer": sys.argv[4]}) if d else {"error": "no such computer"}
@@ -9223,6 +9373,72 @@ class PcHub:
                 except OSError:
                     pass
 
+    def serve_agent(self, h):
+        """POST /pc/agent {project, agent, mode, model, resume, ticket} from onpc --agent: the web version's chat
+        with an AI agent here. Only agents set up on THIS computer (the server names one, never a command),
+        only with a one-time ticket of this computer's MFA unlock. Then stream-json lines both ways."""
+        c = self.cfg()
+        if self.app.web or not c["on"]:
+            return h._json(403, {"error": "this computer is not connected"})
+        if not hmac.compare_digest((h.headers.get("X-PC") or "").encode(), c["secret"].encode()):
+            return h._json(403, {"error": "this computer does not know this server user"})
+        b = h._body()
+        cwd = os.path.expanduser("~")
+        if b.get("project"):
+            p = next((x for x in self.app.projects() if x["name"] == b.get("project") and x.get("localExists")), None)
+            if not p:
+                return h._json(404, {"error": "this project is not on " + c["name"]})
+            cwd = p["local"]
+        a = next((x for x in self.app.agents_list()["agents"] if x["id"] == b.get("agent") and x.get("on")), None)
+        if not a:
+            return h._json(404, {"error": f"{b.get('agent') or 'this agent'} is not set up on {c['name']} (Settings → AI)"})
+        u = self.take_ticket(b.get("ticket"), b.get("project") or "")
+        if not u:
+            self.audit("agent-refused", f"{a['name']} without an unlock" + (" in " + b["project"] if b.get("project") else ""))
+            return h._json(403, {"error": f"unlock {c['name']} with your MFA code first (Computers in the web version)"})
+        argv = agent_argv(a, cwd, b.get("mode"), b.get("model"), b.get("resume"))
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    env=dict(os.environ, PATH=tool_path()), start_new_session=True)
+        except OSError as e:
+            return h._json(500, {"error": f"could not start {a['name']}: {e}"})
+        self.audit("agent", f"{a['name']} chat in " + (b.get("project") or "home"), u["by"])
+        h.send_response(200)
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+
+        def up():
+            for line in proc.stdout:
+                try:
+                    h.wfile.write(line)
+                    h.wfile.flush()
+                    self.meter[1] += len(line)
+                except OSError:
+                    break
+            try:
+                h.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        threading.Thread(target=up, daemon=True).start()
+        try:
+            for line in h.rfile:
+                self.meter[0] += len(line)
+                proc.stdin.write(line)
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            if proc.poll() is None:
+                pc_kill(proc)
+            for f in (proc.stdin, proc.stdout):
+                try:
+                    f.close()
+                except (OSError, ValueError):
+                    pass
+            self.audit("agent-end", f"{a['name']} chat closed in " + (b.get("project") or "home"), u["by"])
+
     def serve_remote(self, h):
         """POST /pc/remote {op: asks | answer} from PC_BRIDGE_PY: the web version / the phone."""
         c = self.cfg()
@@ -9235,6 +9451,8 @@ class PcHub:
         u = self.unlocked(toks.get(c["id"]))          # this computer's MFA unlock from that web workspace
         if b.get("op") == "asks":
             return h._json(200, {"asks": self.pending()["asks"], "bg": self.bg_list()})
+        if b.get("op") == "agents":                # names / models only: the commands never leave this computer
+            return h._json(200, {"agents": [agent_public(a) for a in self.app.agents_list()["agents"] if a.get("on")]})
         if b.get("op") == "unlock":
             try:
                 return h._json(200, self.unlock(b.get("code"), str(b.get("by") or "web")))
@@ -11876,6 +12094,8 @@ class App:
                 self.sessions[sid] = w
             self._remember()
             return w.info()
+        if body.get("kind") == "chat" and body.get("agent"):
+            return self._agent_chat(sid, body)
         if body.get("kind") == "chat":
             built = build_chat(body, self.conf, self.store, self.projects(max_age=10),
                                prefer="" if self.web else self.pc.cfg()["id"])
@@ -13338,7 +13558,7 @@ class App:
                 body["watch"] = True
             elif sp.get("relay"):
                 body["relay"] = sp["relay"]
-            for k in ("mode", "model", "effort", "named"):
+            for k in ("mode", "model", "effort", "named", "agent", "agentName", "dev"):
                 if sp.get(k):
                     body[k] = sp[k]
         info = self._create_session(body, sid=sid, ready=True)
@@ -13789,6 +14009,120 @@ class App:
         with self.lock:
             body = dict(body, toks={k: v[0] for k, v in self._pc_unlock.items()})
         return remote_python(self.conf, PC_BRIDGE_PY, ["call", dev or ""], stdin=json.dumps(body).encode())
+
+    # ---- other AI agents (opencode, …): Settings → AI, and their chats
+    def _agent_chat(self, sid: str, body: dict) -> dict:
+        built = build_agent_chat(body, self)
+        c = ChatSession(sid, built, on_change=self._changed)
+        c.log = self.activity.add
+        aid = built["agent"]
+
+        def remember(project, mode=None, model=None, effort=None):
+            if mode is not None:
+                self.store.set_chat_prefs(project, mode=mode)
+                self.layout_changed(settings=("chatMode",))
+            if model is not None and not self.web:
+                self.agents_save({"op": "model", "id": aid, "model": model})
+        c.remember = remember
+        c.on_notify = self.push_notify
+        c.start()
+        self.activity.add("chat", built["spec"]["project"], c.title, session=built.get("resume") or "")
+        with self.lock:
+            self.sessions[sid] = c
+        self._remember()
+        return c.info()
+
+    def agents_list(self) -> dict:
+        """The agents of this computer: the ready-made list + the user's own, with what Connect found.
+        Web version: the ones set up on the connected computers (names and models only)."""
+        if self.web:
+            try:
+                r = remote_python(self.conf, PC_BRIDGE_PY, ["agents"])
+            except ApiError as e:
+                return {"agents": [], "error": e.message, "web": True}
+            return {"agents": (r or {}).get("agents") or [], "web": True}
+        saved = self.store.db.get("agents", {}) or {}
+        st = saved.get("state") if isinstance(saved.get("state"), dict) else {}
+        custom = [x for x in saved.get("custom") or [] if isinstance(x, dict) and AGENT_ID_RE.fullmatch(x.get("id") or "")]
+        out = []
+        for a in list(AGENT_PRESETS) + custom:
+            x = dict(a, custom=a in custom, on=False)
+            x.update({k: v for k, v in (st.get(a["id"]) or {}).items() if k in ("on", "models", "model", "agent", "version", "error", "checked")})
+            x["installed"] = bool(shutil.which(a["cmd"][0]))
+            x["command"] = " ".join(shlex.quote(y) for y in a["cmd"])
+            out.append(x)
+        return {"agents": out}
+
+    def agents_save(self, b: dict) -> dict:
+        if self.web:
+            raise ApiError(403, "set AI agents up in the app on that computer (Settings → AI)")
+        if not isinstance(b, dict):
+            raise ApiError(400, "bad request")
+        op, aid = b.get("op"), b.get("id")
+        with self.lock:
+            saved = self.store.db.get("agents", {}) or {}
+            st = dict(saved.get("state") or {})
+            custom = list(saved.get("custom") or [])
+            if op == "add":
+                name = clean_str(b.get("name"), 40, "name", required=True)
+                try:
+                    cmd = shlex.split(clean_str(b.get("cmd"), 300, "command", required=True), posix=not IS_WIN)
+                except ValueError:
+                    raise ApiError(400, "invalid command")
+                if not cmd:
+                    raise ApiError(400, "invalid command")
+                aid = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:24] or "agent"
+                aid = aid if aid[0].isalpha() else "a-" + aid
+                known = {x["id"] for x in AGENT_PRESETS} | {x.get("id") for x in custom}
+                while aid in known or not AGENT_ID_RE.fullmatch(aid):
+                    aid = (aid[:20] + "-" + secrets.token_hex(2)) if len(aid) > 1 else "agent-" + secrets.token_hex(2)
+                custom.append({"id": aid, "name": name, "cmd": cmd})
+            elif op == "remove":
+                custom = [x for x in custom if x.get("id") != aid]
+                st.pop(aid, None)
+            elif op == "off":
+                st[aid] = dict(st.get(aid) or {}, on=False)
+            elif op == "model":
+                if not isinstance(b.get("model"), str) or not AGENT_MODEL_RE.fullmatch(b["model"]):
+                    raise ApiError(400, "invalid model")
+                st[aid] = dict(st.get(aid) or {}, model=b["model"])
+            elif op != "connect":
+                raise ApiError(400, "bad request")
+            self.store.db.put("agents", {"state": st, "custom": custom})
+        if op == "connect":
+            probe = self.agent_connect(aid)
+            return dict(self.agents_list(), probe=probe)
+        return self.agents_list()
+
+    def agent_connect(self, aid) -> dict:
+        """Connect: start the agent once (ACP initialize + a new session in the home folder) — does it work,
+        is it signed in, which models it has."""
+        a = next((x for x in self.agents_list()["agents"] if x["id"] == aid), None)
+        if not a:
+            raise ApiError(404, "no such agent")
+        home = os.path.expanduser("~")
+        argv = [sys.executable, "-I", str(HERE / "acp_bridge.py"), "--probe", "--cwd", home, "--name", a["name"], "--"] + list(a["cmd"])
+        try:
+            r = subprocess.run(argv, cwd=home, capture_output=True, timeout=180, env=dict(os.environ, PATH=tool_path()))
+            j = json.loads((r.stdout or b"{}").decode("utf-8", "replace").strip().splitlines()[-1] or "{}")
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
+            j = {"ok": False, "error": f"{a['name']} did not answer: {e}"}
+        if not isinstance(j, dict):
+            j = {"ok": False, "error": "no answer"}
+        with self.lock:
+            saved = self.store.db.get("agents", {}) or {}
+            st = dict(saved.get("state") or {})
+            x = dict(st.get(aid) or {}, on=bool(j.get("ok")), error=str(j.get("error") or "")[:500], checked=time.time())
+            if j.get("ok"):
+                x.update(models=[m for m in j.get("models") or [] if isinstance(m, dict)][:300], agent=j.get("agent") or "",
+                         version=j.get("version") or "")
+                if not x.get("model") and j.get("model"):
+                    x["model"] = j["model"]
+            st[aid] = x
+            self.store.db.put("agents", dict(saved, state=st))
+        if not j.get("ok") and a.get("login"):
+            j["login"] = a["login"]
+        return j
 
     def pc_ticket(self, project: str) -> str:
         """A one-time terminal ticket from an unlocked computer that has the project, else "" (onpc says why)."""
@@ -16157,6 +16491,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.app.pc.serve_probe(self)
             if method == "POST" and path == "/pc/guest":       # Share on your domain: someone asks to open a link
                 return self.app.pc.serve_guest(self)
+            if method == "POST" and path == "/pc/agent":       # a chat with an AI agent of this computer, from the web
+                return self.app.pc.serve_agent(self)
             if method == "POST" and path == "/pc/term":        # a terminal of this computer in the web version
                 return self.app.pc.serve_term(self)
             if method == "POST" and path == "/pc/remote":      # the web version / phone: questions and answers
@@ -16407,6 +16743,10 @@ class Handler(BaseHTTPRequestHandler):
             return fs_change_call(app, fs_project(app, parts[1]), parts[2], self._body())
         if route == ("POST", "tts") and len(parts) == 1:
             return app.tts(self._body())
+        if route == ("GET", "agents") and len(parts) == 1:
+            return app.agents_list()
+        if route == ("POST", "agents") and len(parts) == 1:
+            return app.agents_save(self._body())
         if route == ("GET", "tasks") and len(parts) == 1:
             return app.tasks()
         if route == ("POST", "tasks") and len(parts) == 1:

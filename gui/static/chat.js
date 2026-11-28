@@ -248,6 +248,9 @@
     this.alive = info.alive;
     this.exitCode = info.exitCode;
     this.isChat = true;
+    // another AI agent (opencode, …) on the user's computer instead of Claude (agents.js, acp_bridge.py)
+    this.agent = (info.spec && info.spec.agent) || '';
+    this.who = this.agent ? (info.spec.agentName || this.agent) : 'Claude';
     this.opened = true;
     this.faOpen = false;
     this.closed = false;
@@ -332,6 +335,7 @@
     this.effortSel = h('select', { class: 'mini-sel effort', title: 'Thinking effort', onchange: function () { self.send({ t: 'effort', effort: self.effortSel.value }); } },
       EFFORTS.map(function (e) { return h('option', { value: e }, e); }));
     this.effortSel.value = 'medium';
+    if (this.agent) { this.effortSel.classList.add('hidden'); this.modelSel.replaceChildren(); }
     // phones: the three selects fold into one chip ("auto · Opus 5.5 · medium") that opens a menu
     this.optsBtn = h('button', { class: 'cb-opts', title: 'Mode, model and effort', onclick: function () { self.optsMenu(); } });
     [this.modeSel, this.modelSel, this.effortSel].forEach(function (sel) { sel.addEventListener('change', function () { self.paintOpts(); }); });
@@ -640,7 +644,7 @@
     this.alive = st.alive;
     this.exitCode = st.code;
     this.setMode(st.mode);
-    this.model = st.model || 'opus';
+    this.model = st.model || (this.agent ? '' : 'opus');
     this.effort = st.effort || 'medium';
     this.effortSel.value = this.effort;
     this.paintOpts();
@@ -655,7 +659,7 @@
     var self = this;
     if (Array.isArray(init.commands)) this.commands = init.commands.map(function (c) { return typeof c === 'string' ? { name: c } : c; });
     if (Array.isArray(init.models) && init.models.length) {
-      var cur = this.model || this.modelSel.value || 'opus';
+      var cur = this.model || this.modelSel.value || (this.agent ? '' : 'opus');
       var list = init.models.filter(function (m) { return m.value && m.value !== 'default'; });
       if (list.length) {
         this.modelSel.replaceChildren.apply(this.modelSel, list.map(function (m) {
@@ -668,7 +672,8 @@
   };
 
   P.setModelValue = function (v) {
-    v = v && v !== 'default' ? v : 'opus';
+    v = v && v !== 'default' ? v : (this.agent ? '' : 'opus');
+    if (this.agent && !v) { this.paintOpts(); return; }        // the agent's own default
     this.modelSel.value = v;
     if (this.modelSel.value !== v) { this.modelSel.append(h('option', { value: v }, v)); this.modelSel.value = v; }
     this.paintOpts();
@@ -690,12 +695,12 @@
     this.optsBtn.replaceChildren(
       h('span', { class: 'o-mode' }, selText(this.modeSel)),
       h('span', { class: 'o-model' }, selText(this.modelSel)),
-      h('span', { class: 'o-effort' }, selText(this.effortSel)), h('span', { class: 'o-car' }, '▾'));
+      this.agent ? null : h('span', { class: 'o-effort' }, selText(this.effortSel)), h('span', { class: 'o-car' }, '▾'));
   };
   P.optsMenu = function () {
     var self = this;
     var items = [];
-    [['Mode', this.modeSel, 'mode'], ['Model', this.modelSel, 'model'], ['Effort', this.effortSel, 'effort']].forEach(function (g, i) {
+    [['Mode', this.modeSel, 'mode'], ['Model', this.modelSel, 'model'], ['Effort', this.effortSel, 'effort']].slice(0, this.agent ? 2 : 3).forEach(function (g, i) {
       if (i) items.push('-');
       items.push({ header: g[0] });
       Array.prototype.forEach.call(g[1].children, function (o) {
@@ -938,10 +943,11 @@
         if (this.info && this.info.spec) { if (e.pc) this.info.spec.pc = e.pc; else delete this.info.spec.pc; }
         if (window.SWComputers) SWComputers.decorate();
         break;
-      case '_model': this.model = e.model || 'opus'; this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
+      case '_model': this.model = e.model || (this.agent ? '' : 'opus'); this.setModelValue(this.model); if (!this.replaying) this.system('model: ' + modelLabel(this.modelSel, this.model)); break;
       case '_effort': this.effort = e.effort; this.effortSel.value = e.effort; this.paintOpts(); if (!this.replaying) this.system('effort: ' + e.effort); break;
       case '_stderr': this.stderr.push(e.text); if (this.stderr.length > 200) this.stderr.shift(); break;
       case '_error': this.system(e.text, 'err'); break;
+      case '_bridge_note': this.system(e.text, e.err ? 'err' : ''); break;
       case '_restart': this.system('— restarted —', 'mark'); break;
       case '_reattached': this.system(e.busy ? '— Claude kept working on the server; following it again —' : '— reconnected to the same Claude —', 'mark'); break;
       case '_reconnect':
@@ -1423,7 +1429,7 @@
     if (req.subtype !== 'can_use_tool') return;
     var name = pcTool(req.tool_name);
     var rid = e.request_id;
-    if (name === 'AskUserQuestion') { this.questionCard(rid, req.input || {}); this.alertUser('Claude has a question', 'question'); return; }
+    if (name === 'AskUserQuestion') { this.questionCard(rid, req.input || {}); this.alertUser(this.who + ' has a question', 'question'); return; }
     if (name === 'ExitPlanMode') { this.planCard(rid, req.input || {}); this.alertUser('Claude’s plan is ready', 'plan'); return; }
     var reason = h('input', { class: 'inp deny-msg hidden', dir: 'auto', placeholder: 'Why not, or what to do instead (optional)' });
     var actions = h('div', { class: 'perm-actions' },
@@ -1446,8 +1452,8 @@
     this.stick = true;
     this.scrollEnd();
     if (this.mark('bell')) {
-      toast('Claude needs permission in ' + this.info.title, 'warn', { onclick: function () { SW.activate(self); } });
-      SW.notify('Claude needs permission', (TOOL_FA[name] || name) + ' — ' + this.info.title);
+      toast(this.who + ' needs permission in ' + this.info.title, 'warn', { onclick: function () { SW.activate(self); } });
+      SW.notify(this.who + ' needs permission', (TOOL_FA[name] || name) + ' — ' + this.info.title);
       if (SW.sound) SW.sound('permission', this);
     }
   };
@@ -2090,10 +2096,10 @@
     SW.showMenu(x, y, read.concat([
       { label: 'Rename…', action: function () { SW.renameTab(self); } },
       { label: 'New conversation', action: function () { self.newChat(); } },
-      { label: 'Past conversations…', action: function () { self.historyMenu(); } },
-      { label: 'Restart Claude (same conversation)', action: function () { self.restart(); } },
+      this.agent ? null : { label: 'Past conversations…', action: function () { self.historyMenu(); } },
+      { label: 'Restart ' + this.who + ' (same conversation)', action: function () { self.restart(); } },
       { label: 'Copy whole conversation', action: function () { navigator.clipboard.writeText(self.msgs.innerText).then(function () { toast('Copied', 'ok'); }).catch(fail); } },
-      { label: 'Open in Claude’s text terminal (TUI)', action: function () { SW.claudeInTerminal(self.info.spec.project, self.sessionId || self.info.spec.resume || '', self.info.title.replace(/^Claude · /, '')); } },
+      this.agent ? null : { label: 'Open in Claude’s text terminal (TUI)', action: function () { SW.claudeInTerminal(self.info.spec.project, self.sessionId || self.info.spec.resume || '', self.info.title.replace(/^Claude · /, '')); } },
       '-',
       { label: 'Close', k: 'Alt+W', action: function () { SW.closeTab(self); } }
     ]).concat(extra || SW.layoutItemsFor(self)));

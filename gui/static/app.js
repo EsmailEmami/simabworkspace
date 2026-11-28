@@ -2665,6 +2665,7 @@
       { label: 'Starter message…', disabled: !r, k: p.starter ? 'on' : '', action: function () { starterDialog(p); } },
       { label: 'Commands run on…', disabled: !r, k: window.SWComputers ? window.SWComputers.menuLabel(p.name) : '', action: function () { if (window.SWComputers) window.SWComputers.open(p.name); } },
       { label: 'Claude text terminal (TUI)', disabled: !r || !!p.localOnly, action: function () { openSession({ kind: 'claude', where: 'server', project: p.name }); } },
+      { header: 'Other AI' }].concat(agentItems(p, ''), [
       { header: 'Open' },
       { label: 'Files', disabled: !r && !p.localExists, action: function () { openFiles(p); } },
       { label: 'Changes — review, commit', disabled: !r && !p.localExists, action: function () { openSession({ kind: 'changes', project: p.name }); } },
@@ -2693,7 +2694,16 @@
         action: function () { syncDetails(p); } } : null,
       '-',
       { label: 'Remove…', action: function () { removeProjectDialog(p); } }
-    ]), { star: 'menu' });
+    ])), { star: 'menu' });
+  }
+
+  // other AI agents (agents.js): they work in the project's folder on the user's computer
+  function agentItems(p, prefix) {
+    if (!window.SWAgents) return [];
+    var here = S.web || !p || p.localExists;
+    return SWAgents.items(p ? p.name : '', prefix).map(function (it) {
+      return here || !/^(.*: )?New chat/.test(it.label) ? it : Object.assign({}, it, { disabled: true, k: 'no copy here' });
+    });
   }
 
 
@@ -4471,6 +4481,8 @@
         field('Command', inp('claudeCmd', { class: 'inp mono' })),
         field('Default mode', sel('chatMode', [['default', 'Ask before edits'], ['acceptEdits', 'Auto-accept edits'], ['plan', 'Plan'], ['auto', 'Auto']]))),
       chk('keepComposer', 'Keep the message box shown', 'A chat no longer hides it a few seconds after you leave the tab.'),
+      h('div', { class: 'sec' }, 'AI'),
+      window.SWAgents ? SWAgents.rows() : null,
       h('div', { class: 'sec' }, 'Terminal'),
       h('div', { class: 'row' }, field('Font size', inp('fontSize', { type: 'number', min: 9, max: 32, class: 'inp mono' }))),
       chk('copyOnSelect', 'Copy on select'),
@@ -4535,6 +4547,8 @@
           field('Command', inp('claudeCmd', { class: 'inp mono' })),
           field('Default mode', sel('chatMode', [['default', 'Ask before edits'], ['acceptEdits', 'Auto-accept edits'], ['plan', 'Plan'], ['auto', 'Auto']]))),
         chk('keepComposer', 'Keep the message box shown', 'A chat no longer hides it a few seconds after you leave the tab.'),
+        h('div', { class: 'sec' }, 'AI'),
+        window.SWAgents ? SWAgents.rows() : null,
         h('div', { class: 'sec' }, 'Terminal'),
         h('div', { class: 'row' },
           field('Font size', inp('fontSize', { type: 'number', min: 9, max: 32, class: 'inp mono' })),
@@ -5536,6 +5550,7 @@
         items.push({ label: n + ': Claude, continue last chat', grp: n, action: function () { resumeLatest(n); } });
         items.push({ label: n + ': Claude sessions — running and past', grp: n, action: function () { claudeSessionsDialog(p); } });
         items.push({ label: n + ': starter message for new Claude chats', grp: n, action: function () { starterDialog(p); } });
+        agentItems(p, n + ': ').forEach(function (it) { if (!it.disabled) items.push(Object.assign({ grp: n }, it)); });
         items.push({ label: n + ': Claude, past chats…', grp: n, action: function () { pickClaudeSession(n, function (sid, title) { openSession({ kind: 'chat', project: n, resume: sid, title: 'Claude · ' + title }); }); } });
         items.push({ label: n + ': server terminal', grp: n, action: function () { openSession({ kind: 'shell', where: 'server', project: n }); } });
         items.push({ label: n + ': VS Code on server', grp: n, action: function () { openEditor(p, 'server'); } });
@@ -5564,6 +5579,7 @@
     items.push({ label: 'Tasks — your to-do list', grp: 'app', action: function () { openTasks(); } });
     items.push({ label: 'Go to file…', grp: 'app', action: function () { setTimeout(function () { quickOpen(); }, 0); } });
     items.push({ label: 'Claude (no project, home folder)', grp: 'app', action: function () { openSession({ kind: 'chat' }); } });
+    agentItems(null, '').forEach(function (it) { items.push(Object.assign({ grp: 'app' }, it, { label: it.label + ' (no project)' })); });
     items.push({ label: 'Claude sessions — all projects', grp: 'app', action: function () { claudeSessionsDialog(null); } });
     items.push({ label: 'Server terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'server' }); } });
     items.push({ label: 'Local terminal (home)', grp: 'app', action: function () { openSession({ kind: 'shell', where: 'local' }); } });
@@ -5881,6 +5897,7 @@
         if ((sp.kind === 'chat' || sp.kind === 'claude') && sp.resume) spec.resume = sp.resume;
         if (sp.kind === 'chat' && sp.relay) spec.relay = sp.relay;
         if (sp.kind === 'chat' && sp.watch) spec.watch = true;      // the same Claude on the server, if it still works
+        if (sp.kind === 'chat' && sp.agent) { spec.agent = sp.agent; spec.agentName = sp.agentName; spec.dev = sp.dev; }   // opencode, … (agents.js)
         return openSession(spec, { background: i > 0 });
       });
     });

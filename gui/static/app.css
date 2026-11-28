@@ -1453,3 +1453,8 @@ body.compact .snd-name { flex-basis: 140px; }
 .share-add-row { display: grid; grid-template-columns: 1fr 110px; gap: 8px; }
 
 .share-proj { margin: 4px 0 8px; }
+
+/* the one Sync window: every option, one row per kind */
+.sync-tools { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); }
+.sync-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sync-row .k { width: 90px; flex: none; font-size: 12px; opacity: .65; }

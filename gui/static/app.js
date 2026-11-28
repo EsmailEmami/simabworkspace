@@ -2665,29 +2665,8 @@
       { label: 'Colour…', action: function () { colorDialog(p); } },
       { label: 'History…', action: function () { historyDialog(p.name); } },
       { label: 'Run commands…', action: function () { editCommands(p); } },
-      sync ? { header: 'Sync · ' + (p.sync ? p.sync.label : '') } : null,
-      sync && p.sync.guard ? { label: 'Check again', action: function () { guardRecheck(p); } } : null,
-      sync && p.sync.guard ? { label: 'Resume anyway…', action: function () { guardApprove(p); } } : null,
-      sync ? { label: 'Sync now', action: function () { syncAction(p, 'flush'); } } : null,
-      sync ? (p.sync && p.sync.paused ? { id: 'Pause / resume sync', label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { id: 'Pause / resume sync', label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
-      sync ? { id: 'Sync activity…', label: 'Sync activity (live)…', action: function () { syncActivity(p); } } : null,
-      sync ? { id: 'Sync details…', label: 'Sync details' + (p.sync && p.sync.conflicts ? ' · ' + plural(p.sync.conflicts, 'conflict') : '') + '…', action: function () { syncDetails(p); } } : null,
-      sync ? { id: '.git sync', label: p.sync && p.sync.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', action: function () {
-        var on = !(p.sync && p.sync.git !== false);
-        confirmDlg(on ? 'Sync the .git folders of “' + p.name + '” too? Git then works the same on both sides. (Do not run git on both sides at the same moment.)'
-          : 'Stop syncing the .git folders of “' + p.name + '”? Each side then keeps its own git history.', on ? 'Sync .git' : 'Stop', !on).then(function (ok) {
-          if (ok) api('POST', 'git-sync/' + encodeURIComponent(p.name), { on: on }).then(function () { toast('Updating sync settings — this takes a moment', 'ok'); setTimeout(refreshProjects, 4000); }).catch(fail);
-        });
-      } } : null,
-      sync ? { label: 'Not synced…', action: function () { ignoresDialog(p); } } : null,
-      sync && !p.copyOf && (p.pcs || []).length > 1 ? { label: 'Own copy on the server…', action: function () { ownCopyDialog(p, true); } } : null,
-      sync && p.copyOf ? { label: 'Back to the shared folder…', k: 'own copy', action: function () { ownCopyDialog(p, false); } } : null,
-      sync ? { label: 'Move folders…', action: function () { moveDialog(p); } } : null,
-      sync ? { label: 'Stop syncing…', action: function () {
-        confirmDlg('Stop syncing “' + p.name + '”? Files stay on both sides; they just stop syncing. It stays in the list as a server project.', 'Stop syncing', true).then(function (ok) {
-          if (ok) api('POST', 'sync/' + encodeURIComponent(p.name) + '/stop').then(function () { toast(p.name + ': sync stopped', 'ok'); refreshProjects(); }).catch(fail);
-        });
-      } } : null,
+      sync ? { id: 'Sync…', label: 'Sync…', k: (p.sync && p.sync.guard ? 'paused by guard' : p.sync && p.sync.conflicts ? plural(p.sync.conflicts, 'conflict') : p.sync ? p.sync.label : ''),
+        action: function () { syncDetails(p); } } : null,
       '-',
       { label: 'Remove…', action: function () { removeProjectDialog(p); } }
     ]), { star: 'menu' });
@@ -4780,12 +4759,48 @@
     load();
   }
 
+  function gitSyncToggle(p, done) {
+    var on = !(p.sync && p.sync.git !== false);
+    confirmDlg(on ? 'Sync the .git folders of “' + p.name + '” too? Git then works the same on both sides. (Do not run git on both sides at the same moment.)'
+      : 'Stop syncing the .git folders of “' + p.name + '”? Each side then keeps its own git history.', on ? 'Sync .git' : 'Stop', !on).then(function (ok) {
+      if (ok) api('POST', 'git-sync/' + encodeURIComponent(p.name), { on: on }).then(function () {
+        toast('Updating sync settings — this takes a moment', 'ok'); setTimeout(function () { refreshProjects(); if (done) done(); }, 4000);
+      }).catch(fail);
+    });
+  }
+  function stopSyncing(p, done) {
+    confirmDlg('Stop syncing “' + p.name + '”? Files stay on both sides; they just stop syncing. It stays in the list as a server project.', 'Stop syncing', true).then(function (ok) {
+      if (ok) api('POST', 'sync/' + encodeURIComponent(p.name) + '/stop').then(function () { toast(p.name + ': sync stopped', 'ok'); refreshProjects(); if (done) done(); }).catch(fail);
+    });
+  }
+
+  // the one Sync window of a project: state, every sync option, conflicts
   function syncDetails(p) {
     var body = h('div', null, h('div', { class: 'muted' }, 'Loading…'));
+    var tools = h('div', { class: 'sync-tools' });
     var syncNowBtn = h('button', { class: 'btn', onclick: function () { syncAction(p, 'flush'); setTimeout(load, 1500); } }, 'Sync now');
     var reconnectBtn = h('button', { class: 'btn hidden', onclick: function () { syncAction(p, 'resume'); setTimeout(load, 2000); } }, 'Reconnect');
-    var md = openModal({ title: 'Sync — ' + p.name, size: 'wide', body: body,
+    var md = openModal({ title: 'Sync — ' + p.name, size: 'wide', body: [tools, body],
       foot: [syncNowBtn, reconnectBtn, h('button', { class: 'btn', onclick: function () { syncActivity(p); } }, 'Live activity'), h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+    // every option in one place; ones that open their own window close this one first
+    function renderTools() {
+      var q = project(p.name) || p, sy = q.sync || {};
+      function b(label, fn, title, cls) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: title || '', onclick: fn }, label); }
+      function away(fn) { return function () { md.close(); fn(); }; }
+      tools.replaceChildren(
+        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'Run'),
+          sy.paused ? b('Resume sync', function () { syncAction(q, 'resume'); setTimeout(load, 1500); })
+            : b('Pause sync', function () { syncAction(q, 'pause'); setTimeout(load, 1500); })),
+        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'What syncs'),
+          b('Not synced…', away(function () { ignoresDialog(q); }), 'Folders and files that stay on one side'),
+          b(sy.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', function () { gitSyncToggle(q, load); })),
+        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'Where'),
+          !q.copyOf && (q.pcs || []).length > 1 ? b('Own copy on the server…', away(function () { ownCopyDialog(q, true); }), 'This computer gets its own server folder') : null,
+          q.copyOf ? b('Back to the shared folder…', away(function () { ownCopyDialog(q, false); })) : null,
+          b('Move folders…', away(function () { moveDialog(q); })),
+          b('Stop syncing…', function () { stopSyncing(q, function () { md.close(); }); }, '', 'danger')));
+    }
+    renderTools();
     function kv(k, v, cls) { return h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: 'v mono ' + (cls || '') }, v)); }
     function resolve(c, keep, btn) {
       btn.disabled = true;
@@ -4853,6 +4868,7 @@
           })));
         }
         body.replaceChildren.apply(body, rows);
+        renderTools();
       }).catch(function (e) { body.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
     }
     load();

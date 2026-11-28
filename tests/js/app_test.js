@@ -992,6 +992,13 @@ const tests = {
 
   async 'move folders of a synced project'() {
     q('.proj-head')[0].querySelector('.icon-btn').click();
+    const menuTexts = q('button', document.body.querySelector('#menu-root')).map((b) => b.textContent.trim());
+    assert.ok(!menuTexts.some((t) => /^(Pause sync|Resume sync|Sync now|Not synced…|Move folders…|Stop syncing…)/.test(t)), 'sync options only in the Sync window');
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
+    const all = q('button', q('.modal').pop()).map((b) => b.textContent.trim());
+    ['Sync now', 'Live activity', 'Not synced…', 'Move folders…', 'Stop syncing…'].forEach((t) => assert.ok(all.indexOf(t) >= 0, t));
+    assert.ok(all.some((t) => /^(Pause|Resume) sync$/.test(t)) && all.some((t) => /\.git folders/.test(t)));
     q('button').find((b) => b.textContent.trim() === 'Move folders…').click();
     await settle();
     const modal = q('.modal').pop();
@@ -1008,6 +1015,8 @@ const tests = {
     const pr = global.SW.project('cheshmeh');
     pr.pcs = ['a1', 'b2'];
     q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
     assert.ok(!q('button').find((b) => b.textContent.trim().indexOf('Back to the shared folder') === 0));
     q('button').find((b) => b.textContent.trim() === 'Own copy on the server…').click();
     await settle();
@@ -1018,8 +1027,11 @@ const tests = {
     pr.copyOf = '~/cheshmeh';
     global.SW.renderProjects();
     q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
     assert.ok(!q('button').find((b) => b.textContent.trim() === 'Own copy on the server…'));
     assert.ok(q('button').find((b) => b.textContent.trim().indexOf('Back to the shared folder…') === 0));
+    q('button', q('.modal').pop()).find((b) => b.textContent === 'Close').click();       // close the Sync window
     document.body.click();
     const n = () => q('.toast').filter((t) => /cheshmeh: 2 new commits pushed — click to Pull/.test(t.textContent)).length;
     global.SW.pushedNotice({ cheshmeh: { behind: 0 } }, { cheshmeh: { behind: 2 } });
@@ -1038,7 +1050,7 @@ const tests = {
   async 'sync details show conflicts and resolve one'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();
-    q('button').find((b) => b.textContent.trim().indexOf('Sync details') === 0).click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
     const modal = q('.modal').pop();
     assert.match(modal.textContent, /1 conflict/);
@@ -1065,13 +1077,13 @@ const tests = {
     assert.strictEqual(menuButtons().filter((b) => b.textContent.indexOf('Docker containers…') === 0).length, 1);
     assert.ok(q('.star', menuButtons()[0])[0].classList.contains('on'));
     // the label changes (pause ↔ resume) but the star stays: stable id
-    q('.star', menuButtons().find((b) => /^(Pause|Resume) sync/.test(b.textContent)))[0].click();
+    q('.star', menuButtons().find((b) => b.textContent.indexOf('Sync…') === 0))[0].click();
     post = calls.filter((c) => c.url === '/api/settings').pop();
-    assert.deepStrictEqual(post.body, { starred: ['menu:Docker containers…', 'menu:Pause / resume sync'] });
+    assert.deepStrictEqual(post.body, { starred: ['menu:Docker containers…', 'menu:Sync…'] });
     // unstar
     q('.star', menuButtons()[0])[0].click();
     post = calls.filter((c) => c.url === '/api/settings').pop();
-    assert.deepStrictEqual(post.body, { starred: ['menu:Pause / resume sync'] });
+    assert.deepStrictEqual(post.body, { starred: ['menu:Sync…'] });
     document.body.querySelector('#menu-root').replaceChildren();
   },
 
@@ -1082,16 +1094,16 @@ const tests = {
     const lastStars = () => calls.filter((c) => c.url === '/api/settings').pop().body.starred;
     q('.proj-head')[0].querySelector('.icon-btn').click();
     for (const label of ['Git…', 'Files']) q('.star', buttons().find((b) => b.textContent.indexOf(label) === 0))[0].click();
-    // menu:Pause / resume sync (earlier test), Git…, Files — in the order they were starred
+    // menu:Sync… (earlier test), Git…, Files — in the order they were starred
     let top = q('.starred', root);
-    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Sync…', 'menu:Git…', 'menu:Files']);
     assert.strictEqual(q('.grip', top[0]).length, 1);
     top.forEach((b, i) => { b.getBoundingClientRect = () => ({ top: i * 30, bottom: i * 30 + 30, height: 30, left: 0, right: 200, width: 200 }); });
     const ev = (type, y, id, kind) => dispatchEvent({ type, clientY: y, pointerId: id, pointerType: kind, preventDefault() {} });
     // a finger on the row itself does not drag (the menu scrolls)
     top[2].dispatch('pointerdown', { button: 0, pointerId: 3, pointerType: 'touch', clientY: 75, target: top[2] });
     ev('pointermove', 5, 3, 'touch'); ev('pointerup', 5, 3, 'touch');
-    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    assert.deepStrictEqual(lastStars(), ['menu:Sync…', 'menu:Git…', 'menu:Files']);
     // the mouse drags "Files" above "Pause / resume sync"
     top[2].dispatch('pointerdown', { button: 0, pointerId: 1, pointerType: 'mouse', clientY: 75, target: top[2] });
     ev('pointermove', 73, 1, 'mouse');                               // under 5 px: not a drag yet
@@ -1099,9 +1111,9 @@ const tests = {
     ev('pointermove', 5, 1, 'mouse');
     assert.ok(top[2].classList.contains('dragging'));
     ev('pointerup', 5, 1, 'mouse');
-    assert.deepStrictEqual(lastStars(), ['menu:Files', 'menu:Pause / resume sync', 'menu:Git…']);
+    assert.deepStrictEqual(lastStars(), ['menu:Files', 'menu:Sync…', 'menu:Git…']);
     top = q('.starred', root);
-    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Files', 'menu:Pause / resume sync', 'menu:Git…']);
+    assert.deepStrictEqual(top.map((b) => b.getAttribute('data-star')), ['menu:Files', 'menu:Sync…', 'menu:Git…']);
     // the click that ends a drag does not run the entry
     const n = calls.length;
     top[0].click();
@@ -1112,7 +1124,7 @@ const tests = {
     const grip = q('.grip', top[0])[0];
     top[0].dispatch('pointerdown', { button: 0, pointerId: 4, pointerType: 'touch', clientY: 10, target: grip });
     ev('pointermove', 80, 4, 'touch'); ev('pointerup', 80, 4, 'touch');
-    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    assert.deepStrictEqual(lastStars(), ['menu:Sync…', 'menu:Git…', 'menu:Files']);
     root.replaceChildren();
     await new Promise((r) => setTimeout(r, 450));
   },
@@ -1133,11 +1145,11 @@ const tests = {
     dispatchEvent({ type: 'pointermove', clientY: 3, pointerId: 9, preventDefault() {} });
     dispatchEvent({ type: 'pointerup', clientY: 3, pointerId: 9 });
     // menu stars stay where they were in the list, only the two commands swapped
-    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files', 'cmd:cheshmeh: server terminal', 'cmd:cheshmeh: files']);
+    assert.deepStrictEqual(lastStars(), ['menu:Sync…', 'menu:Git…', 'menu:Files', 'cmd:cheshmeh: server terminal', 'cmd:cheshmeh: files']);
     assert.strictEqual(q('.res', pal)[0].textContent.indexOf('cheshmeh: server terminal'), 0);
     q('.star', row('cheshmeh: server terminal'))[0].click();                // unstar both again
     q('.star', row('cheshmeh: files'))[0].click();
-    assert.deepStrictEqual(lastStars(), ['menu:Pause / resume sync', 'menu:Git…', 'menu:Files']);
+    assert.deepStrictEqual(lastStars(), ['menu:Sync…', 'menu:Git…', 'menu:Files']);
     dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 450));                            // clicks right after a drag are ignored
   },
@@ -1169,6 +1181,8 @@ const tests = {
   async 'not synced: edit the list, add the defaults, save'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
     q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
     await settle();
     const modal = q('.modal').pop();
@@ -1199,6 +1213,8 @@ const tests = {
   async 'not synced: removing an entry saves at once, nothing to delete'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
     q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
     await settle();
     const modal = q('.modal').pop();
@@ -1231,7 +1247,7 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
     guardAlert = { kind: 'marker', reason: 'The folder on this computer lost its .simab-root (disk not mounted?)', t: 1 };
     q('.proj-head')[0].querySelector('.icon-btn').click();
-    q('button').find((b) => b.textContent.trim().indexOf('Sync details') === 0).click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
     const md = q('.modal').pop();
     assert.match(md.textContent, /Paused by the sync guard: The folder on this computer lost its \.simab-root/);
@@ -1256,7 +1272,7 @@ const tests = {
   async 'sync details: Edit… opens the not-synced list'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();
-    q('button').find((b) => b.textContent.trim().indexOf('Sync details') === 0).click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
     q('.ign-edit', q('.modal').pop())[0].click();
     await settle();

@@ -51,6 +51,7 @@
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
 #    1.73.0  2026-11-28  Sync activity: click a project's sync bar (or ⋯ → Sync activity, Sync details → Live activity) to see live what comes to this computer and goes to the server; new projects do not sync .git by default
 #    1.74.0  2026-11-28  History shows what was done on your other computers and on the web too, each row marked ⚒ computer / Web / here
+#    1.75.0  2026-11-28  One Sync window per project: ⋯ → Sync… has every sync option (pause, not synced, .git, own copy, move, stop) with status and conflicts
 #    1.72.2  2026-11-28  Own server copy: folders the server user cannot read (a container database, docker/data/main-db) and Not synced paths are left out of the copy, and the unreadable ones join Not synced
 #    1.72.1  2026-11-27  Sync to this computer: a folder that already has files can be merged (a "Merge" choice after the error) instead of a dead end
 #    1.72.0  2026-11-27  Not synced: a change is safe (snapshot, recreate, guard counts start again, optional winner for the first round, then two-way-safe); new defaults (graphify-out, .dev-run, *.log); guard: a new list / recreated session / CLI resume is no mass delete, every pause logged, a long pause told; Mutagen left-out conflicts counted + one side wins all; sync list never blocks; git name/email check; onpc keeps remote URLs and ssh commands; a new project takes run commands from my other computers
@@ -424,7 +425,7 @@
 
 set -u -o pipefail
 
-VERSION="1.74.0"
+VERSION="1.75.0"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

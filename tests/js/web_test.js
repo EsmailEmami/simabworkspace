@@ -139,7 +139,7 @@ const tests = {
     assert.ok(document.body.classList.contains('side-open'), 'opens the projects drawer');
     q('#side-backdrop')[0].click();
     q('.proj-head')[0].dispatch('click');
-    assert.deepStrictEqual(q('.act').map((b) => b.textContent), ['Claude', 'Git', '⋯']);
+    assert.deepStrictEqual(q('.act').map((b) => b.textContent), ['Chat', 'Git', '⋯']);
     assert.deepStrictEqual(q('.cmd').map((e) => [e.querySelector('.nm').textContent, e.classList.contains('off')]), [['web', true], ['logs', false]],
       'a local run command is shown, disabled');
     document.body.querySelector('#btn-settings').click();
@@ -203,7 +203,8 @@ const tests = {
     assert.deepStrictEqual(ws.sent.pop(), { t: 'i', d: '\x1b' });
     assert.match(ws.url, /^wss:/);
     // the chat on a phone: short hint, Enter = new line (the ↑ button sends), icons instead of words
-    q('.act').find((b) => b.textContent === 'Claude').click();
+    q('.act').find((b) => b.textContent === 'Chat').click();
+    q('button', q('.menu').pop()).find((b) => b.textContent.indexOf('Claude') === 0).click();
     await settle();
     const chatWs = global.sockets[global.sockets.length - 1];
     chatWs.onopen && chatWs.onopen();

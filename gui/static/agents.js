@@ -27,7 +27,7 @@
   function items(project, prefix) {
     if (!loaded) load();
     var on = ready();
-    if (!on.length) return [{ label: (prefix || '') + 'Other AI (opencode, …)…', action: openSettings }];
+    if (!on.length) return [{ label: (prefix || '') + 'Other AI (opencode, …)…', k: 'connect', action: openSettings }];
     return on.map(function (a) {
       return { label: (prefix || '') + 'New chat: ' + a.name, k: S.web && a.devName ? '⌂ ' + a.devName : '', action: function () { open(project, a); } };
     });

@@ -2697,6 +2697,19 @@
     ])), { star: 'menu' });
   }
 
+  // the Chat button: which AI the new chat talks to — Claude on the server, or one on the user's computer
+  function chatMenu(p, anchor) {
+    var r = !p || hasRemote(p);
+    var items = [{ header: 'New chat' + (p ? ' · ' + p.name : ' (no project)') },
+      { label: 'Claude', k: 'server', disabled: !r, action: function () { openSession(p ? { kind: 'chat', project: p.name } : { kind: 'chat' }); } }];
+    agentItems(p, '').forEach(function (it) {
+      var m = /^New chat: (.*)$/.exec(it.label || '');
+      items.push(m ? Object.assign({}, it, { label: m[1], k: it.k || (it.disabled ? it.k : '⌂ this computer') }) : it);
+    });
+    if (window.SWAgents && SWAgents.list().some(function (a) { return a.on; })) items.push('-', { label: 'Other AI settings…', action: function () { try { localStorage.setItem('sw-set-tab', 'AI'); } catch (e) { /* private mode */ } settingsDialog(); } });
+    menuAt(anchor, items);
+  }
+
   // other AI agents (agents.js): they work in the project's folder on the user's computer
   function agentItems(p, prefix) {
     if (!window.SWAgents) return [];
@@ -4007,7 +4020,7 @@
     var r = hasRemote(p);
     var body = h('div', { class: 'proj-body' });
     body.append(h('div', { class: 'acts' },
-      h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
+      h('button', { class: 'act', title: 'New chat in this project: Claude (on the server) or another AI on your computer', onclick: function (e) { e.stopPropagation(); chatMenu(p, e.currentTarget); } }, 'Chat'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name)),
       sync ? h('button', { class: 'act git sync', title: 'Sync: ' + syncBadgeInfo(p)[2] + ' — click for everything about the sync', onclick: function () { syncDetails(p); } }, 'Sync', syncBadge(p)) : null,
       h('button', { class: 'act more', title: 'Terminal, VS Code, Docker, ports, history…', onclick: function (e) { e.stopPropagation(); projectMenu(p, e.currentTarget); } }, '⋯')));
@@ -6097,7 +6110,7 @@
     $('#btn-usage').addEventListener('click', usageDialog);
     $('#btn-history').addEventListener('click', function () { historyDialog(); });
     var bc = $('#btn-claude');
-    if (bc) bc.addEventListener('click', function () { openSession({ kind: 'chat' }); });
+    if (bc) bc.addEventListener('click', function (e) { e.stopPropagation(); chatMenu(null, bc); });
     var bt = $('#btn-terminal');
     if (bt) bt.addEventListener('click', serverTerminal);
     var bf = $('#btn-files');

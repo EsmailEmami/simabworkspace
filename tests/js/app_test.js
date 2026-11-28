@@ -374,7 +374,7 @@ const tests = {
 
   async 'project actions open tabs; Terminal goes to the server'() {
     q('.proj-head')[0].dispatch('click');
-    assert.deepStrictEqual(q('.act', q('.proj')[0]).map((b) => b.textContent.replace(/[0-9↑↓!✓⟳⏸✕?%]+$/, '')), ['Claude', 'Git', 'Sync', '⋯'], 'Claude, Git and Sync as buttons');
+    assert.deepStrictEqual(q('.act', q('.proj')[0]).map((b) => b.textContent.replace(/[0-9↑↓!✓⟳⏸✕?%]+$/, '')), ['Chat', 'Git', 'Sync', '⋯'], 'Chat, Git and Sync as buttons');
     q('.act.more')[0].click();
     q('button').find((b) => b.textContent.trim() === 'Server terminal').click();
     await settle();
@@ -557,7 +557,8 @@ const tests = {
 
   async 'a Claude tab inside the real app loads history and streams (no name clashes)'() {
     const before = global.sockets.length;
-    byText('.act', 'Claude').click();
+    byText('.act', 'Chat').click();
+    q('button', q('.menu').pop()).find((b) => b.textContent.indexOf('Claude') === 0).click();
     await settle();
     const ws = global.sockets[global.sockets.length - 1];
     assert.ok(global.sockets.length > before, 'chat connected');
@@ -1938,7 +1939,8 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
     // the sidebar's Claude button: a chat without a project
     const n = calls.length;
-    document.body.querySelector('#btn-claude').click(); await settle();
+    document.body.querySelector('#btn-claude').click();
+    q('button', q('.menu').pop()).find((b) => b.textContent.indexOf('Claude') === 0).click(); await settle();
     const post = calls.slice(n).find((c) => c.url === '/api/sessions');
     assert.deepStrictEqual([post.body.kind, post.body.project], ['chat', undefined]);
     fakeRunning = { cheshmeh: [] };
@@ -2821,8 +2823,10 @@ const tests = {
     assert.match(q('.ag-item', modal)[0].textContent, /connected/);
     localStorage.setItem('sw-set-tab', '');
     document.body.querySelector('#modal-root').replaceChildren();
-    q('.act.more')[0].click();
-    q('button').find((b) => b.textContent.indexOf('New chat: opencode') === 0).click(); await settle();
+    byText('.act', 'Chat').click();            // the Chat button: Claude or another AI
+    const names = q('button', q('.menu').pop()).map((b) => b.textContent);
+    assert.ok(names[0].indexOf('Claude') === 0 && /server/.test(names[0]), names.join('|'));
+    q('button', q('.menu').pop()).find((b) => b.textContent.indexOf('opencode') === 0).click(); await settle();
     const post = calls.filter((c) => c.url === '/api/sessions' && c.method === 'POST').pop();
     assert.strictEqual(post.body.agent, 'opencode');
     assert.strictEqual(post.body.agentName, 'opencode');

@@ -1382,6 +1382,11 @@
         h('button', { class: 'icon-btn', title: 'Split down (Alt+-)', onclick: function () { splitGroup(g, 'bottom'); } }, '⊟'),
         this.closeBtn));
     this.bar.addEventListener('dblclick', function (e) { if (e.target === g.bar || e.target === g.tabsEl) toggleZoom(g); });
+    this.tabsEl.addEventListener('wheel', function (e) {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // native horizontal scroll: let it through
+      e.preventDefault();
+      g.tabsEl.scrollLeft += e.deltaY;
+    }, { passive: false });
     // the whole tab bar is one drop target: a gap opens where the tab will land and the other tabs slide
     this.bar.addEventListener('dragover', function (e) {
       if (!(dragTab || foreignDrag(e))) return;

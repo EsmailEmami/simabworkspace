@@ -54,6 +54,7 @@
 #    1.75.0  2026-11-28  One Sync window per project: ⋯ → Sync… has every sync option (pause, not synced, .git, own copy, move, stop) with status and conflicts
 #    1.76.0  2026-11-28  Sync window in tabs (Overview, Conflicts, What syncs, Where); project Sessions list every computer's conversations again (⚒ chip), opening one continues a copy here
 #    1.78.1  2026-11-28  The Claude button is now Chat: pick Claude or another AI (opencode, …) for a new chat
+#    1.78.3  2026-11-28  Tab bar: scroll wheel scrolls the strip instead of switching tabs
 #    1.78.2  2026-11-28  Resume / Pause in the Sync window show their result there; a Resume that leaves it paused says why
 #    1.78.0  2026-11-28  Other AI beside Claude: opencode, Gemini CLI, Codex, Qwen Code or your own ACP agent run on your computer, in the same chat panel (Settings → AI, project ⋯ → New chat: …; web via the Computers link + MFA unlock); chat text can be selected again on Linux
 #    1.77.0  2026-11-28  Sync button beside Git; Sync → Computers tab: every computer's copy, bring / send work, remove old copies; ⚒↑ when another computer has work not pushed; quit warns about work not pushed; own copy only when the other computer is on (auto/always/never)
@@ -430,7 +431,7 @@
 
 set -u -o pipefail
 
-VERSION="1.78.2"
+VERSION="1.78.3"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 

@@ -1013,6 +1013,7 @@ const tests = {
     assert.match(comp.textContent, /⚒ desk — 1 file not committed/);
     assert.match(comp.textContent, /⚒ desk — 1 commit not pushed/);
     assert.match(comp.textContent, /2 conflicts/);                 // the desk's own sync state
+    assert.doesNotMatch(comp.textContent, /sync the same server folder right now/);   // each on its own copy
     assert.ok(q('.gb', comp).some((x) => x.textContent === '≠ here'));
     assert.strictEqual(q('.sy-n', q('.sy-tab', md0)[1])[0].textContent, '2');
     assert.match(q('.sy-pane', md0)[0].textContent, /2 things not the same on your other computers/);

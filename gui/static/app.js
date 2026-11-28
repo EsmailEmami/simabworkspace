@@ -4520,7 +4520,8 @@
         snd.el,
         chk('dockerWatch', 'Watch the projects’ docker containers', 'Tells you when a container on the server crashes, keeps restarting or turns unhealthy.'),
       chk('shareDevices', 'Same projects and tabs on every device', 'The installed app and the web version show each other’s projects; chats, Files, Changes and Tasks tabs open and close on all of them.'),
-        chk('ownCopy', 'Own server copy on each computer', 'A project another computer already syncs gets its own server folder (folder@this-computer). Changes go across only with git push / pull.'),
+        h('div', { class: 'row' }, field('Own server copy for this computer', sel('ownCopy', [['auto', 'Only when the other computer is on now'], ['always', 'Always (folder@this-computer)'], ['never', 'Never — one shared folder']]))),
+        h('div', { class: 'muted', style: 'font-size:12px;margin:-4px 0 8px' }, 'When you add a project another computer syncs. With an own copy, changes go across only with git push / pull (Sync → Computers).'),
         h('div', { class: 'row' }, field('When another computer pushes', sel('copyPull', [['notify', 'Tell me (Pull button)'], ['auto', 'Pull by itself when nothing is changed here'], ['off', 'Nothing']]))),
         h('div', { class: 'sec' }, 'Uninstall'),
         h('div', { class: 'svc' }, h('span', { class: 'muted' }, 'Stops all syncing (files stay on both sides) and removes settings and this app.'),
@@ -4988,6 +4989,11 @@
           : 'Push my commits and pull them into ' + nm + '’s copy', onclick: function () { bring(mineF.copy, f.copy, 'Your work is in ' + nm, b2); } }, '↑ Send my work to ' + nm);
         return h('div', { class: 'sy-acts' }, b1, b2);
       }
+      var crowd = c.folders.filter(function (f) { return f.who.filter(function (w) { return w.online && !w.web; }).length > 1; })[0];
+      var crowdNote = crowd && crowd.mine && !(project(p.name) || p).copyOf ? h('div', { class: 'sy-alert warn' },
+        h('div', null, crowd.who.filter(function (w) { return w.online && !w.web; }).map(function (w) { return w.here ? 'This computer' : w.name; }).join(' and ') +
+          ' sync the same server folder right now — files of both mix. Give this computer its own copy?'),
+        h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: away(function () { ownCopyDialog(project(p.name) || p, true); }) }, 'Own copy on the server…'))) : null;
       var cards = c.folders.map(function (f) {
         return h('div', { class: 'sy-comp' + (f.mine ? ' mine' : '') },
           h('div', { class: 'sy-comp-h' }, h('b', null, folderName(f)), h('span', { class: 'mono muted' }, f.folder),
@@ -5015,7 +5021,7 @@
         h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: function () { show(CT, true); } }, 'Computers'))));
       var nb = tabBtns[CT].lastChild;
       nb.textContent = issues.length ? String(issues.length) : ''; nb.classList.toggle('hidden', !issues.length); nb.classList.add('warn');
-      return [head].concat(cards, [h('div', { class: 'sy-acts', style: 'justify-content:flex-end' }, refresh)]);
+      return [head, crowdNote].concat(cards, [h('div', { class: 'sy-acts', style: 'justify-content:flex-end' }, refresh)]).filter(Boolean);
     }
     function loadComputers() {
       panes[CT].replaceChildren(h('div', { class: 'muted' }, 'Reading every copy on the server…'));

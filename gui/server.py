@@ -358,7 +358,7 @@ DEFAULT_SETTINGS = {
     "gitAutoFetch": True,        # …and `git fetch` every few minutes so "behind" is current
     "dockerWatch": True,         # check the projects' docker containers; tell me when one crashes
     "shareDevices": True,        # same projects + open tabs on every device (installed app ↔ web)
-    "ownCopy": True,             # a project another computer already syncs gets its own server copy (<folder>@<computer>)
+    "ownCopy": "auto",           # own server copy (<folder>@<computer>) of a project another computer syncs: auto (it is on now) / always / never
     "copyPull": "notify",        # the other computer pushed: notify (Pull button) | auto (pull when clean) | off
     "port": 0,                   # remembered so the window keeps the same address
     "starred": [],               # starred commands (Ctrl+Shift+P) and project ⋯ menu entries, shown first
@@ -366,6 +366,7 @@ DEFAULT_SETTINGS = {
 
 SETTING_CHOICES = {
     "persianView": ("auto", "off"),
+    "ownCopy": ("auto", "always", "never"),
     "composer": ("always", "claude", "never"),
     "chatMode": ("default", "acceptEdits", "plan", "auto"),
     "chatEffort": ("low", "medium", "high", "xhigh", "max"),
@@ -12155,10 +12156,20 @@ class App:
         self.activity.add("move", name, "moved folders" + (" → " + local if local else "") + (" | server → " + remote if remote else ""))
         return {"ok": True, "output": out[-1500:]}
 
-    def _copy_of_other(self, remote: str) -> bool:
-        """Another computer of mine already syncs this server folder (its devices.json snapshot says `here`)."""
+    def _copy_of_other(self, remote: str, online_only=False) -> bool:
+        """Another computer of mine already syncs this server folder (its devices.json snapshot says `here`);
+        `online_only`: and it is connected now (seen in the last 3 minutes)."""
         k = layout_key(remote)
-        return bool(k) and any(sp.get("here") and layout_key(sp.get("remote")) == k for sp in self._share_projects)
+        devs, now = getattr(self, "_share_devs", {}) or {}, time.time()
+        return bool(k) and any(sp.get("here") and layout_key(sp.get("remote")) == k and
+                               (not online_only or now - float((devs.get(sp.get("sharedDev") or "") or {}).get("at") or 0) < 180)
+                               for sp in self._share_projects)
+
+    def own_copy_mode(self, body: dict = None) -> str:
+        """auto (default): own copy only when the other computer is on now · always · never.
+        Older settings: True → auto, False → never."""
+        v = (body or {}).get("ownCopy", self.store.settings.get("ownCopy", "auto"))
+        return "never" if v is False else v if v in ("always", "never") else "auto"
 
     def _make_copy(self, conf, base: str, reuse=False, ignores=()) -> tuple:
         """-> (copy folder, paths left out because the server user cannot read them, e.g. docker/data/main-db)."""
@@ -12414,8 +12425,9 @@ class App:
         if mode == "download":
             if not remote:
                 raise ApiError(400, "pick a server folder")
-            if (body.get("ownCopy", self.store.settings.get("ownCopy", True)) and not copy_base(remote)
-                    and self._copy_of_other(remote)):
+            mode_c = self.own_copy_mode(body)
+            if (mode_c != "never" and not copy_base(remote)
+                    and self._copy_of_other(remote, online_only=mode_c == "auto")):
                 remote, skipped = self._make_copy(self.conf, remote, reuse=True,   # another computer syncs it: own copy
                                                   ignores=self._clean_ignores(body.get("ignores")) if body.get("ignores") is not None else default_ignores())
             argv += ["add-server", remote, "--yes", "--no-wait", "--git", git]

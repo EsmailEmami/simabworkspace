@@ -328,7 +328,22 @@ class Devices(base.TmpHome):
         self.assertEqual(runs[-1][1], "~/shop@desk", "the copy made before is used again")
         desk.store.settings["ownCopy"] = False
         desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
-        self.assertEqual(runs[-1][1], "~/shop", "setting off: the shared folder")
+        self.assertEqual(runs[-1][1], "~/shop", "setting off (old True/False): the shared folder")
+        # auto (default): only while the laptop is on; it has not been seen for an hour → the shared folder
+        desk.store.settings["ownCopy"] = "auto"
+        desk._share_devs["lap"]["at"] -= 3600
+        self.assertFalse(desk._copy_of_other("~/shop", online_only=True))
+        self.assertTrue(desk._copy_of_other("~/shop"))
+        import shutil
+        shutil.rmtree(os.path.join(self.server_home.name, "shop@desk"))
+        desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+        self.assertEqual(runs[-1][1], "~/shop", "auto, the other computer off: one shared folder")
+        desk.store.settings["ownCopy"] = "always"
+        desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+        self.assertEqual(runs[-1][1], "~/shop@desk", "always: own copy even when it is off")
+        self.assertEqual(sw.App.own_copy_mode(desk, {"ownCopy": True}), "auto")
+        with self.assertRaises(sw.ApiError):
+            desk.store.update_settings({"ownCopy": "sometimes"})
         desk.add_project({"mode": "download", "remote": "~/blog", "name": "blog"})
         self.assertEqual(runs[-1][1], "~/blog")
 

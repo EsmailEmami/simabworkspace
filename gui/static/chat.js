@@ -379,7 +379,14 @@
     this.pane.addEventListener('mouseenter', function () { self.hover = true; self.updateAway(); });
     this.pane.addEventListener('mouseleave', function () { self.hover = false; });
     // a tap on the chat makes it the active one: its message box comes back at once
-    this.pane.addEventListener('pointerdown', function () { setTimeout(function () { self.updateAway(); }, 0); });
+    // (inside the messages: after the button is let go — the box coming back moves the text, which
+    //  would break a selection you are just starting)
+    this.pane.addEventListener('pointerdown', function (e) {
+      if (!self.scroller.contains(e.target)) { setTimeout(function () { self.updateAway(); }, 0); return; }
+      var done = function () { window.removeEventListener('pointerup', done, true); window.removeEventListener('pointercancel', done, true); setTimeout(function () { self.updateAway(); }, 0); };
+      window.addEventListener('pointerup', done, true);
+      window.addEventListener('pointercancel', done, true);
+    });
     this.applyInfo();
     this.connect();
   }
@@ -782,6 +789,7 @@
   };
   P.setAway = function (on) {
     if (!!this.away === on) return;
+    if (on && this.scroller && String(window.getSelection ? window.getSelection() : '') && this.scroller.contains(window.getSelection().anchorNode)) return;   // text selected here: keep still
     this.away = on;
     this.pane.classList.toggle('away', on);
     this.restoreScroll();          // the chat got taller / shorter: stay at the end

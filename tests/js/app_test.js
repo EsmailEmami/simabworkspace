@@ -266,7 +266,8 @@ require(path.join(ROOT, 'gui/static/sounds.js'));
 // the page is still loading its other scripts (a slow files.js): app.js must not start before they ran
 let domReady = null;
 document.readyState = 'loading';
-document.addEventListener = (t, fn) => { if (t === 'DOMContentLoaded') domReady = fn; };
+const docAdd = document.addEventListener.bind(document);
+document.addEventListener = (t, fn, c) => { if (t === 'DOMContentLoaded') domReady = fn; else docAdd(t, fn, c); };
 require(path.join(ROOT, 'gui/static/app.js'));
 function loadRest() {
   global.SW && require(path.join(ROOT, 'gui/static/chat.js'));
@@ -1539,6 +1540,28 @@ const tests = {
     const css = fs.readFileSync(path.join(ROOT, 'gui/static/app.css'), 'utf8');
     assert.match(css, /#resizer \{[^}]*touch-action: none/);
     assert.match(css, /\.gutter \{[^}]*touch-action: none/);
+  },
+
+  async 'a drag let go outside the window ends anyway; a stuck drag never blocks selecting text'() {
+    const rz = document.body.querySelector('#resizer');
+    const ev = (type, x, extra) => global.dispatchEvent(Object.assign({ type, clientX: x, clientY: 10, pointerId: 3, pointerType: 'mouse' }, extra || {}));
+    rz.dispatch('pointerdown', { button: 0, pointerId: 3, pointerType: 'mouse', clientX: 230, clientY: 10 });
+    ev('pointermove', 300, { buttons: 1 });
+    assert.strictEqual(document.documentElement.style['--side'], '300px');
+    ev('pointermove', 400, { buttons: 0 });          // the button came up outside the window: no pointerup came
+    assert.strictEqual(localStorage.getItem('sw-side'), '300');
+    assert.ok(!rz.classList.contains('drag'));
+    ev('pointermove', 450, { buttons: 1 });
+    assert.strictEqual(document.documentElement.style['--side'], '300px', 'nothing moves after it ended');
+    // the window lost focus mid-drag: ended too
+    rz.dispatch('pointerdown', { button: 0, pointerId: 3, pointerType: 'mouse', clientX: 300, clientY: 10 });
+    global.dispatchEvent({ type: 'blur' });
+    ev('pointermove', 350, { buttons: 1 });
+    assert.strictEqual(document.documentElement.style['--side'], '300px');
+    // a class left from an older stuck drag: the next press clears it (text can be selected again)
+    document.body.classList.add('resizing-h', 'star-drag');
+    document.dispatch('pointerdown');
+    assert.ok(!document.body.classList.contains('resizing-h') && !document.body.classList.contains('star-drag'));
   },
 
   async 'a project can be renamed (shown name only)'() {

@@ -1537,6 +1537,14 @@
     return Math.max(1, Math.round(node.sizes[i] / sum * 1000));
   }
 
+  // a drag that never ended (its classes block text selection everywhere): the next press clears them
+  // (a new press means every earlier drag is over: one mouse has one button down)
+  var drags = [];
+  document.addEventListener('pointerdown', function () {
+    drags.slice().forEach(function (end) { end(); });
+    document.body.classList.remove('resizing-h', 'resizing-v', 'star-drag');
+  }, true);
+
   // drag with mouse, finger or pen: start(e) returns {move(e), up()}; the page does not scroll meanwhile
   function onDrag(el, start) {
     el.addEventListener('pointerdown', function (e) {
@@ -1544,17 +1552,31 @@
       e.preventDefault();
       var d = start(e);
       if (!d) return;
-      function move(ev) { if (ev.pointerId === e.pointerId) d.move(ev); }
-      function up(ev) {
+      // the mouse let go outside the window (Linux / Wayland send no pointerup then): end it anyway —
+      // else the page keeps body.resizing-* and no text can be selected any more
+      try { if (el.setPointerCapture) el.setPointerCapture(e.pointerId); } catch (x) { /* old browsers */ }
+      var ended = false;
+      drags.push(end);
+      function move(ev) {
         if (ev.pointerId !== e.pointerId) return;
+        if (ev.pointerType === 'mouse' && ev.buttons === 0) { end(); return; }
+        d.move(ev);
+      }
+      function up(ev) { if (!ev || ev.pointerId === undefined || ev.pointerId === e.pointerId) end(); }
+      function end() {
+        if (ended) return;
+        ended = true;
+        drags = drags.filter(function (f) { return f !== end; });
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
         window.removeEventListener('pointercancel', up);
+        window.removeEventListener('blur', end);
         d.up();
       }
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
       window.addEventListener('pointercancel', up);
+      window.addEventListener('blur', end);
     });
   }
 
@@ -6094,7 +6116,11 @@
     // an extra window starts with the sidebar hidden: it is for the tabs
     var wk = localStorage.getItem(wkey('sw-work'));
     if (WID ? wk !== '0' : wk === '1') setWorkMode(true);
-    document.addEventListener('visibilitychange', function () { if (!document.hidden) { refreshProjects(); if (S.active) S.active.focus(); } });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) return;
+      refreshProjects();
+      if (S.active && !String(window.getSelection ? window.getSelection() : '')) S.active.focus();     // a selection stays selected
+    });
     // back to the window: what you can see now is seen
     window.addEventListener('focus', function () {
       L.groups.forEach(function (g) { if (g.active && g.active.isChat && !Object.keys(g.active.perms || {}).length) g.active.el.classList.remove('done'); });

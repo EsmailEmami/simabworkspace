@@ -129,7 +129,10 @@ function install() {
     hidden: false,
     createElement: (t) => new Element(t),
     createDocumentFragment: () => new Element('fragment'),
-    addEventListener() {},
+    _l: {},
+    addEventListener(t, fn) { (this._l[t] = this._l[t] || []).push(fn); },
+    removeEventListener(t, fn) { this._l[t] = (this._l[t] || []).filter((f) => f !== fn); },
+    dispatch(type, extra) { const ev = Object.assign({ type, target: document.body, preventDefault() {}, stopPropagation() {} }, extra || {}); (this._l[type] || []).slice().forEach((f) => f(ev)); return ev; },
     querySelector: (s) => document.body.querySelector(s),
     querySelectorAll: (s) => document.body.querySelectorAll(s)
   };

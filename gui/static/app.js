@@ -2496,6 +2496,10 @@
     });
     var git = h('input', { type: 'checkbox', checked: true });
     var errBox = h('div', { class: 'add-err hidden' });
+    // a folder that already has files: offered only after the script refused it, never by default
+    var merge = h('input', { type: 'checkbox' });
+    var mergeRow = h('label', { class: 'check hidden' }, merge, h('span', null, 'Merge with the files already in the folder',
+      h('small', null, 'Files that differ on both sides become conflicts — nothing is overwritten.')));
     var go = h('button', { class: 'btn primary', onclick: function () {
       var todo = rows.filter(function (r) { return r.on.checked; });
       if (!todo.length) return;
@@ -2505,9 +2509,12 @@
       var bad = [];
       todo.reduce(function (chain, r) {
         return chain.then(function () {
-          return api('POST', 'add-project', { mode: 'download', remote: r.p.remote, name: r.p.name, local: r.inp.value.trim(), git: git.checked })
+          return api('POST', 'add-project', { mode: 'download', remote: r.p.remote, name: r.p.name, local: r.inp.value.trim(), git: git.checked, merge: merge.checked })
             .then(function () { r.on.checked = false; r.el.classList.add('done'); })
-            .catch(function (e) { bad.push(r.p.name + ': ' + e.message); });
+            .catch(function (e) {
+              if (/Not merging automatically/.test(e.message)) mergeRow.classList.remove('hidden');
+              bad.push(r.p.name + ': ' + e.message);
+            });
         });
       }, Promise.resolve()).then(function () {
         refreshProjects();
@@ -2522,7 +2529,7 @@
       h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'Downloads from the server, then keeps both sides in sync. Use a new or empty folder.'),
       h('div', { class: 'sync-here-list' }, rows.map(function (r) { return r.el; })),
       h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))),
-      errBox], foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
+      errBox, mergeRow], foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
   }
 
   // Settings → From your other computers: sync every project here at once; copy another computer's

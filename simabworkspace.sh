@@ -49,6 +49,7 @@
 #    1.66.3  2026-11-25  Linux installer adds the app-menu entry; Share a port chooses the computer; only connected computers that have the project are offered; the sidebar mark names the computer
 #    1.67.0  2026-11-25  Same on every device: starter message, project name and colour, stars, chat default mode/model/effort; Add project on a new computer starts with the Not synced list of that folder
 #    1.68.0  2026-11-25  Several computers on: a chat runs on one (the one it was opened on, the next only while it is off); Settings → Sync: Sync all to this computer, Copy from another computer (starter, run commands, names, colours)
+#    1.72.1  2026-11-27  Sync to this computer: a folder that already has files can be merged (a "Merge" choice after the error) instead of a dead end
 #    1.72.0  2026-11-27  Not synced: a change is safe (snapshot, recreate, guard counts start again, optional winner for the first round, then two-way-safe); new defaults (graphify-out, .dev-run, *.log); guard: a new list / recreated session / CLI resume is no mass delete, every pause logged, a long pause told; Mutagen left-out conflicts counted + one side wins all; sync list never blocks; git name/email check; onpc keeps remote URLs and ssh commands; a new project takes run commands from my other computers
 #    1.71.0  2026-11-27  Two computers: a chat runs only on the computer it was opened on and its tab stays there; each computer gets its own server copy (folder@computer), changes cross via git push / pull, a Pull notice after the other one pushes
 #    1.70.2  2026-11-27  Linux Wayland: the window opens under XWayland so the dock shows the logo, not a gear
@@ -420,7 +421,7 @@
 
 set -u -o pipefail
 
-VERSION="1.72.0"
+VERSION="1.72.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
@@ -1219,14 +1220,16 @@ add_project_menu() {
   esac
 }
 
-# add_project [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--yes] [--no-wait]
+# add_project [SERVER_FOLDER] [--local PATH] [--name NAME] [--git on|off] [--yes] [--no-wait] [--merge]
+#   --merge: the local folder may already have files; they are merged (differences become conflicts).
 #   Download a project from the server to this machine, then sync it.
 #   Without arguments it asks (folder list, local folder, …); --yes never asks.
 add_project() {
   title "Add project"
-  local rpath="" lpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list="" paused=0
+  local rpath="" lpath="" name="" git="" yes=0 nowait=0 ign_given=0 ign_list="" paused=0 merge=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --merge)   merge=1; shift ;;
       --local)   lpath="${2:-}"; shift 2 ;;
       --ignores) ign_given=1; ign_list="${2:-}"; shift 2 ;;
       --name)    name="${2:-}"; shift 2 ;;
@@ -1305,8 +1308,8 @@ add_project() {
   if [ -d "$lpath" ] && [ -n "$(ls -A "$lpath" 2>/dev/null)" ]; then
     warn "$lpath is not empty. Its files will be MERGED with the server copy (both directions)."
     warn "Files that differ on both sides become conflicts (nothing is overwritten)."
-    if [ $yes -eq 1 ]; then err "Not merging automatically — pick an empty or new local folder."; return 1; fi
-    confirm "Continue?" n || return 1
+    if [ $yes -eq 1 ] && [ $merge -eq 0 ]; then err "Not merging automatically — pick an empty or new local folder."; return 1; fi
+    [ $yes -eq 1 ] || confirm "Continue?" n || return 1
   fi
   # never make the parents: a missing /media/…/DISK2 means the disk is not mounted, not "create it"
   if [ ! -d "$(dirname "$lpath")" ]; then

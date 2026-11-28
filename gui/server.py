@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.72.0"
+VERSION = "1.72.1"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -12145,6 +12145,8 @@ class App:
             argv += ["add-server", remote, "--yes", "--no-wait", "--git", git]
             if local:
                 argv += ["--local", os.path.abspath(os.path.expanduser(local))]
+            if body.get("merge") is True:
+                argv += ["--merge"]                     # the local folder already has files: merge them
         else:
             if not local:
                 raise ApiError(400, "pick a folder on this machine")

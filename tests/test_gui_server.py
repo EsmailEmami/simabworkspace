@@ -1865,6 +1865,40 @@ wait_sync() {{ echo "WAIT $1"; }}
             self.assertIn("already synced", r.stdout)
 
 
+class BashAddServerMerge(unittest.TestCase):
+    """add-server into a local folder that already has files: refused with --yes, merged with --merge."""
+
+    def run_add(self, home, args):
+        script = (ROOT / "simabworkspace.sh").read_text()
+        funcs = [re.search(r"^%s\(\) \{.*?^\}" % n, script, re.S | re.M).group(0)
+                 for n in ("add_project", "normalize_local", "sanitize_name")]
+        stubs = f"""
+IS_WSL=0; SSH_USER=esi; SSH_HOST=h; SSH_PORT=225; DEFAULT_IGNORES=node_modules
+title() {{ :; }}; info() {{ echo "INFO $*"; }}; ok() {{ echo "OK $*"; }}; warn() {{ echo "WARN $*"; }}; err() {{ echo "ERR $*"; }}
+ssh_ok() {{ return 0; }}; daemon_start() {{ :; }}; git_warning() {{ :; }}
+ask() {{ printf '%s' "$2"; }}; confirm() {{ return 1; }}
+sessions_json() {{ printf '[]'; }}; session_names() {{ :; }}
+rssh() {{ HOME="{home}/server" bash -c "$*"; }}
+create_session() {{ echo "CREATE $1 $2"; }}; wait_sync() {{ :; }}
+"""
+        prog = stubs + "\n".join(funcs) + "\nadd_project " + " ".join(shlex.quote(a) for a in args)
+        return subprocess.run(["bash", "-c", prog], capture_output=True, text=True, cwd=home)
+
+    def test_merge_flag(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, "server", "app"))
+            local = os.path.join(home, "app")
+            os.makedirs(local)
+            Path(local, "a").write_text("a")
+            args = ["~/app", "--local", local, "--yes", "--no-wait", "--git", "on"]
+            r = self.run_add(home, args)
+            self.assertIn("Not merging automatically", r.stdout)
+            self.assertNotIn("CREATE", r.stdout)
+            r = self.run_add(home, args + ["--merge"])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("CREATE app " + local, r.stdout)
+
+
 class SetupFromWindow(unittest.TestCase):
     """What the terminal wizards did, now done by the window (fake HOME, nothing real touched)."""
 
@@ -1947,6 +1981,8 @@ class SetupFromWindow(unittest.TestCase):
             r = app.add_project({"mode": "download", "remote": "/home/esi/shop", "local": "~/w/shop", "git": True})
             self.assertEqual(r["project"], "shop")
             self.assertEqual(seen["argv"][2:], ["add-server", "/home/esi/shop", "--yes", "--no-wait", "--git", "on", "--local", os.path.join(self.home, "w", "shop")])
+            app.add_project({"mode": "download", "remote": "/home/esi/shop", "local": "~/w/shop", "merge": True})
+            self.assertEqual(seen["argv"][-1], "--merge", "a folder with files: merge only when asked")
             proj = Path(self.home, "p")
             proj.mkdir()
             app.add_project({"mode": "upload", "local": str(proj), "name": "pp", "git": False})
@@ -2561,7 +2597,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.72.0"', text)
+        self.assertIn('VERSION="1.72.1"', text)
 
 
 if __name__ == "__main__":

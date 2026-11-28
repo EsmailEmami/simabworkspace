@@ -997,8 +997,11 @@ const tests = {
     q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
     const all = q('button', q('.modal').pop()).map((b) => b.textContent.trim());
-    ['Sync now', 'Live activity', 'Not synced…', 'Move folders…', 'Stop syncing…'].forEach((t) => assert.ok(all.indexOf(t) >= 0, t));
+    ['Sync now', 'Live activity', 'Move folders…', 'Stop syncing…'].forEach((t) => assert.ok(all.indexOf(t) >= 0, t));
     assert.ok(all.some((t) => /^(Pause|Resume) sync$/.test(t)) && all.some((t) => /\.git folders/.test(t)));
+    const md0 = q('.modal').pop();
+    assert.deepStrictEqual(q('.sy-tab', md0).map((b) => b.firstChild.textContent), ['Overview', 'Conflicts', 'What syncs', 'Where']);
+    assert.strictEqual(q('.ign-edit', md0).length, 1);
     q('button').find((b) => b.textContent.trim() === 'Move folders…').click();
     await settle();
     const modal = q('.modal').pop();
@@ -1055,6 +1058,9 @@ const tests = {
     const modal = q('.modal').pop();
     assert.match(modal.textContent, /1 conflict/);
     assert.match(q('.conf', modal)[0].textContent, /web\/app\.ts/);
+    const active = q('.sy-tab', modal).find((b) => b.classList.contains('active'));
+    assert.strictEqual(active.firstChild.textContent, 'Conflicts', 'opens on Conflicts when there are some');
+    assert.strictEqual(q('.sy-n', active)[0].textContent, '1');
     q('button', modal).find((b) => b.textContent === 'Keep the server’s').click();
     await settle();
     const post = calls.filter((c) => c.url === '/api/sync/cheshmeh/resolve').pop();
@@ -1183,7 +1189,7 @@ const tests = {
     q('.proj-head')[0].querySelector('.icon-btn').click();
     q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
-    q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
+    q('.ign-edit', q('.modal').pop())[0].click();
     await settle();
     const modal = q('.modal').pop();
     const ta = q('textarea', modal)[0];
@@ -1215,7 +1221,7 @@ const tests = {
     q('.proj-head')[0].querySelector('.icon-btn').click();
     q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();
-    q('button').find((b) => b.textContent.trim() === 'Not synced…').click();
+    q('.ign-edit', q('.modal').pop())[0].click();
     await settle();
     const modal = q('.modal').pop();
     q('textarea', modal)[0].value = '';

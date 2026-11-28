@@ -4774,103 +4774,133 @@
     });
   }
 
-  // the one Sync window of a project: state, every sync option, conflicts
+  // the one Sync window of a project, in tabs: Overview · Conflicts · What syncs · Where
   function syncDetails(p) {
-    var body = h('div', null, h('div', { class: 'muted' }, 'Loading…'));
-    var tools = h('div', { class: 'sync-tools' });
+    var TABS = ['Overview', 'Conflicts', 'What syncs', 'Where'];
+    var tabBtns = TABS.map(function (t, i) { return h('button', { class: 'sy-tab', onclick: function () { show(i, true); } }, h('span', null, t), h('span', { class: 'sy-n hidden' })); });
+    var panes = TABS.map(function () { return h('div', { class: 'sy-pane hidden' }, h('div', { class: 'muted' }, 'Loading…')); });
+    var cur = -1, chosen = false;
+    function show(i, byHand) {
+      cur = i; if (byHand) chosen = true;
+      tabBtns.forEach(function (b, j) { b.classList.toggle('active', j === i); });
+      panes.forEach(function (x, j) { x.classList.toggle('hidden', j !== i); });
+    }
+    show(0);
     var syncNowBtn = h('button', { class: 'btn', onclick: function () { syncAction(p, 'flush'); setTimeout(load, 1500); } }, 'Sync now');
     var reconnectBtn = h('button', { class: 'btn hidden', onclick: function () { syncAction(p, 'resume'); setTimeout(load, 2000); } }, 'Reconnect');
-    var md = openModal({ title: 'Sync — ' + p.name, size: 'wide', body: [tools, body],
+    var md = openModal({ title: 'Sync — ' + p.name, size: 'wide sy-modal', body: [h('div', { class: 'sy-tabs' }, tabBtns), h('div', { class: 'sy-body' }, panes)],
       foot: [syncNowBtn, reconnectBtn, h('button', { class: 'btn', onclick: function () { syncActivity(p); } }, 'Live activity'), h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
-    // every option in one place; ones that open their own window close this one first
-    function renderTools() {
-      var q = project(p.name) || p, sy = q.sync || {};
-      function b(label, fn, title, cls) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: title || '', onclick: fn }, label); }
-      function away(fn) { return function () { md.close(); fn(); }; }
-      tools.replaceChildren(
-        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'Run'),
-          sy.paused ? b('Resume sync', function () { syncAction(q, 'resume'); setTimeout(load, 1500); })
-            : b('Pause sync', function () { syncAction(q, 'pause'); setTimeout(load, 1500); })),
-        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'What syncs'),
-          b('Not synced…', away(function () { ignoresDialog(q); }), 'Folders and files that stay on one side'),
-          b(sy.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', function () { gitSyncToggle(q, load); })),
-        h('div', { class: 'sync-row' }, h('span', { class: 'k' }, 'Where'),
-          !q.copyOf && (q.pcs || []).length > 1 ? b('Own copy on the server…', away(function () { ownCopyDialog(q, true); }), 'This computer gets its own server folder') : null,
-          q.copyOf ? b('Back to the shared folder…', away(function () { ownCopyDialog(q, false); })) : null,
-          b('Move folders…', away(function () { moveDialog(q); })),
-          b('Stop syncing…', function () { stopSyncing(q, function () { md.close(); }); }, '', 'danger')));
+    function away(fn) { return function () { md.close(); fn(); }; }
+    function btn(label, fn, cls, title) { return h('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), title: title || '', onclick: fn }, label); }
+    // one option: what it is, one line why, its button on the right
+    function opt(title, text, button, cls) {
+      return h('div', { class: 'sy-opt' + (cls ? ' ' + cls : '') }, h('div', { class: 'sy-opt-t' }, h('b', null, title), h('span', null, text)), button);
     }
-    renderTools();
-    function kv(k, v, cls) { return h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: 'v mono ' + (cls || '') }, v)); }
-    function resolve(c, keep, btn) {
-      btn.disabled = true;
+    function resolve(c, keep, b) {
+      b.disabled = true;
       api('POST', 'sync/' + encodeURIComponent(p.name) + '/resolve', { path: c.path, keep: keep }).then(function () {
         toast(c.path + ': kept the ' + (keep === 'local' ? 'local' : 'server') + ' version', 'ok');
         setTimeout(load, 1500);
-      }).catch(function (e) { btn.disabled = false; fail(e); });
+      }).catch(function (e) { b.disabled = false; fail(e); });
     }
     // the sync restarted with the same list: one side wins every conflict (first round), or two-way-safe again
-    function recreate(d, winner, btn) {
+    function recreate(d, winner, b) {
       var what = winner ? (winner === 'local' ? 'this computer’s' : 'the server’s') + ' version wins every conflict' : 'back to two-way-safe';
       if (winner && !confirm(p.name + ': ' + what + ' — the other side’s version of each conflicting file is overwritten. A snapshot of the server folder is taken first. Go on?')) return;
-      btn.disabled = true; btn.textContent = 'Syncing…';
+      b.disabled = true; b.textContent = 'Syncing…';
       api('POST', 'sync/' + encodeURIComponent(p.name) + '/ignores', { ignores: d.ignores || [], winner: winner, force: true }).then(function () {
         toast(p.name + ': ' + what, 'ok', { timeout: 8000 }); refreshProjects(); load();
-      }).catch(function (e) { btn.disabled = false; fail(e); load(); });
+      }).catch(function (e) { b.disabled = false; fail(e); load(); });
     }
     function change(list) {
       if (!list.length) return h('span', { class: 'muted' }, 'unchanged');
-      return list.slice(0, 3).map(function (c) { return h('div', { class: 'mono' }, (c.path || '(this path)') + ': ' + c.was + ' → ' + c.now); });
+      return list.slice(0, 3).map(function (c) { return h('div', { class: 'mono' }, (c.path && list.length > 1 ? c.path + ': ' : '') + c.was + ' → ' + c.now); });
+    }
+    function overview(d, q) {
+      var isErr = d.state === 'err', sy = q.sync || {};
+      var out = [];
+      if (d.guard) out.push(h('div', { class: 'sy-alert err' }, h('div', null, 'Paused by the sync guard: ' + d.guard.reason),
+        h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: function (ev) { guardRecheck(d, ev.currentTarget, load); } }, 'Check again'),
+          h('button', { class: 'btn sm', onclick: function () { guardApprove(d, load); } }, 'Resume anyway…'))));
+      if (d.mode === 'two-way-resolved') out.push(h('div', { class: 'sy-alert warn' }, h('div', null, 'One side wins every conflict now (two-way-resolved).'),
+        h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, '', ev.currentTarget); } }, 'Back to two-way-safe'))));
+      var nconf = d.conflicts.length + (d.moreConflicts || 0);
+      out.push(h('div', { class: 'sy-hero ' + (d.state || '') },
+        h('span', { class: 'sy-dot' }),
+        h('div', { class: 'sy-hero-t' }, h('b', null, d.label), h('span', null, (d.paused ? 'paused' : d.status) + ' · ' + plural(d.cycles || 0, 'cycle') +
+          (nconf ? ' · ' : ''), nconf ? h('a', { href: '#', onclick: function (e) { e.preventDefault(); show(1, true); } }, plural(nconf, 'conflict')) : null)),
+        sy.paused || d.paused ? btn('Resume sync', function () { syncAction(q, 'resume'); setTimeout(load, 1500); }, 'primary')
+          : btn('Pause sync', function () { syncAction(q, 'pause'); setTimeout(load, 1500); })));
+      if (d.progress) out.push(h('div', { class: 'sbar', style: 'margin:0 0 12px' }, h('i', { style: 'width:' + d.progress.percent + '%' }), h('span', null, progressLabel(d.progress))));
+      out.push(h('div', { class: 'sy-sides' },
+        h('div', { class: 'sy-side' }, h('span', { class: 'sy-cap' }, '⌂ This computer'), h('div', { class: 'mono' }, d.local)),
+        h('div', { class: 'sy-arrow' }, '⇄'),
+        h('div', { class: 'sy-side' }, h('span', { class: 'sy-cap' }, '☁ Server · ' + d.server), h('div', { class: 'mono' }, d.remote))));
+      if (d.error) out.push(h('div', { class: 'sy-alert err' }, 'Last error: ' + d.error));
+      if (isErr) out.push(h('div', { class: 'muted', style: 'font-size:12px' }, 'Click Reconnect (below) to restore the sync after a network outage.'));
+      return out;
+    }
+    function conflictsPane(d) {
+      var nconf = d.conflicts.length + (d.moreConflicts || 0);
+      if (!nconf) return [h('div', { class: 'sy-empty' }, h('div', { class: 'sy-big ok' }, '✓'), 'No conflicts — nothing changed on both sides.')];
+      var out = [h('div', { class: 'sy-bar' },
+        h('div', { class: 'muted' }, plural(nconf, 'conflict') + ' — the same file changed on both sides. Nothing was overwritten; the version you keep is copied over the other.' +
+          (d.moreConflicts ? ' Mutagen lists ' + d.conflicts.length + '; the rest appear as these are solved.' : '')),
+        h('div', { class: 'sy-acts' },
+          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'local', ev.currentTarget); } }, 'This computer wins all'),
+          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'server', ev.currentTarget); } }, 'The server wins all')))];
+      out.push(h('div', { class: 'conflicts' }, d.conflicts.map(function (c) {
+        var b1 = h('button', { class: 'btn sm', onclick: function () { resolve(c, 'local', b1); } }, 'Keep this machine’s');
+        var b2 = h('button', { class: 'btn sm', onclick: function () { resolve(c, 'server', b2); } }, 'Keep the server’s');
+        return h('div', { class: 'conf' },
+          h('div', { class: 'conf-top' }, h('span', { class: 'cpath mono' }, c.path || '(project root)'),
+            h('span', { class: 'cacts' }, b1, b2, h('button', { class: 'btn sm', title: 'Open in VS Code', onclick: function () { openCode(p); } }, 'VS Code'))),
+          h('div', { class: 'csides' }, h('div', null, h('b', null, 'this machine'), change(c.local)), h('div', null, h('b', null, 'server'), change(c.server))));
+      })));
+      return out;
+    }
+    function whatPane(d, q) {
+      var sy = q.sync || {}, ig = d.ignores || [], sh = d.sharedIgnores;
+      var out = [h('div', { class: 'sy-card' },
+        h('div', { class: 'sy-card-h' }, h('b', null, 'Not synced'), h('span', { class: 'muted' }, ig.length + (ig.length === 1 ? ' entry' : ' entries')),
+          h('span', { class: 'grow' }), h('a', { href: '#', class: 'ign-edit btn sm', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(q); } }, 'Edit…')),
+        h('div', { class: 'sy-chips' }, ig.length ? ig.map(function (x) { return h('span', { class: 'sy-chip mono' }, x); }) : h('span', { class: 'muted' }, 'Everything syncs')))];
+      if (sh && sh.slice().sort().join('\n') !== ig.slice().sort().join('\n')) out.push(h('div', { class: 'sy-alert warn' },
+        h('div', null, 'Your other computer skips a different list: ', h('span', { class: 'mono' }, sh.join(', ') || 'nothing')),
+        h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: away(function () { ignoresDialog(q); }) }, 'Compare…'))));
+      out.push(opt('.git folders', d.git ? 'Synced — git works the same on both sides.' : 'Not synced — git runs on the server only.',
+        btn(sy.git === false || !d.git ? 'Sync .git folders too' : 'Stop syncing .git folders', function () { gitSyncToggle(q, load); })));
+      return out;
+    }
+    function wherePane(q) {
+      var out = [];
+      if (!q.copyOf && (q.pcs || []).length > 1) out.push(opt('Own copy on the server', 'This computer gets its own server folder; your other computer gets its changes only through git.',
+        btn('Own copy on the server…', away(function () { ownCopyDialog(q, true); }))));
+      if (q.copyOf) out.push(opt('Own copy on the server', 'This computer syncs with its own server folder (' + q.remote + ').',
+        btn('Back to the shared folder…', away(function () { ownCopyDialog(q, false); }))));
+      out.push(opt('Move folders', 'Put the folder on this computer or on the server somewhere else.', btn('Move folders…', away(function () { moveDialog(q); }))));
+      out.push(h('div', { class: 'sy-danger-h' }, 'Danger zone'));
+      out.push(opt('Stop syncing', 'Files stay on both sides; the project stays in the list as a server project.',
+        btn('Stop syncing…', function () { stopSyncing(q, function () { md.close(); }); }, 'danger'), 'danger'));
+      return out;
     }
     function load() {
       api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
+        var q = project(p.name) || p;
         var isErr = d.state === 'err';
         syncNowBtn.classList.toggle('hidden', isErr);
         reconnectBtn.classList.toggle('hidden', !isErr);
-        var rows = [
-          h('div', { class: 'kvs' },
-            kv('status', d.label + (d.paused ? '' : ' (' + d.status + ')'), d.state),
-            kv('this machine', d.local), kv('server', d.server + ':' + d.remote),
-            kv('.git folders', d.git ? 'synced' : 'not synced'),
-            kv('sync cycles', String(d.cycles)),
-            h('div', { class: 'kv' }, h('span', { class: 'k' }, 'not synced'),
-              h('span', { class: 'v mono' }, (d.ignores || []).join(', ') || '—', ' ',
-                h('a', { href: '#', class: 'ign-edit', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Edit…'))),
-            d.error ? kv('last error', d.error, 'err') : null,
-            isErr ? h('div', { class: 'kv' }, h('span', { class: 'k' }), h('span', { class: 'v muted', style: 'font-size:12px' }, 'Click Reconnect to restore the sync after a network outage.')) : null)];
-        if (d.guard) rows.unshift(h('div', { class: 'add-err', style: 'margin-bottom:10px' }, 'Paused by the sync guard: ' + d.guard.reason + ' ',
-          h('button', { class: 'btn sm', onclick: function (ev) { guardRecheck(d, ev.currentTarget, load); } }, 'Check again'), ' ',
-          h('button', { class: 'btn sm', onclick: function () { guardApprove(d, load); } }, 'Resume anyway…')));
-        if (d.progress) rows.push(h('div', { class: 'sbar', style: 'margin:10px 0' }, h('i', { style: 'width:' + d.progress.percent + '%' }),
-          h('span', null, progressLabel(d.progress))));
         var nconf = d.conflicts.length + (d.moreConflicts || 0);
-        if (d.mode === 'two-way-resolved') rows.push(h('div', { class: 'add-err', style: 'margin:10px 0' },
-          'One side wins every conflict now (two-way-resolved). ',
-          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, '', ev.currentTarget); } }, 'Back to two-way-safe')));
-        var sh = d.sharedIgnores;
-        if (sh && sh.slice().sort().join('\n') !== (d.ignores || []).slice().sort().join('\n')) rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin:8px 0' },
-          'Your other computer skips: ', h('span', { class: 'mono' }, sh.join(', ') || 'nothing'), ' ',
-          h('a', { href: '#', onclick: function (e) { e.preventDefault(); md.close(); ignoresDialog(p); } }, 'Compare…')));
-        rows.push(h('div', { class: 'sec' }, nconf ? plural(nconf, 'conflict') + ' — the same file changed on both sides' : 'No conflicts'));
-        if (nconf) rows.push(h('div', { class: 'cacts', style: 'margin-bottom:8px' },
-          d.moreConflicts ? h('span', { class: 'muted', style: 'font-size:12px' }, 'Mutagen lists ' + d.conflicts.length + ' of them; the rest appear as these are solved. ') : null,
-          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'local', ev.currentTarget); } }, 'This computer wins all'),
-          h('button', { class: 'btn sm', onclick: function (ev) { recreate(d, 'server', ev.currentTarget); } }, 'The server wins all')));
-        if (d.conflicts.length) {
-          rows.push(h('div', { class: 'muted', style: 'font-size:12px;margin-bottom:8px' }, 'Nothing was overwritten. Pick which version to keep — it is copied over the other one. For folders, or to merge by hand, open VS Code.'));
-          rows.push(h('div', { class: 'conflicts' }, d.conflicts.map(function (c) {
-            var b1 = h('button', { class: 'btn sm', onclick: function () { resolve(c, 'local', b1); } }, 'Keep this machine’s');
-            var b2 = h('button', { class: 'btn sm', onclick: function () { resolve(c, 'server', b2); } }, 'Keep the server’s');
-            return h('div', { class: 'conf' },
-              h('div', { class: 'cpath mono' }, c.path || '(project root)'),
-              h('div', { class: 'csides' }, h('div', null, h('b', null, 'this machine'), change(c.local)), h('div', null, h('b', null, 'server'), change(c.server))),
-              h('div', { class: 'cacts' }, b1, b2, h('button', { class: 'btn sm', onclick: function () { openCode(p); } }, 'Open in VS Code')));
-          })));
-        }
-        body.replaceChildren.apply(body, rows);
-        renderTools();
-      }).catch(function (e) { body.replaceChildren(h('div', { class: 'add-err' }, e.message)); });
+        panes[0].replaceChildren.apply(panes[0], overview(d, q));
+        panes[1].replaceChildren.apply(panes[1], conflictsPane(d));
+        panes[2].replaceChildren.apply(panes[2], whatPane(d, q));
+        panes[3].replaceChildren.apply(panes[3], wherePane(q));
+        var n = tabBtns[1].lastChild;
+        n.textContent = nconf ? String(nconf) : ''; n.classList.toggle('hidden', !nconf);
+        if (!chosen) show(nconf && !d.guard ? 1 : 0);
+      }).catch(function (e) { panes[0].replaceChildren(h('div', { class: 'add-err' }, e.message)); show(0); });
     }
+    panes[3].replaceChildren.apply(panes[3], wherePane(project(p.name) || p));
     load();
   }
 

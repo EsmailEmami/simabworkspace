@@ -2777,6 +2777,16 @@
     return out;
   }
 
+  // where a History row was done: this device, another computer (⚒ name) or the web on the server
+  function isHere(it) { return !it.from || it.from.here; }
+  function histFrom(it) {
+    var f = it.from;
+    if (!f) return null;
+    var label = f.web ? 'Web' : '⚒ ' + f.name;
+    return h('span', { class: 'hfrom' + (f.here ? ' here' : ''), title: f.here ? 'Done here (' + label + ')'
+      : f.web ? 'Done on the web version (on the server)' : 'Done on the computer ' + f.name }, f.here ? 'here' : label);
+  }
+
   function historyDialog(onlyProject) {
     var list = h('div', { class: 'hist' }, h('div', { class: 'muted' }, 'Loading…'));
     var q = h('input', { class: 'inp', placeholder: 'Search what you did…', dir: 'auto', autofocus: true });
@@ -2808,13 +2818,15 @@
           h('span', { class: 'htime mono' }, new Date(it.t * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })),
           h('span', { class: 'hk', title: k[1] }, k[0]),
           it.project ? h('span', { class: 'hproj mono', style: 'color:' + c }, it.project) : h('span', { class: 'hproj muted' }, 'home'),
+          histFrom(it),
           ttl ? h('span', { class: 'htext titled', title: ttl + (said ? '\n' + said : '') },
             h('span', { class: 'httl', dir: 'auto' }, ttl), said ? h('span', { class: 'hsaid', dir: 'auto' }, said) : null)
             : h('span', { class: 'htext', dir: 'auto', title: it.text }, (it.kind.indexOf('git-') === 0 ? k[1] + (it.text ? ': ' : '') : '') + (it.text || k[1])),
           detail ? h('span', { class: 'hdetail mono', title: detail }, detail) : null,
           acts.map(function (a) { return h('button', { class: 'btn sm', title: a.title || '', onclick: function () { md.close(); a.fn(); } }, a.label); }),
-          h('button', { class: 'btn sm hdel', title: it.session ? 'Remove this conversation from History (Claude keeps it)' : 'Remove from History',
-            onclick: function () { removeRows(it.session ? { session: it.session } : { ids: [it.id] }); } }, '×')));
+          isHere(it) ? h('button', { class: 'btn sm hdel', title: it.session ? 'Remove this conversation from History (Claude keeps it)' : 'Remove from History',
+            onclick: function () { removeRows(it.session ? { session: it.session } : { ids: [it.id] }); } }, '×')
+            : h('span', { class: 'btn sm hdel', style: 'visibility:hidden' }, '×')));
       });
       list.replaceChildren.apply(list, out);
       clearBtn.disabled = !shown.length;
@@ -2824,6 +2836,7 @@
     function removeRows(body) {
       api('POST', 'activity-delete', body).then(function () {
         items = items.filter(function (it) {
+          if (!isHere(it)) return true;               // another device's rows: removed only there
           return body.clear ? (body.project && it.project !== body.project)
             : body.session ? it.session !== body.session : body.ids.indexOf(it.id) < 0;
         });
@@ -2832,8 +2845,10 @@
     }
     var clearBtn = h('button', { class: 'btn danger', style: 'flex:none', title: 'Remove the entries shown from History', onclick: function () {
       var text = q.value.trim(), shown = render();
+      shown = shown.filter(isHere);
+      if (!shown.length) { toast('Only what was done on this ' + (S.web ? 'web' : 'computer') + ' can be cleared here', 'warn'); return; }
       var what = text ? shown.length + ' matching entr' + (shown.length === 1 ? 'y' : 'ies') : proj.value ? 'all of “' + proj.value + '”' : 'everything';
-      confirmDlg('Clear ' + what + ' from History? Claude conversations themselves are kept.', 'Clear', true).then(function (ok) {
+      confirmDlg('Clear ' + what + ' done here from History? Other computers keep theirs; Claude conversations are kept.', 'Clear', true).then(function (ok) {
         if (ok) removeRows(text ? { ids: shown.map(function (it) { return it.id; }) } : { clear: true, project: proj.value });
       });
     } }, 'Clear');
@@ -2864,7 +2879,7 @@
     q.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); searchChats(); } });
     var inChats = h('button', { class: 'btn', style: 'flex:none', title: 'Search the text of every Claude conversation (Enter)', onclick: searchChats }, 'Search in chats');
     var md = openModal({ title: 'History', size: 'wide', body: [h('div', { class: 'row', style: 'flex:none' }, q, inChats, proj, clearBtn), list] });
-    api('GET', 'activity?limit=2000').then(function (d) { items = d.items || []; render(); loadTitles(); })
+    api('GET', 'activity?all=1&limit=2000').then(function (d) { items = d.items || []; render(); loadTitles(); })
       .catch(function (e) { list.replaceChildren(h('div', { class: 'muted' }, e.message)); });
     // the titles come from the server, one list per project that has conversations here
     function loadTitles() {

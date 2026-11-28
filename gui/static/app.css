@@ -550,6 +550,8 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 @media (hover: none) { .hrow .hdel { opacity: .6; } }
 .htime { color: var(--faint); font-size: 11px; flex: none; }
 .hk { width: 14px; text-align: center; color: var(--muted); flex: none; }
+.hfrom { font-size: 10.5px; flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 5px; border-radius: 4px; background: var(--bg3, rgba(127,127,127,.15)); }
+.hfrom.here { opacity: .55; }
 .hproj { font-size: 11.5px; flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .htext { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: plaintext; }
 .hdetail { color: var(--faint); font-size: 11px; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }

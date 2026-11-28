@@ -92,6 +92,36 @@ class Devices(base.TmpHome):
         self.assertIn("'⚒ ' + pcName + ' · off'", src)              # computer off: shown, greyed out
         self.assertIn("!c.devName", src)                            # editor leaves another computer's alone
 
+    def test_history_of_the_other_computers_and_the_web_shows_up_with_where(self):
+        self.laptop.activity.add("prompt", "shop", "fix the cart", session="s1")
+        self.web.activity.add("run", "blog", "build", cmd="make")
+        self.laptop.history_push()
+        rows = self.web.history_all()
+        by = {r["text"]: r for r in rows}
+        self.assertEqual(set(by), {"fix the cart", "build"})
+        self.assertEqual(by["build"]["from"], {"here": True, "name": "Web", "web": True})
+        far = by["fix the cart"]["from"]
+        self.assertEqual((far["name"], far["web"]), (self.laptop.device_name(), False))
+        self.assertTrue(by["fix the cart"]["id"].startswith(self.laptop.device_id() + ":"))
+        # the laptop sees the web's row (the web pushed while reading); nothing new → nothing sent again
+        laptop_rows = {r["text"]: r["from"] for r in self.laptop.history_all()}
+        self.assertEqual(laptop_rows["build"]["name"], "Web")
+        self.assertTrue(laptop_rows["build"]["web"])
+        self.fake.calls.clear()
+        self.assertEqual(self.laptop.history_push(), {})
+        self.assertEqual(self.fake.calls, [])
+        # removed on the laptop → gone on the web too; another device's id is not removed here
+        self.laptop.activity.delete(session="s1")
+        self.laptop.history_push()
+        self.assertEqual([r["text"] for r in self.web.history_all()], ["build"])
+        self.assertEqual(self.web.activity.delete([by["fix the cart"]["id"]]), 0)
+        # sharing off: only mine
+        self.web.store.update_settings({"shareDevices": False})
+        self.assertEqual([r["text"] for r in self.web.history_all()], ["build"])
+        src = (Path(sw.__file__).parent / "static" / "app.js").read_text()
+        self.assertIn("'activity?all=1&limit=2000'", src)
+        self.assertIn("histFrom(it)", src)
+
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()
         self.web.share_sync()

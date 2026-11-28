@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.73.0"
+VERSION = "1.74.0"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -5953,6 +5953,39 @@ print(json.dumps(data))
 """
 
 
+# Each device's History (activity rows) is one file on the SERVER: ~/.config/simabworkspace/history/<device>.json
+# ({name, web, at, items}: its newest rows, replaced whole). Every History dialog reads the others' files,
+# so a new computer / the web also sees what was done on the other computers, with where it was done.
+HISTORY_PY = r"""
+import json, os, sys, time, re
+d = os.path.expanduser("~/.config/simabworkspace/history")
+os.makedirs(d, exist_ok=True)
+op = json.loads(sys.stdin.read() or "{}")
+me = re.sub(r"[^0-9A-Za-z_.-]", "", str(op.get("device") or ""))[:80]
+now = time.time()
+if me and isinstance(op.get("items"), list):
+    tmp = os.path.join(d, me + ".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"name": str(op.get("name") or "")[:40], "web": bool(op.get("web")), "at": now,
+                   "items": [x for x in op["items"] if isinstance(x, dict)][:2000]}, fh, ensure_ascii=False)
+    os.replace(tmp, os.path.join(d, me + ".json"))
+out = {}
+if op.get("read"):
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".json") or fn[:-5] == me:
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and now - float(rec.get("at") or 0) < 90 * 86400:
+            out[fn[:-5]] = {"name": str(rec.get("name") or ""), "web": bool(rec.get("web")), "at": rec.get("at"),
+                            "items": [x for x in rec.get("items") or [] if isinstance(x, dict)]}
+print(json.dumps({"devices": out}))
+"""
+
+
 def lan_ips() -> list:
     """This computer's address(es) on the local network (Wi-Fi / LAN), main one first: a phone on the same
     network opens http://IP:PORT. The UDP connect sends nothing; it only asks which interface would be used."""
@@ -11412,10 +11445,51 @@ class App:
             self._projects_cache = (0.0, [])
         return changed
 
+    def history_push(self, read=False, force=False) -> dict:
+        """Put my newest History rows on the server (only when they changed, or `force`); with `read`, answer the
+        other devices' rows. {} when sharing is off or the server cannot be reached."""
+        if not self.share_on():
+            return {}
+        rows = self.activity.list(2000)
+        sig = (rows[0]["id"], len(rows)) if rows else (0, 0)
+        op = {"device": self.device_id(), "name": self.device_name(), "web": bool(self.web), "read": bool(read)}
+        if force or sig != getattr(self, "_history_sig", None):
+            op["items"] = rows
+        if "items" not in op and not read:
+            return {}
+        try:
+            res = remote_python(self.conf, HISTORY_PY, [], stdin=json.dumps(op).encode(),
+                                multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=30)
+        except Exception as e:
+            log_line(f"history share: {e}")
+            return {}
+        if "items" in op:
+            self._history_sig = sig
+        return res if isinstance(res, dict) else {}
+
+    def history_all(self, limit=2000) -> list:
+        """My History rows (`from` = here) + the other devices' ones from the server, newest first. Each row of
+        another device has `from` = {id, name, web} and `id` = "<device>:<id>" (removed only there)."""
+        mine = self.activity.list(limit)
+        for it in mine:
+            it["from"] = {"here": True, "name": self.device_name(), "web": bool(self.web)}
+        res = self.history_push(read=True)
+        out = list(mine)
+        for dev, rec in sorted((res.get("devices") or {}).items()):
+            if not isinstance(rec, dict):
+                continue
+            src = {"id": dev, "name": rec.get("name") or "Computer", "web": bool(rec.get("web"))}
+            for it in rec.get("items") or []:
+                if isinstance(it, dict) and it.get("kind") and isinstance(it.get("t"), (int, float)):
+                    out.append(dict(it, id=f"{dev}:{it.get('id')}", **{"from": src}))
+        out.sort(key=lambda x: -float(x.get("t") or 0))
+        return out[:max(1, min(int(limit) * 2, 10000))]
+
     def share_loop(self):
         while not self._share_stop:
             try:
                 self.share_sync()
+                self.history_push()
             except Exception as e:                     # never let the loop die
                 log_line(f"share: {e}")
             busy = time.time() - self.last_visible < 120
@@ -16241,12 +16315,16 @@ class Handler(BaseHTTPRequestHandler):
             return {"summary": app.git_summary((query.get("project") or [""])[0], (query.get("force") or ["0"])[0] == "1")}
         if route == ("GET", "activity"):
             lim = (query.get("limit") or ["500"])[0]
+            if (query.get("all") or [""])[0] == "1":
+                return {"items": app.history_all(int(lim) if lim.isdigit() else 2000)}
             return {"items": app.activity.list(int(lim) if lim.isdigit() else 500,
                                                (query.get("project") or [""])[0], (query.get("q") or [""])[0])}
         if route == ("POST", "activity-delete"):
             b = self._body()
-            return {"deleted": app.activity.delete(b.get("ids"), str(b.get("session") or ""), bool(b.get("clear")),
-                                                   str(b.get("project") or ""))}
+            n = app.activity.delete(b.get("ids"), str(b.get("session") or ""), bool(b.get("clear")),
+                                    str(b.get("project") or ""))
+            threading.Thread(target=app.history_push, daemon=True).start()    # the other devices see it gone too
+            return {"deleted": n}
         if route == ("GET", "chat-history") and len(parts) == 2:
             b = (query.get("before") or ["0"])[0]
             return app.chat_history_page(parts[1], int(b) if b.isdigit() else 0)

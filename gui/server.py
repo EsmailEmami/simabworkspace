@@ -3023,6 +3023,31 @@ elif op == "check":
         elif git(c, "rev-parse", "HEAD") != git(b, "rev-parse", "HEAD"):
             bad.append(name + ": not on the same commit — push here and pull in the shared folder (or the other way)")
     print(json.dumps({"ok": not bad, "why": bad[:20]}))
+elif op == "trash":
+    # an old computer's copy: only when every repo is committed and pushed; moved aside (not deleted) so it
+    # can still be brought back from ~/.cache/simabworkspace/removed-copies
+    if not os.path.isdir(copy) or copy.rstrip("/") == base.rstrip("/") or "@" not in os.path.basename(copy):
+        print(json.dumps({"error": "not a computer's copy"})); sys.exit()
+    bad = []
+    for r in repos(copy):
+        c = os.path.join(copy, r)
+        name = os.path.basename(copy) if r == "." else r
+        if git(c, "status", "--porcelain", "--untracked-files=no"):
+            bad.append(name + ": files not committed")
+        else:
+            lr = git(c, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+            if lr is None:
+                bad.append(name + ": no upstream branch — cannot tell if everything is pushed")
+            elif int(lr.split()[0]):
+                bad.append(name + ": " + lr.split()[0] + " commit(s) not pushed")
+    if bad:
+        print(json.dumps({"ok": False, "why": bad[:20]})); sys.exit()
+    import time
+    dest = os.path.expanduser("~/.cache/simabworkspace/removed-copies")
+    os.makedirs(dest, exist_ok=True)
+    to = os.path.join(dest, os.path.basename(copy) + "-" + time.strftime("%Y%m%d-%H%M%S"))
+    shutil.move(copy, to)
+    print(json.dumps({"ok": True, "to": to}))
 elif op == "remove":
     if os.path.isdir(copy) and copy.rstrip("/") != base.rstrip("/"):
         shutil.rmtree(copy, ignore_errors=True)
@@ -12737,6 +12762,32 @@ class App:
         self.activity.add("git-bring", name, f"{src or 'shared'} → {dst or 'shared'}: {len(ok)} of {len(res.get('repos') or [])} repos")
         return res
 
+    STALE_COPY_DAYS = 30
+
+    def sync_remove_copy(self, name: str, copy: str) -> dict:
+        """Computers tab: put aside an old computer's own copy — nobody working there for 30 days (or ever seen),
+        everything in it committed and pushed. Never this computer's own folder."""
+        if not isinstance(copy, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", copy):
+            raise ApiError(400, "which copy?")
+        st = self.sync_computers(name)
+        f = next((x for x in st["folders"] if x["copy"] == copy), None)
+        if not f:
+            raise ApiError(404, "no such copy on the server")
+        if f["mine"]:
+            raise ApiError(400, "this computer works in that copy")
+        recent = [w for w in f["who"] if w.get("online") or time.time() - float(w.get("seen") or 0) < self.STALE_COPY_DAYS * 86400]
+        if recent:
+            raise ApiError(409, f"{recent[0].get('name') or 'a computer'} still works in it (seen in the last {self.STALE_COPY_DAYS} days)")
+        p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
+        res = remote_python(self._project_conf(p), OWN_COPY_PY, ["trash", st["base"], f["folder"]],
+                            multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=300)
+        if not isinstance(res, dict) or res.get("error"):
+            raise ApiError(409, (res or {}).get("error") or "could not do it on the server")
+        if not res.get("ok"):
+            raise ApiError(409, "Not yet — " + "; ".join(res.get("why") or []))
+        self.activity.add("own-copy-removed", name, f"{f['folder']} put aside in {res.get('to')}")
+        return res
+
     def sync_details(self, name: str) -> dict:
         x = self._session(name)
         a, b = _endpoint(x.get("alpha")), _endpoint(x.get("beta"))
@@ -16507,6 +16558,8 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "move") and len(parts) == 2:
             b = self._body()
             return app.move_project(parts[1], b.get("local"), b.get("remote"))
+        if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "remove-copy":
+            return app.sync_remove_copy(parts[1], self._body().get("copy"))
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "bring":
             b = self._body()
             return app.sync_bring(parts[1], b.get("from"), b.get("to"))

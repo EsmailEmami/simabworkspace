@@ -1017,6 +1017,8 @@ const tests = {
     assert.ok(q('.gb', comp).some((x) => x.textContent === '≠ here'));
     assert.strictEqual(q('.sy-n', q('.sy-tab', md0)[1])[0].textContent, '2');
     assert.match(q('.sy-pane', md0)[0].textContent, /2 things not the same on your other computers/);
+    const rm = q('button', comp).find((x) => x.textContent === 'Remove this old copy…');
+    assert.ok(rm && rm.disabled, 'desk not seen for 30 days, but work not pushed: cannot remove');
     const bringBtn = q('button', comp).find((x) => x.textContent === '↓ Bring desk’s work here');
     assert.ok(bringBtn && bringBtn.disabled, 'desk has files not committed: cannot bring yet');
     const sendBtn = q('button', comp).find((x) => x.textContent === '↑ Send my work to desk');

@@ -203,6 +203,22 @@ class Devices(base.TmpHome):
         self.assertEqual((home / "shop" / "a.txt").read_text(), "3")
         with self.assertRaises(sw.ApiError):
             self.laptop.sync_bring("shop", "../x", "")
+        # an old copy: refused while its computer works there; after 30 days unseen (all pushed) → put aside, not deleted
+        with self.assertRaises(sw.ApiError) as e:
+            self.laptop.sync_remove_copy("shop", "desk")
+        self.assertIn("still works in it", e.exception.message)
+        (home / "shop@desk" / "a.txt").write_text("4")
+        self.laptop._share_devs[desk.device_id()]["at"] = 1
+        with self.assertRaises(sw.ApiError) as e:
+            self.laptop.sync_remove_copy("shop", "desk")
+        self.assertIn("not committed", e.exception.message)
+        git(home / "shop@desk", "checkout", "-q", "a.txt")
+        res = self.laptop.sync_remove_copy("shop", "desk")
+        self.assertFalse((home / "shop@desk").exists())
+        self.assertTrue(Path(res["to"]).is_dir())
+        self.assertIn("removed-copies", res["to"])
+        with self.assertRaises(sw.ApiError):
+            self.laptop.sync_remove_copy("shop", "laptop")     # no such copy
 
     def test_work_another_computer_has_not_pushed_shows_here(self):
         d = Path(self.tmp.name) / "desk2"

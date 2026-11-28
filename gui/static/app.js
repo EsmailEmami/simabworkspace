@@ -4997,6 +4997,23 @@
         h('div', null, crowd.who.filter(function (w) { return w.online && !w.web; }).map(function (w) { return w.here ? 'This computer' : w.name; }).join(' and ') +
           ' sync the same server folder right now — files of both mix. Give this computer its own copy?'),
         h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: away(function () { ownCopyDialog(project(p.name) || p, true); }) }, 'Own copy on the server…'))) : null;
+      // an old computer's copy nobody works in for 30 days, everything pushed: put it aside (kept in the server's cache)
+      function staleBtn(f) {
+        var month = Date.now() / 1000 - 30 * 86400;
+        if (f.mine || !f.copy || f.who.some(function (w) { return w.online || (w.seen || 0) > month; })) return null;
+        var clean = f.repos.every(function (r) { return !r.dirty && r.ahead === 0; });
+        var b = h('button', { class: 'btn sm danger', disabled: !clean, title: clean ? 'Moves it to ~/.cache/simabworkspace/removed-copies on the server (not deleted)'
+          : 'Something in it is not committed or not pushed', onclick: function () {
+          confirmDlg('Put aside ' + f.folder + '? Nobody worked in it for 30 days and everything in it is pushed. It moves to ~/.cache/simabworkspace/removed-copies on the server.', 'Put aside', true).then(function (ok) {
+            if (!ok) return;
+            b.disabled = true;
+            api('POST', 'sync/' + encodeURIComponent(p.name) + '/remove-copy', { copy: f.copy }).then(function () {
+              toast(f.folder + ' put aside', 'ok'); loadComputers();
+            }).catch(function (e) { b.disabled = false; fail(e); });
+          });
+        } }, 'Remove this old copy…');
+        return h('div', { class: 'sy-acts' }, h('span', { class: 'muted', style: 'font-size:12px' }, 'Not used for 30 days. '), b);
+      }
       var cards = c.folders.map(function (f) {
         return h('div', { class: 'sy-comp' + (f.mine ? ' mine' : '') },
           h('div', { class: 'sy-comp-h' }, h('b', null, folderName(f)), h('span', { class: 'mono muted' }, f.folder),
@@ -5016,7 +5033,7 @@
               h('span', { class: 'sy-rc', dir: 'auto', title: r.head }, h('span', { class: 'mono' }, (r.head || '').slice(0, 7)), ' ', r.subject, h('span', { class: 'muted' }, r.when ? ' · ' + agoS(r.when) : '')),
               compBadges(r, m ? { head: m.head, isMine: false } : { isMine: true }));
           })) : h('div', { class: 'muted', style: 'font-size:12px' }, 'No git repository here'),
-          moveBtns(f));
+          moveBtns(f), staleBtn(f));
       });
       var refresh = h('button', { class: 'btn sm', onclick: function () { loadComputers(); } }, 'Refresh');
       compSummary.replaceChildren(!others ? '' : h('div', { class: 'sy-alert ' + (issues.length ? 'warn' : 'ok') },

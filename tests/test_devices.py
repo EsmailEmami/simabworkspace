@@ -187,7 +187,7 @@ class Devices(base.TmpHome):
     def test_own_copy_script_makes_and_checks_the_copy(self):
         import subprocess
         g = self.git_repo(os.path.join(self.server_home.name, "shop"))
-        self.assertEqual(self.fake(None, sw.OWN_COPY_PY, ["make", "~/shop", "~/shop@desk"]), {"ok": True})
+        self.assertEqual(self.fake(None, sw.OWN_COPY_PY, ["make", "~/shop", "~/shop@desk"]), {"ok": True, "skipped": []})
         copy = os.path.join(self.server_home.name, "shop@desk")
         self.assertEqual(Path(copy, "a.txt").read_text(), "1")
         self.assertIn("already exists", self.fake(None, sw.OWN_COPY_PY, ["make", "~/shop", "~/shop@desk"])["error"])
@@ -219,6 +219,33 @@ class Devices(base.TmpHome):
         self.assertEqual(runs[-1][1], "~/shop", "setting off: the shared folder")
         desk.add_project({"mode": "download", "remote": "~/blog", "name": "blog"})
         self.assertEqual(runs[-1][1], "~/blog")
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "needs a non-root unix user")
+    def test_own_copy_skips_an_unreadable_database_folder_and_never_syncs_it(self):
+        """User 2026-11-28: cheshmeh's docker/data/main-db (owned by the container) broke the copy: Permission denied."""
+        self.git_repo(os.path.join(self.server_home.name, "shop"))
+        db = Path(self.server_home.name, "shop", "docker", "data", "main-db")
+        db.mkdir(parents=True)
+        Path(db, "x").write_text("x")
+        Path(self.server_home.name, "shop", "node_modules").mkdir()
+        os.chmod(db, 0)
+        try:
+            self.share("lap", "laptop", [{"name": "shop", "remote": "~/shop", "here": True}])
+            desk = self.laptop
+            desk.device_name = lambda: "desk"
+            desk.share_sync()
+            runs = []
+            desk.run_script = lambda argv, **kw: runs.append(argv) or (0, "Project 'shop' added")
+            desk.add_project({"mode": "download", "remote": "~/shop", "name": "shop"})
+            copy = Path(self.server_home.name, "shop@desk")
+            self.assertTrue(Path(copy, "a.txt").is_file())
+            self.assertFalse(Path(copy, "docker", "data", "main-db").exists())
+            self.assertFalse(Path(copy, "node_modules").exists(), "Not synced paths are not copied")
+            ign = runs[-1][runs[-1].index("--ignores") + 1].split(",")
+            self.assertIn("/docker/data/main-db", ign)
+            self.assertIn("node_modules", ign)
+        finally:
+            os.chmod(db, 0o755)
 
     def test_own_copy_and_back_to_the_shared_folder(self):
         import subprocess

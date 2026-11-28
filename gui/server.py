@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.72.1"
+VERSION = "1.72.2"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -2828,12 +2828,33 @@ if op == "make":
         print(json.dumps({"error": copy + " already exists on the server"})); sys.exit()
     if not os.path.isdir(base):
         print(json.dumps({"error": "not a folder on the server: " + base})); sys.exit()
+    import fnmatch
+    pats = [x for x in (sys.argv[4] if len(sys.argv) > 4 else "").split(",") if x]
+    skipped = []
+    def skip(d, names):
+        # Not synced paths, and what this user cannot read (a container's database folder owned by root)
+        out = set()
+        for n in names:
+            full = os.path.join(d, n)
+            rel = os.path.relpath(full, base)
+            if any(fnmatch.fnmatch(rel, p[1:]) if p.startswith("/") else fnmatch.fnmatch(n, p) for p in pats):
+                out.add(n)
+            elif not os.path.islink(full) and not os.access(full, os.R_OK | (os.X_OK if os.path.isdir(full) else 0)):
+                out.add(n)
+                skipped.append(rel)
+        return out
     try:
-        shutil.copytree(base, copy, symlinks=True)
-    except (OSError, shutil.Error) as e:
+        shutil.copytree(base, copy, symlinks=True, ignore=skip)
+    except shutil.Error as e:
+        for a in e.args[0] if e.args and isinstance(e.args[0], list) else []:
+            if "Permission denied" not in str(a[-1]):
+                shutil.rmtree(copy, ignore_errors=True)
+                print(json.dumps({"error": "could not copy: " + str(e)[:200]})); sys.exit()
+            skipped.append(os.path.relpath(a[0], base))
+    except OSError as e:
         shutil.rmtree(copy, ignore_errors=True)
         print(json.dumps({"error": "could not copy: " + str(e)[:200]})); sys.exit()
-    print(json.dumps({"ok": True}))
+    print(json.dumps({"ok": True, "skipped": sorted(set(skipped))[:200]}))
 elif op == "check":
     bad = []
     for r in sorted(set(repos(copy)) | set(repos(base))):
@@ -11889,13 +11910,15 @@ class App:
         k = layout_key(remote)
         return bool(k) and any(sp.get("here") and layout_key(sp.get("remote")) == k for sp in self._share_projects)
 
-    def _make_copy(self, conf, base: str, reuse=False) -> str:
+    def _make_copy(self, conf, base: str, reuse=False, ignores=()) -> tuple:
+        """-> (copy folder, paths left out because the server user cannot read them, e.g. docker/data/main-db)."""
         new = base.rstrip("/") + "@" + copy_suffix(self.device_name())
-        r = remote_python(conf, OWN_COPY_PY, ["make", base, new], multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=900)
+        r = remote_python(conf, OWN_COPY_PY, ["make", base, new, ",".join(ignores)],
+                          multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=900)
         err = (r or {}).get("error") if isinstance(r, dict) else "no answer from the server"
         if err and not (reuse and "already exists" in err):
             raise ApiError(400, err)
-        return new
+        return new, [str(x) for x in ((r or {}).get("skipped") or [])] if isinstance(r, dict) else []
 
     def own_copy(self, name: str, on: bool) -> dict:
         """on: this computer syncs its own server copy <folder>@<computer>, the other computers keep theirs;
@@ -11907,7 +11930,8 @@ class App:
         if on:
             if base:
                 raise ApiError(400, "this computer already has its own copy")
-            target = self._make_copy(conf, remote)
+            sess = next((x for x in mutagen_sessions() if x.get("name") == name), None) or {}
+            target, _ = self._make_copy(conf, remote, ignores=(sess.get("configuration") or {}).get("ignores") or ())
         else:
             if not base:
                 raise ApiError(400, "this project already uses the shared folder")
@@ -12130,6 +12154,7 @@ class App:
         if mode not in ("download", "upload"):
             raise ApiError(400, "mode must be download or upload")
         name = clean_str(body.get("name"), 64, "name")
+        skipped = []
         if name and not valid_name(name):
             raise ApiError(400, "use only letters, digits, ., - and _ in the name")
         local = clean_str(body.get("local"), 1000, "local folder")
@@ -12141,7 +12166,8 @@ class App:
                 raise ApiError(400, "pick a server folder")
             if (body.get("ownCopy", self.store.settings.get("ownCopy", True)) and not copy_base(remote)
                     and self._copy_of_other(remote)):
-                remote = self._make_copy(self.conf, remote, reuse=True)      # another computer syncs it: own copy
+                remote, skipped = self._make_copy(self.conf, remote, reuse=True,   # another computer syncs it: own copy
+                                                  ignores=self._clean_ignores(body.get("ignores")) if body.get("ignores") is not None else default_ignores())
             argv += ["add-server", remote, "--yes", "--no-wait", "--git", git]
             if local:
                 argv += ["--local", os.path.abspath(os.path.expanduser(local))]
@@ -12159,7 +12185,9 @@ class App:
         if name:
             argv += ["--name", name]
         ignores = self._clean_ignores(body.get("ignores")) if body.get("ignores") is not None else default_ignores()
-        if body.get("ignores") is not None:
+        if skipped:                          # unreadable on the server (a database folder): never synced
+            ignores = ignores + ["/" + x for x in skipped if "/" + x not in ignores]
+        if body.get("ignores") is not None or skipped:
             argv += ["--ignores", ",".join(ignores)]
         try:
             streams = max(0, min(int(body.get("streams") or 0), COPY_MAX_STREAMS))

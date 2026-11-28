@@ -565,6 +565,8 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 .gb.conflict { background: #3a1d24; color: var(--err); font-weight: 700; }
 .gb.clean { color: var(--ok); margin-left: 5px; }
 .act.git { display: inline-flex; align-items: center; justify-content: center; }
+.gb.spin { display: inline-block; animation: sw-spin 1.2s linear infinite; }
+@keyframes sw-spin { to { transform: rotate(360deg); } }
 .proj-head .gbs { margin-left: 0; }
 
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

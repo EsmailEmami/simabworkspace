@@ -358,7 +358,7 @@ const tests = {
 
   async 'project actions open tabs; Terminal goes to the server'() {
     q('.proj-head')[0].dispatch('click');
-    assert.deepStrictEqual(q('.act', q('.proj')[0]).map((b) => b.textContent.replace(/[0-9↑↓!✓]+$/, '')), ['Claude', 'Git', '⋯'], 'only Claude and Git as buttons');
+    assert.deepStrictEqual(q('.act', q('.proj')[0]).map((b) => b.textContent.replace(/[0-9↑↓!✓⟳⏸✕?%]+$/, '')), ['Claude', 'Git', 'Sync', '⋯'], 'Claude, Git and Sync as buttons');
     q('.act.more')[0].click();
     q('button').find((b) => b.textContent.trim() === 'Server terminal').click();
     await settle();
@@ -1052,6 +1052,22 @@ const tests = {
 
   async 'sync details show conflicts and resolve one'() {
     document.body.querySelector('#modal-root').replaceChildren();
+    // the Sync button beside Git: its mark says conflicts, a click opens the Sync window
+    const pr0 = global.SW.project('cheshmeh'), keepC = pr0.sync.conflicts;
+    pr0.sync.conflicts = 1;
+    global.SW.renderProjects();
+    const sbtn = q('.act.sync')[0];
+    assert.ok(sbtn, 'Sync button beside Git');
+    const acts = q('.act', sbtn.parentNode || q('.acts')[0]);
+    assert.ok(acts.indexOf(sbtn) > 0 && acts[acts.indexOf(sbtn) - 1].classList.contains('git'), 'right after Git');
+    assert.strictEqual(q('.gb', sbtn)[0].textContent, '!1');
+    assert.ok(q('.gb', sbtn)[0].classList.contains('conflict'));
+    sbtn.click();
+    await settle();
+    assert.match(q('.modal').pop().textContent, /Sync — cheshmeh/);
+    q('button', q('.modal').pop()).find((b) => b.textContent === 'Close').click();
+    pr0.sync.conflicts = keepC;
+    global.SW.renderProjects();
     q('.proj-head')[0].querySelector('.icon-btn').click();
     q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
     await settle();

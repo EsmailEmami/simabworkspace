@@ -3925,6 +3925,23 @@
     });
   }
 
+  // the Sync button's mark: the worst first — guard / error / conflicts / copying / syncing / paused / ✓
+  function syncBadgeInfo(p) {
+    var y = p.sync || {};
+    if (y.guard) return ['conflict', '⏸!', 'paused by the sync guard — ' + (y.guard.reason || 'check')];
+    if (y.state === 'err') return ['conflict', '✕', y.label + (y.error ? ' — ' + y.error : '')];
+    if (y.conflicts) return ['conflict', '!' + y.conflicts, plural(y.conflicts, 'conflict')];
+    if (y.progress) return ['ahead', y.progress.percent + '%', progressLabel(y.progress)];
+    if (y.state === 'busy') return ['ahead', '⟳', y.label];
+    if (y.paused || y.state === 'paused') return ['changes', '⏸', 'paused'];
+    if (y.state === 'warn' || y.state === 'unknown') return ['changes', '?', y.label || 'unknown'];
+    return ['clean', '✓', y.label || 'in sync'];
+  }
+  function syncBadge(p) {
+    var b = syncBadgeInfo(p);
+    return h('span', { class: 'gbs' }, h('span', { class: 'gb ' + b[0] + (b[1] === '⟳' ? ' spin' : ''), title: b[2] }, b[1]));
+  }
+
   function projEl(p) {
     var open = S.open.has(p.name);
     var count = S.tabs.filter(function (t) { return t.info.spec.project === p.name && !t.gone; }).length;
@@ -3957,6 +3974,7 @@
     body.append(h('div', { class: 'acts' },
       h('button', { class: 'act', disabled: !r, title: 'Chat with Claude in this project (runs on the server)', onclick: function () { openSession({ kind: 'chat', project: p.name }); } }, 'Claude'),
       h('button', { class: 'act git', disabled: !r && !p.localExists, title: 'Changes, commit, pull, push', onclick: function () { gitDialog(p); } }, 'Git', gitBadges(p.name)),
+      sync ? h('button', { class: 'act git sync', title: 'Sync: ' + syncBadgeInfo(p)[2] + ' — click for everything about the sync', onclick: function () { syncDetails(p); } }, 'Sync', syncBadge(p)) : null,
       h('button', { class: 'act more', title: 'Terminal, VS Code, Docker, ports, history…', onclick: function (e) { e.stopPropagation(); projectMenu(p, e.currentTarget); } }, '⋯')));
     var onPc = (p.buildsOn === 'computers' || p.buildsOn === 'local') && (p.localExists || S.web);   // builds on the user's computer
     var cmdRows = [];

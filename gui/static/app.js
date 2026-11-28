@@ -4796,7 +4796,8 @@
 
   // the one Sync window of a project, in tabs: Overview · Conflicts · What syncs · Where
   function syncDetails(p) {
-    var TABS = ['Overview', 'Conflicts', 'What syncs', 'Where'];
+    var TABS = ['Overview', 'Computers', 'Conflicts', 'What syncs', 'Where'];
+    var CT = 1, CF = 2, WS = 3, WH = 4;          // tab indexes
     var tabBtns = TABS.map(function (t, i) { return h('button', { class: 'sy-tab', onclick: function () { show(i, true); } }, h('span', null, t), h('span', { class: 'sy-n hidden' })); });
     var panes = TABS.map(function () { return h('div', { class: 'sy-pane hidden' }, h('div', { class: 'muted' }, 'Loading…')); });
     var cur = -1, chosen = false;
@@ -4848,7 +4849,7 @@
       out.push(h('div', { class: 'sy-hero ' + (d.state || '') },
         h('span', { class: 'sy-dot' }),
         h('div', { class: 'sy-hero-t' }, h('b', null, d.label), h('span', null, (d.paused ? 'paused' : d.status) + ' · ' + plural(d.cycles || 0, 'cycle') +
-          (nconf ? ' · ' : ''), nconf ? h('a', { href: '#', onclick: function (e) { e.preventDefault(); show(1, true); } }, plural(nconf, 'conflict')) : null)),
+          (nconf ? ' · ' : ''), nconf ? h('a', { href: '#', onclick: function (e) { e.preventDefault(); show(CF, true); } }, plural(nconf, 'conflict')) : null)),
         sy.paused || d.paused ? btn('Resume sync', function () { syncAction(q, 'resume'); setTimeout(load, 1500); }, 'primary')
           : btn('Pause sync', function () { syncAction(q, 'pause'); setTimeout(load, 1500); })));
       if (d.progress) out.push(h('div', { class: 'sbar', style: 'margin:0 0 12px' }, h('i', { style: 'width:' + d.progress.percent + '%' }), h('span', null, progressLabel(d.progress))));
@@ -4857,6 +4858,7 @@
         h('div', { class: 'sy-arrow' }, '⇄'),
         h('div', { class: 'sy-side' }, h('span', { class: 'sy-cap' }, '☁ Server · ' + d.server), h('div', { class: 'mono' }, d.remote))));
       if (d.error) out.push(h('div', { class: 'sy-alert err' }, 'Last error: ' + d.error));
+      out.push(compSummary);
       if (isErr) out.push(h('div', { class: 'muted', style: 'font-size:12px' }, 'Click Reconnect (below) to restore the sync after a network outage.'));
       return out;
     }
@@ -4912,16 +4914,92 @@
         reconnectBtn.classList.toggle('hidden', !isErr);
         var nconf = d.conflicts.length + (d.moreConflicts || 0);
         panes[0].replaceChildren.apply(panes[0], overview(d, q));
-        panes[1].replaceChildren.apply(panes[1], conflictsPane(d));
-        panes[2].replaceChildren.apply(panes[2], whatPane(d, q));
-        panes[3].replaceChildren.apply(panes[3], wherePane(q));
-        var n = tabBtns[1].lastChild;
+        panes[CF].replaceChildren.apply(panes[CF], conflictsPane(d));
+        panes[WS].replaceChildren.apply(panes[WS], whatPane(d, q));
+        panes[WH].replaceChildren.apply(panes[WH], wherePane(q));
+        var n = tabBtns[CF].lastChild;
         n.textContent = nconf ? String(nconf) : ''; n.classList.toggle('hidden', !nconf);
-        if (!chosen) show(nconf && !d.guard ? 1 : 0);
+        if (!chosen) show(nconf && !d.guard ? CF : 0);
       }).catch(function (e) { panes[0].replaceChildren(h('div', { class: 'add-err' }, e.message)); show(0); });
     }
-    panes[3].replaceChildren.apply(panes[3], wherePane(project(p.name) || p));
+    panes[WH].replaceChildren.apply(panes[WH], wherePane(project(p.name) || p));
+    // Computers: the shared server folder and every computer's own copy, side by side with their git state
+    var compSummary = h('div', { class: 'sy-csum' });
+    function agoS(t) { return t ? ago(new Date(t * 1000).toISOString()) + ' ago' : ''; }
+    function folderName(f) {
+      var me = f.who.filter(function (w) { return w.here; })[0];
+      return f.mine ? 'This computer' + (me && !me.web ? ' (' + me.name + ')' : me && me.web ? ' (web)' : '') : f.copy ? '⚒ ' + ((f.who[0] && f.who[0].name) || f.copy) : 'Shared folder';
+    }
+    // what is not the same between a copy and mine, in words; [] = same
+    function compDiffs(f, mineF) {
+      var out = [], nm = folderName(f);
+      f.repos.forEach(function (r) {
+        var rn = r.repo === '.' ? '' : r.repo + ': ';
+        var m = mineF && mineF.repos.filter(function (x) { return x.repo === r.repo; })[0];
+        if (r.dirty) out.push(['warn', nm + ' — ' + rn + plural(r.dirty, 'file') + ' not committed']);
+        if (r.ahead) out.push(['warn', nm + ' — ' + rn + plural(r.ahead, 'commit') + ' not pushed']);
+        if (!f.mine && m && m.head && r.head && m.head !== r.head && !r.ahead && !r.dirty)
+          out.push(['info', nm + ' — ' + rn + 'on another commit (' + r.head.slice(0, 7) + ' · ' + r.subject + ')']);
+        if (f.mine && r.behind) out.push(['info', 'Here — ' + rn + plural(r.behind, 'new commit') + ' to pull']);
+      });
+      return out;
+    }
+    function compBadges(r, m) {
+      var b = [];
+      if (m && !m.isMine && m.head && r.head) b.push(m.head === r.head ? h('span', { class: 'gb clean' }, '= here') : h('span', { class: 'gb behind', title: 'not the commit you have here' }, '≠ here'));
+      if (r.dirty) b.push(h('span', { class: 'gb changes', title: plural(r.dirty, 'file') + ' not committed' }, '✎' + r.dirty));
+      if (r.ahead) b.push(h('span', { class: 'gb ahead', title: plural(r.ahead, 'commit') + ' not pushed' }, '↑' + r.ahead));
+      if (r.behind) b.push(h('span', { class: 'gb behind', title: plural(r.behind, 'commit') + ' to pull' }, '↓' + r.behind));
+      if (r.ahead == null) b.push(h('span', { class: 'gb', title: 'no upstream branch' }, 'no upstream'));
+      return h('span', { class: 'gbs' }, b);
+    }
+    function computersPane(c) {
+      var mineF = c.folders.filter(function (f) { return f.mine; })[0];
+      var issues = [];
+      c.folders.forEach(function (f) { issues = issues.concat(compDiffs(f, mineF)); });
+      var others = c.folders.length - 1;
+      var head = !others ? h('div', { class: 'sy-alert' }, 'Only this computer works on this project on the server.')
+        : !issues.length ? h('div', { class: 'sy-alert ok' }, '✓ Every copy is on the same commit and nothing is waiting to be committed or pushed.')
+        : h('div', { class: 'sy-alert warn' }, h('div', null, h('b', null, 'Not the same everywhere'),
+            h('ul', { class: 'sy-issues' }, issues.map(function (x) { return h('li', { class: x[0] }, x[1]); })),
+            h('div', { class: 'muted', style: 'font-size:12px' }, 'Copies meet only through git: commit + push where the work is, then pull on the others.')),
+          h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: away(function () { gitDialog(project(p.name) || p); }) }, 'Git here…')));
+      var cards = c.folders.map(function (f) {
+        return h('div', { class: 'sy-comp' + (f.mine ? ' mine' : '') },
+          h('div', { class: 'sy-comp-h' }, h('b', null, folderName(f)), h('span', { class: 'mono muted' }, f.folder),
+            h('span', { class: 'grow' }),
+            f.who.map(function (w) {
+              var y = w.sync, st = !y ? '' : y.conflicts ? plural(y.conflicts, 'conflict') : y.paused ? 'paused' : y.label;
+              return h('span', { class: 'sy-who' + (w.online ? ' on' : ''), title: w.here ? 'this device' : w.online ? 'connected now' : 'last seen ' + agoS(w.seen) },
+                h('i', { class: 'dot ' + (w.online ? 'ok' : '') }), w.web ? 'Web' : w.name, w.here || w.online ? '' : ' · ' + agoS(w.seen),
+                st ? h('span', { class: 'sy-wst ' + (y.conflicts || y.state === 'err' ? 'err' : y.paused ? 'warn' : '') }, ' · ' + st) : null);
+            }),
+            !f.who.length ? h('span', { class: 'muted', style: 'font-size:12px' }, f.copy ? 'its computer has not been seen' : 'no device works here') : null),
+          f.repos.length ? h('div', { class: 'sy-repos' }, f.repos.map(function (r) {
+            var m = mineF && !f.mine ? mineF.repos.filter(function (x) { return x.repo === r.repo; })[0] : null;
+            return h('div', { class: 'sy-repo' },
+              h('span', { class: 'mono sy-rn' }, r.repo === '.' ? '(root)' : r.repo),
+              h('span', { class: 'mono muted' }, r.branch),
+              h('span', { class: 'sy-rc', dir: 'auto', title: r.head }, h('span', { class: 'mono' }, (r.head || '').slice(0, 7)), ' ', r.subject, h('span', { class: 'muted' }, r.when ? ' · ' + agoS(r.when) : '')),
+              compBadges(r, m ? { head: m.head, isMine: false } : { isMine: true }));
+          })) : h('div', { class: 'muted', style: 'font-size:12px' }, 'No git repository here'));
+      });
+      var refresh = h('button', { class: 'btn sm', onclick: function () { loadComputers(); } }, 'Refresh');
+      compSummary.replaceChildren(!others ? '' : h('div', { class: 'sy-alert ' + (issues.length ? 'warn' : 'ok') },
+        h('div', null, issues.length ? plural(issues.length, 'thing') + ' not the same on your other computers' : '✓ Same commit on all ' + c.folders.length + ' copies'),
+        h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: function () { show(CT, true); } }, 'Computers'))));
+      var nb = tabBtns[CT].lastChild;
+      nb.textContent = issues.length ? String(issues.length) : ''; nb.classList.toggle('hidden', !issues.length); nb.classList.add('warn');
+      return [head].concat(cards, [h('div', { class: 'sy-acts', style: 'justify-content:flex-end' }, refresh)]);
+    }
+    function loadComputers() {
+      panes[CT].replaceChildren(h('div', { class: 'muted' }, 'Reading every copy on the server…'));
+      api('GET', 'sync/' + encodeURIComponent(p.name) + '/computers').then(function (c) {
+        panes[CT].replaceChildren.apply(panes[CT], computersPane(c));
+      }).catch(function (e) { panes[CT].replaceChildren(h('div', { class: 'add-err' }, e.message)); });
+    }
     load();
+    loadComputers();
   }
 
   // ------------------------------------------------------------------ docker on the server

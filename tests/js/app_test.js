@@ -124,6 +124,11 @@ global.fetch = (url, opts) => {
   else if (url.startsWith('/api/prereqs/')) res = { ok: true };
   else if (url.startsWith('/api/move/')) res = { ok: true };
   else if (url === '/api/sync/cheshmeh/approve') { res = { ok: true }; guardAlert = null; }
+  else if (url === '/api/sync/cheshmeh/computers') res = { base: '~/cheshmeh', here: '~/cheshmeh@laptop', folders: [
+    { folder: '~/cheshmeh@laptop', copy: 'laptop', mine: true, who: [{ name: 'laptop', here: true, online: true, sync: { state: 'ok', label: 'in sync', conflicts: 0 } }],
+      repos: [{ repo: '.', branch: 'main', head: 'aaaaaaa1', subject: 'mine', when: 1, dirty: 0, ahead: 0, behind: 0 }] },
+    { folder: '~/cheshmeh@desk', copy: 'desk', mine: false, who: [{ name: 'desk', dev: 'd2', online: false, seen: 1, sync: { state: 'ok', label: 'in sync', conflicts: 2 } }],
+      repos: [{ repo: '.', branch: 'main', head: 'bbbbbbb2', subject: 'desk work', when: 1, dirty: 1, ahead: 1, behind: 0 }] }] };
   else if (url === '/api/sync/cheshmeh/details') res = { guard: guardAlert, name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
     server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
@@ -1000,7 +1005,17 @@ const tests = {
     ['Sync now', 'Live activity', 'Move folders…', 'Stop syncing…'].forEach((t) => assert.ok(all.indexOf(t) >= 0, t));
     assert.ok(all.some((t) => /^(Pause|Resume) sync$/.test(t)) && all.some((t) => /\.git folders/.test(t)));
     const md0 = q('.modal').pop();
-    assert.deepStrictEqual(q('.sy-tab', md0).map((b) => b.firstChild.textContent), ['Overview', 'Conflicts', 'What syncs', 'Where']);
+    assert.deepStrictEqual(q('.sy-tab', md0).map((b) => b.firstChild.textContent), ['Overview', 'Computers', 'Conflicts', 'What syncs', 'Where']);
+    // Computers: my copy and the desk's, what is not the same said in words, a count on the tab
+    const comp = q('.sy-pane', md0)[1];
+    assert.strictEqual(q('.sy-comp', comp).length, 2);
+    assert.match(comp.textContent, /This computer \(laptop\)/);
+    assert.match(comp.textContent, /⚒ desk — 1 file not committed/);
+    assert.match(comp.textContent, /⚒ desk — 1 commit not pushed/);
+    assert.match(comp.textContent, /2 conflicts/);                 // the desk's own sync state
+    assert.ok(q('.gb', comp).some((x) => x.textContent === '≠ here'));
+    assert.strictEqual(q('.sy-n', q('.sy-tab', md0)[1])[0].textContent, '2');
+    assert.match(q('.sy-pane', md0)[0].textContent, /2 things not the same on your other computers/);
     assert.strictEqual(q('.ign-edit', md0).length, 1);
     q('button').find((b) => b.textContent.trim() === 'Move folders…').click();
     await settle();

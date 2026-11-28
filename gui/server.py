@@ -2877,6 +2877,44 @@ except (OSError, subprocess.SubprocessError) as e:
 
 # A computer's own copy of a shared project folder on the server (<folder>@<computer>):
 # make <copy> from <base> | check both are clean and on the same commits (before going back) | remove <copy>
+# argv: [base server folder]. The shared folder and every computer's own copy <base>@<computer>, each with
+# the state of its git repos (up to 4 deep): branch, commit, uncommitted files, ahead / behind its upstream.
+COPIES_PY = r"""
+import glob, json, os, subprocess, sys
+base = os.path.expanduser(sys.argv[1]).rstrip("/")
+def repos(top):
+    out = []
+    for d, subs, _ in os.walk(top):
+        if ".git" in subs or os.path.isfile(os.path.join(d, ".git")):
+            out.append(os.path.relpath(d, top))
+        subs[:] = [x for x in subs if x not in (".git", "node_modules", "vendor", "dist", ".venv")]
+        if d[len(top):].count(os.sep) >= 4:
+            subs[:] = []
+    return sorted(out)[:20]
+def git(d, *a):
+    try:
+        r = subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+out = []
+for f in [base] + sorted(x for x in glob.glob(glob.escape(base) + "@*") if os.path.isdir(x)):
+    rec = {"folder": f, "copy": f.rsplit("@", 1)[1] if f != base else "", "exists": os.path.isdir(f), "repos": []}
+    for r in repos(f) if rec["exists"] else []:
+        d = os.path.join(f, r)
+        head = (git(d, "log", "-1", "--format=%H%x1f%s%x1f%ct") or "").split("\x1f")
+        lr = (git(d, "rev-list", "--left-right", "--count", "HEAD...@{u}") or "").split()
+        dirty = git(d, "status", "--porcelain", "--untracked-files=no")
+        rec["repos"].append({"repo": r, "branch": git(d, "rev-parse", "--abbrev-ref", "HEAD") or "",
+                             "head": head[0] if head[0] else "", "subject": head[1][:120] if len(head) > 1 else "",
+                             "when": int(head[2]) if len(head) > 2 and head[2].isdigit() else 0,
+                             "dirty": len(dirty.splitlines()) if dirty else 0,
+                             "ahead": int(lr[0]) if len(lr) == 2 else None, "behind": int(lr[1]) if len(lr) == 2 else None})
+    out.append(rec)
+print(json.dumps({"base": base, "folders": out}))
+"""
+
+
 OWN_COPY_PY = r"""
 import json, os, shutil, subprocess, sys
 op, base, copy = sys.argv[1], os.path.expanduser(sys.argv[2]), os.path.expanduser(sys.argv[3])
@@ -11219,6 +11257,11 @@ class App:
             if not self.web:              # its own run commands: the web shows them and runs them here / on the server
                 rec["pc"], rec["commands"] = pc_id, share_run_commands(p)
                 rec["here"] = bool(p.get("localExists"))      # its files are on this computer (synced / Local only)
+                y = p.get("sync") or {}
+                if y:                     # its sync with the server, for the other devices' Sync window
+                    rec["sync"] = {"state": y.get("state") or "", "label": y.get("label") or "",
+                                   "conflicts": int(y.get("conflicts") or 0), "paused": bool(y.get("paused")),
+                                   "guard": bool(y.get("guard"))}
             out.append(rec)
         return out[:300]
 
@@ -11289,6 +11332,8 @@ class App:
                 seen = {k for k in mine if k in (res.get("tabs") or {})}      # the rest is added next round
             # projects of the other devices
             me, others = self.device_id(), []
+            self._share_devs = {k: {"name": str(v.get("name") or "")[:40], "at": float(v.get("at") or 0)}
+                                for k, v in (res.get("devices") or {}).items() if isinstance(v, dict)}
             for dev_id, dev in (res.get("devices") or {}).items():
                 if dev_id == me or not isinstance(dev, dict):
                     continue
@@ -12561,6 +12606,47 @@ class App:
             return "deleted"
         k = entry.get("kind")
         return {0: "folder", 1: "file", 2: "link", "directory": "folder"}.get(k, str(k or "?"))
+
+    def sync_computers(self, name: str) -> dict:
+        """Sync window, Computers tab: the shared server folder and each computer's own copy of this project —
+        which device works there, when it was last seen, its sync, and the git state of every repo."""
+        p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
+        if not p or not p.get("remote"):
+            raise ApiError(404, "project or its server folder not found")
+        rpath = p["remote"].rstrip("/")
+        base = copy_base(rpath) or rpath
+        res = remote_python(self._project_conf(p), COPIES_PY, [base],
+                            multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=60)
+        if not isinstance(res, dict):
+            raise ApiError(502, "cannot read the folders on the server")
+        full_base = str(res.get("base") or "")
+        devs, now = getattr(self, "_share_devs", {}) or {}, time.time()
+
+        def same(a, b):          # ~/x and /home/u/x are the same folder
+            return home_rel(a) == home_rel(b)
+        out = []
+        for f in res.get("folders") or []:
+            if not isinstance(f, dict):
+                continue
+            folder = base if not f.get("copy") else base + "@" + f["copy"]
+            who = []
+            if same(folder, rpath):
+                who.append({"name": self.device_name(), "here": True, "web": bool(self.web), "online": True,
+                            "sync": (p.get("sync") or None) and {k: (p["sync"] or {}).get(k) for k in ("state", "label", "conflicts", "paused")}})
+            for sp in getattr(self, "_share_projects", []) or []:
+                if not same(sp.get("remote") or "", folder) or sp.get("sharedDev") == self.device_id():
+                    continue
+                d = devs.get(sp.get("sharedDev") or "") or {}
+                if any(w.get("dev") == sp.get("sharedDev") for w in who):
+                    continue
+                who.append({"name": sp.get("sharedFrom") or d.get("name") or "Computer", "dev": sp.get("sharedDev") or "",
+                            "web": (sp.get("sharedFrom") or "") == "Web", "seen": d.get("at") or 0,
+                            "online": bool(d.get("at")) and now - float(d["at"]) < 180, "sync": sp.get("sync") or None,
+                            "here": False})
+            out.append({"folder": folder, "full": f.get("folder") or "", "copy": f.get("copy") or "",
+                        "mine": same(folder, rpath), "who": who, "repos": f.get("repos") or []})
+        out.sort(key=lambda r: (not r["mine"], r["copy"] == "", r["copy"]))
+        return {"base": base, "fullBase": full_base, "here": rpath, "folders": out}
 
     def sync_details(self, name: str) -> dict:
         x = self._session(name)
@@ -15980,7 +16066,7 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
         route = (method, parts[0] if parts else "")
-        if app.web and (route in WEB_BLOCKED or (route == ("GET", "sync") and parts[-1:] not in (["details"], ["activity"]))):
+        if app.web and (route in WEB_BLOCKED or (route == ("GET", "sync") and parts[-1:] not in (["details"], ["activity"], ["computers"]))):
             raise ApiError(403, "not available in the web version")
         if app.web and route == ("POST", "commands"):
             b = self._body()
@@ -16304,6 +16390,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.git_sync(parts[1], self._body().get("on") is True)
         if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "details":
             return app.sync_details(parts[1])
+        if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "computers":
+            return app.sync_computers(parts[1])
         if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "activity":
             return app.sync_activity(parts[1])
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "ignores":

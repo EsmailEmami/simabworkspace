@@ -149,6 +149,44 @@ class Devices(base.TmpHome):
         src = (Path(sw.__file__).parent / "static" / "app.js").read_text()
         self.assertIn("c.where ? { adopt: c.dir } : {}", src)
 
+    def test_sync_window_lists_each_computers_copy_with_its_git_state(self):
+        import subprocess
+        home = Path(self.server_home.name)
+        env = dict(os.environ, HOME=str(home), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        def git(d, *a):
+            subprocess.run(["git", "-C", str(d)] + list(a), check=True, capture_output=True, env=env)
+        (home / "shop").mkdir()
+        git(home / "shop", "init", "-q", "-b", "main")
+        (home / "shop" / "a.txt").write_text("1")
+        git(home / "shop", "add", ".")
+        git(home / "shop", "commit", "-qm", "first")
+        subprocess.run(["cp", "-a", str(home / "shop"), str(home / "shop@desk")], check=True)
+        (home / "shop@desk" / "a.txt").write_text("2")              # desk: one commit more + a file not committed
+        git(home / "shop@desk", "commit", "-qam", "desk work")
+        (home / "shop@desk" / "a.txt").write_text("3")
+        (home / "shopping").mkdir()                                  # another project: not a copy
+        d = Path(self.tmp.name) / "desk"
+        d.mkdir()
+        desk = sw.App(sw.Store(d / "simab.db"), sw.ServerConf("esi", "h"))
+        try:
+            desk.store.add_manual({"name": "shop", "remote": "~/shop@desk"})
+            desk.share_sync()
+            self.laptop.share_sync()
+            self.laptop.share_sync()
+            r = self.laptop.sync_computers("shop")
+        finally:
+            desk.shutdown_sessions()
+        self.assertEqual([f["folder"] for f in r["folders"]], ["~/shop", "~/shop@desk"])
+        mine, dk = r["folders"]
+        self.assertTrue(mine["mine"])
+        self.assertTrue(any(w.get("here") for w in mine["who"]))
+        self.assertEqual([w["dev"] for w in dk["who"]], [desk.device_id()])
+        self.assertTrue(dk["who"][0]["online"])
+        self.assertEqual((dk["repos"][0]["repo"], dk["repos"][0]["dirty"], dk["repos"][0]["subject"]), (".", 1, "desk work"))
+        self.assertNotEqual(dk["repos"][0]["head"], mine["repos"][0]["head"])
+        self.assertEqual(mine["repos"][0]["dirty"], 0)
+
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()
         self.web.share_sync()

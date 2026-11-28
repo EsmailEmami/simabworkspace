@@ -186,6 +186,23 @@ class Devices(base.TmpHome):
         self.assertEqual((dk["repos"][0]["repo"], dk["repos"][0]["dirty"], dk["repos"][0]["subject"]), (".", 1, "desk work"))
         self.assertNotEqual(dk["repos"][0]["head"], mine["repos"][0]["head"])
         self.assertEqual(mine["repos"][0]["dirty"], 0)
+        # bring: the desk has files not committed → refused; committed → pushed there, pulled here (all on the server)
+        origin = home / "origin.git"
+        git(home, "init", "-q", "--bare", str(origin))
+        for f in ("shop", "shop@desk"):
+            git(home / f, "remote", "add", "origin", str(origin))
+        git(home / "shop", "push", "-q", "-u", "origin", "main")
+        git(home / "shop@desk", "fetch", "-q", "origin")
+        git(home / "shop@desk", "branch", "-q", "-u", "origin/main")
+        res = self.laptop.sync_bring("shop", "desk", "")
+        self.assertFalse(res["repos"][0]["ok"])
+        self.assertIn("not committed", res["repos"][0]["why"])
+        git(home / "shop@desk", "commit", "-qam", "more desk work")
+        res = self.laptop.sync_bring("shop", "desk", "")
+        self.assertEqual((res["repos"][0]["ok"], res["repos"][0]["pushed"]), (True, 2))
+        self.assertEqual((home / "shop" / "a.txt").read_text(), "3")
+        with self.assertRaises(sw.ApiError):
+            self.laptop.sync_bring("shop", "../x", "")
 
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()

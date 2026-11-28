@@ -178,7 +178,7 @@
         fetch('/api/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-SW': '1' },
           body: JSON.stringify({ host: host.value.trim(), port: port.value.trim(), user: user.value.trim(), password: pw.value, code: code.value.trim() }) })
           .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) { var x = new Error(d.error || ('HTTP ' + r.status)); x.code = d.code; throw x; } }); })
-          .then(function () { location.reload(); })
+          .then(function () { reloadPage(); })
           .catch(function (e2) {
             go.disabled = false; go.textContent = 'Sign in'; err.textContent = e2.message; err.classList.remove('hidden');
             if (e2.code) { codeField.classList.remove('hidden'); code.value = ''; code.focus(); return; }    // the password was right
@@ -624,7 +624,7 @@
   }
 
   function logout() {
-    fetch('/api/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-SW': '1' } }).then(function () { location.reload(); }, function () { location.reload(); });
+    fetch('/api/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-SW': '1' } }).then(function () { reloadPage(); }, function () { reloadPage(); });
   }
 
   // The app was restarted (e.g. updated): this window's key no longer works.
@@ -4964,6 +4964,30 @@
             h('ul', { class: 'sy-issues' }, issues.map(function (x) { return h('li', { class: x[0] }, x[1]); })),
             h('div', { class: 'muted', style: 'font-size:12px' }, 'Copies meet only through git: commit + push where the work is, then pull on the others.')),
           h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: away(function () { gitDialog(project(p.name) || p); }) }, 'Git here…')));
+      // one click: that copy's committed work here (push there, pull here) — or mine to it
+      function bring(from, to, label, b) {
+        b.disabled = true; b.textContent = 'Working…';
+        api('POST', 'sync/' + encodeURIComponent(p.name) + '/bring', { from: from, to: to }).then(function (r) {
+          var bad = (r.repos || []).filter(function (x) { return !x.ok; });
+          if (bad.length) toast(bad.map(function (x) { return x.why; }).join('\n'), 'warn', { timeout: 12000 });
+          else toast(label + ' — done', 'ok');
+          loadComputers(); refreshProjects();
+        }).catch(function (e) { fail(e); loadComputers(); });
+      }
+      function moveBtns(f) {
+        if (f.mine || !mineF || !f.repos.length) return null;
+        var nm = folderName(f).replace(/^⚒ /, '');
+        var theirsAhead = f.repos.some(function (r) { return r.ahead; });
+        var differ = f.repos.some(function (r) { var m = mineF.repos.filter(function (x) { return x.repo === r.repo; })[0]; return r.ahead || (m && m.head !== r.head); });
+        var myAhead = mineF.repos.some(function (r) { return r.ahead; });
+        var dirtyThere = f.repos.some(function (r) { return r.dirty; }), dirtyHere = mineF.repos.some(function (r) { return r.dirty; });
+        if (!differ && !myAhead) return null;
+        var b1 = h('button', { class: 'btn sm' + (theirsAhead ? ' primary' : ''), disabled: dirtyThere, title: dirtyThere ? nm + ' has files not committed — commit them there first'
+          : 'Push ' + nm + '’s commits and pull them here (all on the server)', onclick: function () { bring(f.copy, mineF.copy, nm + '’s work is here', b1); } }, '↓ Bring ' + nm + '’s work here');
+        var b2 = h('button', { class: 'btn sm', disabled: dirtyHere, title: dirtyHere ? 'Files not committed here — commit them first'
+          : 'Push my commits and pull them into ' + nm + '’s copy', onclick: function () { bring(mineF.copy, f.copy, 'Your work is in ' + nm, b2); } }, '↑ Send my work to ' + nm);
+        return h('div', { class: 'sy-acts' }, b1, b2);
+      }
       var cards = c.folders.map(function (f) {
         return h('div', { class: 'sy-comp' + (f.mine ? ' mine' : '') },
           h('div', { class: 'sy-comp-h' }, h('b', null, folderName(f)), h('span', { class: 'mono muted' }, f.folder),
@@ -4982,7 +5006,8 @@
               h('span', { class: 'mono muted' }, r.branch),
               h('span', { class: 'sy-rc', dir: 'auto', title: r.head }, h('span', { class: 'mono' }, (r.head || '').slice(0, 7)), ' ', r.subject, h('span', { class: 'muted' }, r.when ? ' · ' + agoS(r.when) : '')),
               compBadges(r, m ? { head: m.head, isMine: false } : { isMine: true }));
-          })) : h('div', { class: 'muted', style: 'font-size:12px' }, 'No git repository here'));
+          })) : h('div', { class: 'muted', style: 'font-size:12px' }, 'No git repository here'),
+          moveBtns(f));
       });
       var refresh = h('button', { class: 'btn sm', onclick: function () { loadComputers(); } }, 'Refresh');
       compSummary.replaceChildren(!others ? '' : h('div', { class: 'sy-alert ' + (issues.length ? 'warn' : 'ok') },
@@ -5874,11 +5899,38 @@
   function openTasks(project) { return window.SWTasks ? window.SWTasks.open(project) : Promise.resolve(null); }
   function taskCount(project) { var n = window.SWTasks ? window.SWTasks.openCount(project) : 0; return n ? n + ' open' : ''; }
 
+  // work that the other computers cannot see yet: files not committed / commits not pushed, on a project
+  // that is on more than one computer (or this computer's own server copy)
+  function pendingWork() {
+    return (S.projects || []).filter(function (p) {
+      var g = S.git && S.git[p.name];
+      return g && (g.changes || g.ahead) && (p.copyOf || (p.pcs || []).length > 1);
+    }).map(function (p) {
+      var g = S.git[p.name];
+      return { p: p, text: p.name + ': ' + [g.changes ? plural(g.changes, 'file') + ' not committed' : '', g.ahead ? plural(g.ahead, 'commit') + ' not pushed' : ''].filter(Boolean).join(', ') };
+    });
+  }
+  function reloadPage() { S.leaving = true; location.reload(); }      // our own reloads never ask
   function quitApp() {
+    var pend = pendingWork();
+    if (pend.length) {
+      var md = openModal({ title: 'Your other computers will not see this work', body: [
+        h('div', { class: 'muted', style: 'margin-bottom:8px' }, 'Commit and push it first, then pull on the other computer (or use Sync → Computers there).'),
+        h('ul', { class: 'sy-issues' }, pend.map(function (x) {
+          return h('li', { class: 'warn' }, x.text, ' ', h('a', { href: '#', onclick: function (e) { e.preventDefault(); md.close(); gitDialog(x.p); } }, 'Git…'));
+        }))],
+        foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), h('span', { class: 'grow' }),
+          h('button', { class: 'btn danger', onclick: function () { md.close(); quitNow(); } }, 'Quit anyway')] });
+      return;
+    }
+    quitNow();
+  }
+  function quitNow() {
     confirmDlg('Quit? Every terminal, Claude chat and running command is stopped. (Closing the window instead keeps them running.)', 'Quit', true).then(function (ok) {
       if (!ok) return;
       api('POST', 'quit').catch(function () {}).then(function () {
         S.tabs.forEach(function (t) { t.closed = true; });
+        S.leaving = true;
         document.body.replaceChildren(h('div', { class: 'empty' }, h('div', { class: 'empty-inner' }, h('p', { class: 'empty-title' }, 'Stopped'), h('p', { class: 'muted' }, 'Run simabworkspace gui to start again.'))));
         setTimeout(function () { window.close(); }, 400);
       });
@@ -5948,7 +6000,7 @@
     (function poll() {
       tries++;
       fetch('/api/ping', { headers: { 'X-Token': token } }).then(function (r) { return r.json(); }).then(function (d) {
-        if (d && d.version === version) location.reload(); else setTimeout(poll, 1000);
+        if (d && d.version === version) reloadPage(); else setTimeout(poll, 1000);
       }).catch(function () { if (tries < 90) setTimeout(poll, 1000); else box.querySelector('.muted').textContent = 'The app did not come back — run: simabworkspace gui'; });
     })();
   }
@@ -5960,7 +6012,7 @@
     confirmDlg: confirmDlg, promptDlg: promptDlg, openModal: openModal, openSession: openSession, showMenu: showMenu, renameTab: renameTab, renderTitle: renderTitle,
     notify: notify, sound: sound, pickClaudeSession: pickClaudeSession, layoutItemsFor: layoutItems, tabEl: tabEl, viewImage: viewImage,
     claudeInTerminal: claudeInTerminal, fullLocal: fullLocal, projectColor: projectColor, openTasks: openTasks, serverTerminal: serverTerminal, serverFiles: serverFiles,
-    pushedNotice: pushedNotice, gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
+    pushedNotice: pushedNotice, pendingWork: pendingWork, quitApp: quitApp, gitCode: gitCode, diffEl: diffEl, parseConflicts: parseConflicts, mergeText: mergeText, gitDialog: gitDialog, branchPicker: branchPicker, serverFolderDialog: serverFolderDialog, starterDialog: starterDialog,
     claudeSessionsDialog: claudeSessionsDialog, claudeStop: claudeStop, claudeTakeOver: claudeTakeOver, runningConv: runningConv, refreshRunning: refreshRunning,
     settingsDialog: function () { settingsDialog(); }, healthDialog: function () { return healthDialog(); },
     moveToNewWindow: moveToNewWindow, moveToWindow: moveToWindow, syncTabs: syncTabs, wid: function () { return WID; }, heartbeat: heartbeat, reportError: function (m, w, st) { reportClientError(m, w, st); }, saveLayout: function () { saveLayout(); }
@@ -5969,6 +6021,11 @@
   // ------------------------------------------------------------------ boot
   function wire() {
     $('#btn-palette').addEventListener('click', openPalette);
+    // closing the app window with work the other computers cannot see: the browser asks once
+    if (!S.web) window.addEventListener('beforeunload', function (e) {
+      if (S.leaving || !pendingWork().length) return;
+      e.preventDefault(); e.returnValue = '';
+    });
     $('#update-note').addEventListener('click', updateDialog);
     $('#usage').addEventListener('click', usageDialog);
     $('#server-stats').addEventListener('click', statsDialog);

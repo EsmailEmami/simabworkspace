@@ -1016,6 +1016,13 @@ const tests = {
     assert.ok(q('.gb', comp).some((x) => x.textContent === '≠ here'));
     assert.strictEqual(q('.sy-n', q('.sy-tab', md0)[1])[0].textContent, '2');
     assert.match(q('.sy-pane', md0)[0].textContent, /2 things not the same on your other computers/);
+    const bringBtn = q('button', comp).find((x) => x.textContent === '↓ Bring desk’s work here');
+    assert.ok(bringBtn && bringBtn.disabled, 'desk has files not committed: cannot bring yet');
+    const sendBtn = q('button', comp).find((x) => x.textContent === '↑ Send my work to desk');
+    assert.ok(sendBtn && !sendBtn.disabled);
+    sendBtn.click();
+    await settle();
+    assert.deepStrictEqual(calls.filter((c) => c.url === '/api/sync/cheshmeh/bring').pop().body, { from: 'laptop', to: 'desk' });
     assert.strictEqual(q('.ign-edit', md0).length, 1);
     q('button').find((b) => b.textContent.trim() === 'Move folders…').click();
     await settle();
@@ -1306,6 +1313,24 @@ const tests = {
     document.body.querySelector('#modal-root').replaceChildren();
   },
 
+  async 'quit with work the other computers cannot see: warns first, lists it, Git… opens'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    const pr = global.SW.project('cheshmeh'), keepG = global.SW.S.git, keepPcs = pr.pcs;
+    pr.pcs = ['a1', 'b2'];
+    global.SW.S.git = Object.assign({}, keepG, { cheshmeh: { changes: 2, ahead: 1, behind: 0 } });
+    assert.deepStrictEqual(global.SW.pendingWork().map((x) => x.text), ['cheshmeh: 2 files not committed, 1 commit not pushed']);
+    pr.pcs = ['a1'];                                    // on one computer only: nothing to warn about
+    assert.strictEqual(global.SW.pendingWork().length, 0);
+    pr.pcs = ['a1', 'b2'];
+    global.SW.quitApp();
+    const md = q('.modal').pop();
+    assert.match(md.textContent, /Your other computers will not see this work/);
+    assert.ok(q('button', md).find((b) => b.textContent === 'Quit anyway'));
+    q('button', md).find((b) => b.textContent === 'Cancel').click();
+    assert.ok(!calls.some((c) => c.url === '/api/quit'));
+    global.SW.S.git = keepG; pr.pcs = keepPcs;
+    document.body.querySelector('#modal-root').replaceChildren();
+  },
   async 'sync details: Edit… opens the not-synced list'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();

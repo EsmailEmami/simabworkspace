@@ -2915,6 +2915,56 @@ print(json.dumps({"base": base, "folders": out}))
 """
 
 
+# argv: [base server folder, from copy, to copy] (copy "" = the shared folder, else the computer part).
+# Moves the committed work of one copy to another, on the server: push in `from` (its repos must have nothing
+# uncommitted), then fetch + pull --ff-only in `to`. Per repo: what happened, or why not.
+BRING_PY = r"""
+import json, os, subprocess, sys
+base = os.path.expanduser(sys.argv[1]).rstrip("/")
+src, dst = [base + ("@" + c if c else "") for c in (sys.argv[2], sys.argv[3])]
+def repos(top):
+    out = []
+    for d, subs, _ in os.walk(top):
+        if ".git" in subs or os.path.isfile(os.path.join(d, ".git")):
+            out.append(os.path.relpath(d, top))
+        subs[:] = [x for x in subs if x not in (".git", "node_modules", "vendor", "dist", ".venv")]
+        if d[len(top):].count(os.sep) >= 4:
+            subs[:] = []
+    return sorted(out)[:20]
+def git(d, *a, t=120):
+    try:
+        r = subprocess.run(["git", "-C", d] + list(a), capture_output=True, text=True, timeout=t,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout.strip() or r.stderr.strip())
+if not (os.path.isdir(src) and os.path.isdir(dst)) or src == dst:
+    print(json.dumps({"error": "no such copy on the server"})); sys.exit()
+out = []
+for r in repos(src):
+    a, b = os.path.join(src, r), os.path.join(dst, r)
+    name = os.path.basename(base) if r == "." else r
+    if not os.path.isdir(b):
+        out.append({"repo": r, "ok": False, "why": name + ": not in the other copy"}); continue
+    if git(a, "status", "--porcelain", "--untracked-files=no")[1]:
+        out.append({"repo": r, "ok": False, "why": name + ": files not committed in the copy it comes from — commit them there first"}); continue
+    code, lr = git(a, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+    if code:
+        out.append({"repo": r, "ok": False, "why": name + ": its branch has no upstream to push to"}); continue
+    ahead = int(lr.split()[0])
+    if ahead:
+        code, msg = git(a, "push")
+        if code:
+            out.append({"repo": r, "ok": False, "why": name + ": push failed — " + msg.splitlines()[-1][:200] if msg else name + ": push failed"}); continue
+    git(b, "fetch", "--quiet")
+    code, msg = git(b, "pull", "--ff-only", "--quiet")
+    if code:
+        out.append({"repo": r, "ok": False, "pushed": ahead, "why": name + ": pushed, but could not pull here — both sides have new commits or files in the way; open Git"}); continue
+    out.append({"repo": r, "ok": True, "pushed": ahead})
+print(json.dumps({"repos": out}))
+"""
+
+
 OWN_COPY_PY = r"""
 import json, os, shutil, subprocess, sys
 op, base, copy = sys.argv[1], os.path.expanduser(sys.argv[2]), os.path.expanduser(sys.argv[3])
@@ -12648,6 +12698,25 @@ class App:
         out.sort(key=lambda r: (not r["mine"], r["copy"] == "", r["copy"]))
         return {"base": base, "fullBase": full_base, "here": rpath, "folders": out}
 
+    def sync_bring(self, name: str, src: str, dst: str) -> dict:
+        """Computers tab: one copy's committed work to another (copy "" = shared folder, else the computer part)."""
+        p = next((x for x in self.projects(max_age=10) if x["name"] == name), None)
+        if not p or not p.get("remote"):
+            raise ApiError(404, "project or its server folder not found")
+        for c in (src, dst):
+            if not isinstance(c, str) or (c and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", c)):
+                raise ApiError(400, "which copy?")
+        if src == dst:
+            raise ApiError(400, "the same copy")
+        rpath = p["remote"].rstrip("/")
+        res = remote_python(self._project_conf(p), BRING_PY, [copy_base(rpath) or rpath, src, dst],
+                            multiplex=bool(self.store.settings.get("sshMultiplex")), timeout=300)
+        if not isinstance(res, dict) or res.get("error"):
+            raise ApiError(409, (res or {}).get("error") or "could not do it on the server")
+        ok = [r for r in res.get("repos") or [] if r.get("ok")]
+        self.activity.add("git-bring", name, f"{src or 'shared'} → {dst or 'shared'}: {len(ok)} of {len(res.get('repos') or [])} repos")
+        return res
+
     def sync_details(self, name: str) -> dict:
         x = self._session(name)
         a, b = _endpoint(x.get("alpha")), _endpoint(x.get("beta"))
@@ -16418,6 +16487,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == ("POST", "move") and len(parts) == 2:
             b = self._body()
             return app.move_project(parts[1], b.get("local"), b.get("remote"))
+        if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "bring":
+            b = self._body()
+            return app.sync_bring(parts[1], b.get("from"), b.get("to"))
         if route == ("POST", "own-copy") and len(parts) == 2:
             return app.own_copy(parts[1], bool(self._body().get("on")))
         if route == ("POST", "uninstall"):

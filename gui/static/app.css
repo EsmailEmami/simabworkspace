@@ -573,6 +573,19 @@ body.compact .gleft { border-right: none; border-bottom: 1px solid var(--line); 
 /* sync progress under a project */
 .sbar { position: relative; margin: 0 6px 4px 8px; height: 16px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
 .sbar i { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--pc, var(--accent)) 35%, transparent); transition: width .4s; }
+.sbar.click { cursor: pointer; }
+.sact-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.sact-head .sbar { flex: 1; min-width: 200px; margin: 0; }
+.sact-now { margin-bottom: 10px; }
+.sact-k { font-size: 11px; color: var(--muted); margin: 6px 0 3px; }
+.sact-list { max-height: 50vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
+.sact-row { display: flex; gap: 8px; align-items: baseline; font: 12px/18px var(--mono); padding: 1px 4px; }
+.sact-row b { width: 12px; flex: none; }
+.sact-row.down b { color: var(--ok, #3fb950); }
+.sact-row.up b { color: var(--accent); }
+.sact-row.err b, .sact-row.err .p { color: var(--err, #f85149); }
+.sact-row .p { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sact-row small { color: var(--muted); flex: none; }
 .sbar span { position: relative; display: block; padding: 0 6px; font: 10px/14px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .flist { max-height: 230px; overflow-y: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); margin-top: 6px; }

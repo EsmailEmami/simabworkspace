@@ -127,6 +127,9 @@ global.fetch = (url, opts) => {
   else if (url === '/api/sync/cheshmeh/details') res = { guard: guardAlert, name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
     server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
+  else if (/^\/api\/sync\/[^/]+\/activity$/.test(url)) res = { name: 'shop', status: 'staging', progress: { files: 1, totalFiles: 3, percent: 30, bytes: 0, totalBytes: 0 },
+    now: [{ dir: 'down', path: 'web/big.bin', got: 1024, size: 4096, files: 1, totalFiles: 3 }],
+    recent: [{ dir: 'down', path: 'web/big.bin', size: 4096 }, { dir: 'up', path: 'api/main.go', size: 10 }], problems: [{ where: 'server', path: 'docker/data/main-db', error: 'permission denied' }], conflicts: 2 };
   else if (url === '/api/sync/cheshmeh/resolve') res = { ok: true };
   else if (url === '/api/sync/cheshmeh/ignores') res = { ok: true, ignores: body.ignores, deleted: body.delete && body.delete.server ? { server: { deleted: 1, errors: [] } } : {} };
   else if (url === '/api/sync/cheshmeh/ignores/preview') res = { added: ['*.log', '/tmp', 'dist'],
@@ -340,7 +343,7 @@ const tests = {
     inp.value = '~/work/shop';
     q('.btn.primary', modal).pop().click(); await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
-    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/srv/shop', name: 'shop', local: '~/work/shop', git: true });
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/srv/shop', name: 'shop', local: '~/work/shop', git: false, merge: false }, '.git is not synced by default');
     assert.strictEqual(modal.children.length, 0, 'closed after it started');
     document.body.querySelector('#menu-root').replaceChildren();
   },
@@ -724,7 +727,7 @@ const tests = {
     await settle();
     const post = calls.filter((c) => c.url === '/api/add-project').pop();
     // my other computer already syncs this folder: its Not synced list, not the defaults
-    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: true, streams: 4, ignores: ['node_modules', '/vendor'] });
+    assert.deepStrictEqual(post.body, { mode: 'download', remote: '/home/esi/shop', local: '~/shop', name: '', git: false, streams: 4, ignores: ['node_modules', '/vendor'] });
     assert.ok(q('.toast').some((t) => /shop: downloading in the background/.test(t.textContent)));
   },
 
@@ -780,6 +783,13 @@ const tests = {
     assert.ok(bar, 'progress bar shown');
     assert.strictEqual(bar.querySelector('i').style.cssText, 'width:25%');
     assert.match(bar.textContent, /25% · 5\.0 MB \/ 20\.0 MB · 1 h 5 min left · 30\/120 items/);
+    bar.click(); await settle();
+    const act = q('.modal').pop();
+    assert.match(act.textContent, /Sync activity — shop/);
+    assert.ok(calls.some((c) => c.url === '/api/sync/shop/activity'), 'click on the bar: live activity');
+    assert.deepStrictEqual(q('.sact-row', act).map((r) => r.className), ['sact-row down', 'sact-row err', 'sact-row down', 'sact-row up']);
+    assert.match(q('.sact-now', act)[0].textContent, /Now to this computer · 1 \/ 3 files↓web\/big\.bin1\.0 KB \/ 4\.0 KB/);
+    q('.icon-btn', act)[0].click(); await settle();
     state.projects[1].sync = { state: 'ok', label: 'in sync', progress: null };
     await new Promise((r) => setTimeout(r, 5200));
     await settle();

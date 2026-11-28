@@ -58,7 +58,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 SIGHUP = getattr(signal, "SIGHUP", signal.SIGTERM)
 
 APP = "simabworkspace"
-VERSION = "1.72.2"
+VERSION = "1.73.0"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -754,6 +754,39 @@ def _mutagen_list(exe: str, timeout: float):
         return [mutagen_norm(x) for x in d] if isinstance(d, list) else []
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+ACTIVITY_MAX = 300
+
+
+def mutagen_session_now(name: str, timeout=5):
+    """One session, read right now (the Sync activity window asks every second), or None."""
+    exe = which("mutagen")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "sync", "list", "--template", "{{ json . }}", name], capture_output=True, text=True,
+                           timeout=timeout, env=dict(os.environ, PATH=tool_path()))
+        d = json.loads(r.stdout or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return mutagen_norm(d[0]) if isinstance(d, list) and d and isinstance(d[0], dict) else None
+
+
+def staging_now(session: dict) -> list:
+    """The files Mutagen is receiving right now: [{dir: down (to this computer) | up (to the server), path,
+    got, size, files, totalFiles}]. stagingProgress sits on the side that receives."""
+    out = []
+    for k in ("alpha", "beta"):
+        v = session.get(k) if isinstance(session.get(k), dict) else {}
+        sp = v.get("stagingProgress") or (session.get(k + "State") or {}).get("stagingProgress")
+        if not isinstance(sp, dict) or not int(sp.get("expectedFiles") or 0):
+            continue
+        local = not _endpoint(session.get(k)).get("host")
+        out.append({"dir": "down" if local else "up", "path": str(sp.get("path") or ""),
+                    "got": int(sp.get("receivedSize") or 0), "size": int(sp.get("expectedSize") or 0),
+                    "files": int(sp.get("receivedFiles") or 0), "totalFiles": int(sp.get("expectedFiles") or 0)})
+    return out
 
 
 def mutagen_sessions(timeout=8, fresh=False) -> list:
@@ -5078,6 +5111,7 @@ class FastCopy:
         self.lock = threading.Lock()
         self.bytes = self.total = self.files = self.total_files = 0
         self.failed = []
+        self.recent = collections.deque(maxlen=ACTIVITY_MAX)   # (time, "down"|"up", path): the Sync activity window
         self.started = time.time()
         self.done = False
         self.stop = False
@@ -5122,6 +5156,7 @@ class FastCopy:
                         except OSError:
                             self.failed.append(rel)
                         self.files += 1
+                        self.recent.append((time.time(), "up", rel))
                 p.stdin.close()
             except (OSError, ValueError) as e:      # broken pipe: the server side stopped
                 self.failed.append(str(e))
@@ -5157,6 +5192,7 @@ class FastCopy:
                             self.failed.append(m.name)
                         if not m.isdir():
                             self.files += 1
+                            self.recent.append((time.time(), "down", m.name))
             except (tarfile.TarError, OSError) as e:
                 self.failed.append(str(e))
             p.stdout.close()
@@ -10830,6 +10866,7 @@ class App:
         self._restored.set()
         self._live_saved = False
         self.copies = {}              # project -> FastCopy (Add project with parallel copies)
+        self.sync_recent = {}         # project -> deque of {t, dir, path, size}: what the Sync activity window saw
         self._share_lock = threading.Lock()
         self._share_kick = threading.Event()     # a tab opened / closed: share now
         self._share_stop = False
@@ -12435,6 +12472,36 @@ class App:
                 # text). The window lists the ones sent and offers "this computer / the server wins all" for the rest
                 "moreConflicts": excluded_conflicts(x),
                 "sharedIgnores": self._shared_ignores.get(layout_key(next((q.get("remote") for q in self.projects(max_age=10) if q.get("name") == name), "")))}
+
+    def sync_activity(self, name: str) -> dict:
+        """Live: what is coming to this computer and going to the server now, and the last files seen
+        (polled every second while the Sync activity window is open)."""
+        rec = self.sync_recent.setdefault(name, collections.deque(maxlen=ACTIVITY_MAX))
+        job = self.copies.get(name)
+        if job and not job.done:
+            items = list(job.recent)
+            return {"name": name, "status": "First copy over %d connections" % job.streams, "progress": job.progress(),
+                    "now": [{"dir": d, "path": pth} for _, d, pth in items[-job.streams:]][::-1],
+                    "recent": [{"t": t, "dir": d, "path": pth} for t, d, pth in items[::-1][:100]], "problems": []}
+        x = mutagen_session_now(name)
+        if x is None:
+            raise ApiError(404, "this project is not synced")
+        now = staging_now(x)
+        for n in now:
+            if n["path"] and not (rec and rec[-1]["path"] == n["path"] and rec[-1]["dir"] == n["dir"]):
+                rec.append({"t": time.time(), "dir": n["dir"], "path": n["path"], "size": n["size"]})
+            elif rec and n["path"]:
+                rec[-1]["size"] = n["size"]
+        probs = []
+        for k in ("alpha", "beta"):
+            v = x.get(k) if isinstance(x.get(k), dict) else {}
+            where = "this computer" if not _endpoint(v).get("host") else "server"
+            for pr in (v.get("scanProblems") or []) + (v.get("transitionProblems") or []):
+                probs.append({"where": where, "path": pr.get("path", ""), "error": pr.get("error", "")})
+        cls, label = sync_state(x.get("status") or "", bool(x.get("paused")))
+        return {"name": name, "status": label, "state": cls, "progress": sync_progress(x), "now": now,
+                "recent": list(rec)[::-1][:100], "problems": probs[:50], "error": x.get("lastError") or "",
+                "conflicts": len(x.get("conflicts") or []) + excluded_conflicts(x)}
 
     def resolve_conflict(self, name: str, path: str, keep: str) -> dict:
         """Make both sides equal: copy the chosen side's version over the other (or delete it there)."""
@@ -15794,7 +15861,7 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
         route = (method, parts[0] if parts else "")
-        if app.web and (route in WEB_BLOCKED or (route == ("GET", "sync") and parts[-1:] != ["details"])):
+        if app.web and (route in WEB_BLOCKED or (route == ("GET", "sync") and parts[-1:] not in (["details"], ["activity"]))):
             raise ApiError(403, "not available in the web version")
         if app.web and route == ("POST", "commands"):
             b = self._body()
@@ -16118,6 +16185,8 @@ class Handler(BaseHTTPRequestHandler):
             return app.git_sync(parts[1], self._body().get("on") is True)
         if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "details":
             return app.sync_details(parts[1])
+        if route == ("GET", "sync") and len(parts) == 3 and parts[2] == "activity":
+            return app.sync_activity(parts[1])
         if route == ("POST", "sync") and len(parts) == 3 and parts[2] == "ignores":
             b = self._body()
             return app.set_ignores(parts[1], b.get("ignores"), b.get("delete"), str(b.get("winner") or ""), bool(b.get("force")))

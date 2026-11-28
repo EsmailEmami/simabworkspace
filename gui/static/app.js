@@ -2494,7 +2494,7 @@
         list.length > 1 ? h('label', { class: 'check' }, on, h('span', null, p.name, h('small', null, p.remote))) : null,
         localFolderField(list.length > 1 ? 'Folder on this computer' : 'Put “' + p.name + '” on this computer at', inp)) };
     });
-    var git = h('input', { type: 'checkbox', checked: true });
+    var git = h('input', { type: 'checkbox', checked: false });
     var errBox = h('div', { class: 'add-err hidden' });
     // a folder that already has files: offered only after the script refused it, never by default
     var merge = h('input', { type: 'checkbox' });
@@ -2528,7 +2528,7 @@
     var md = openModal({ title: 'Sync to this computer', body: [
       h('div', { class: 'muted', style: 'font-size:12.5px;margin-bottom:10px' }, 'Downloads from the server, then keeps both sides in sync. Use a new or empty folder.'),
       h('div', { class: 'sync-here-list' }, rows.map(function (r) { return r.el; })),
-      h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))),
+      h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'Off: Git runs on the server only. On: Git works the same on both sides.'))),
       errBox, mergeRow], foot: [h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Cancel'), go] });
   }
 
@@ -2670,6 +2670,7 @@
       sync && p.sync.guard ? { label: 'Resume anyway…', action: function () { guardApprove(p); } } : null,
       sync ? { label: 'Sync now', action: function () { syncAction(p, 'flush'); } } : null,
       sync ? (p.sync && p.sync.paused ? { id: 'Pause / resume sync', label: 'Resume sync', action: function () { syncAction(p, 'resume'); } } : { id: 'Pause / resume sync', label: 'Pause sync', action: function () { syncAction(p, 'pause'); } }) : null,
+      sync ? { id: 'Sync activity…', label: 'Sync activity (live)…', action: function () { syncActivity(p); } } : null,
       sync ? { id: 'Sync details…', label: 'Sync details' + (p.sync && p.sync.conflicts ? ' · ' + plural(p.sync.conflicts, 'conflict') : '') + '…', action: function () { syncDetails(p); } } : null,
       sync ? { id: '.git sync', label: p.sync && p.sync.git === false ? 'Sync .git folders too' : 'Stop syncing .git folders', action: function () {
         var on = !(p.sync && p.sync.git !== false);
@@ -3952,7 +3953,7 @@
     var pr = sync && sync.progress;
     if (pr) {
       var prLabel = progressLabel(pr);
-      el.append(h('div', { class: 'sbar', title: prLabel },
+      el.append(h('div', { class: 'sbar click', title: prLabel + ' — click: what is coming and going', onclick: function (e) { e.stopPropagation(); syncActivity(p); } },
         h('i', { style: 'width:' + pr.percent + '%' }), h('span', null, prLabel)));
     }
     var r = hasRemote(p);
@@ -4184,7 +4185,7 @@
     var name = h('input', { class: 'inp mono', placeholder: 'empty = folder name' });
     var local = h('input', { class: 'inp mono', placeholder: '~/projects/my-project' });
     var remote = h('input', { class: 'inp mono', placeholder: '~/my-project' });
-    var git = h('input', { type: 'checkbox', checked: true });
+    var git = h('input', { type: 'checkbox', checked: false });
     // the first copy: Mutagen alone sends one file at a time; N = that many ssh connections at once
     var streams = h('select', { class: 'inp' }, [[0, 'One by one (sync only)'], [2, '2 at once'], [4, '4 at once'], [8, '8 at once'], [16, '16 at once']]
       .map(function (o) { return h('option', { value: String(o[0]) }, o[1]); }));
@@ -4237,7 +4238,7 @@
       return [h('div', { class: 'field' }, h('label', null, 'Not synced'), ign,
         h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'One per line: ', h('span', { class: 'mono' }, 'node_modules'), ' anywhere, ',
           h('span', { class: 'mono' }, '/dist'), ' only at the top, ', h('span', { class: 'mono' }, '*.log'), ' by name. Change it later in ⋯ → Not synced…')),
-        h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'So Git works the same on both sides.'))),
+        h('label', { class: 'check' }, git, h('span', null, 'Sync the .git folders too', h('small', null, 'Off: Git runs on the server only. On: Git works the same on both sides.'))),
         h('div', { class: 'field' }, h('label', null, 'First copy'), streams,
           h('div', { class: 'muted', style: 'font-size:11.5px;margin-top:4px' }, 'More at once = faster with many files. Then the sync takes over.'))];
     };
@@ -4732,12 +4733,44 @@
   }
 
   // ------------------------------------------------------------------ sync details + conflicts
+  // Live: what is coming to this computer (↓) and going to the server (↑), asked every second while open
+  var ARROW = { down: '↓', up: '↑' }, DIRS = { down: 'to this computer', up: 'to the server' };
+  function syncActivity(p) {
+    var head = h('div', { class: 'sact-head' }), nowBox = h('div', { class: 'sact-now' }), list = h('div', { class: 'sact-list mono' });
+    var md = openModal({ title: 'Sync activity — ' + p.name, size: 'wide', body: [head, nowBox, h('div', { class: 'sact-k' }, 'Last files'), list],
+      foot: [h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')],
+      onclose: function () { clearInterval(timer); } });
+    var timer = setInterval(load, 1000), busy = false;
+    function row(x) {
+      return h('div', { class: 'sact-row ' + x.dir, title: x.path }, h('b', null, ARROW[x.dir] || '·'), h('span', { class: 'p' }, x.path || '…'),
+        x.size ? h('small', null, (x.got != null && x.got < x.size ? fmtBytes(x.got) + ' / ' : '') + fmtBytes(x.size)) : null);
+    }
+    function load() {
+      if (busy) return;
+      busy = true;
+      api('GET', 'sync/' + encodeURIComponent(p.name) + '/activity').then(function (d) {
+        busy = false;
+        head.replaceChildren.apply(head, [h('span', { class: 'st' }, d.status || ''),
+          d.progress ? h('div', { class: 'sbar' }, h('i', { style: 'width:' + d.progress.percent + '%' }), h('span', null, progressLabel(d.progress))) : null,
+          d.conflicts ? h('span', { class: 'gb conflict' }, '⇅' + d.conflicts + ' conflicts') : null,
+          d.error ? h('div', { class: 'add-err' }, d.error) : null].filter(Boolean));
+        nowBox.replaceChildren.apply(nowBox, d.now && d.now.length
+          ? d.now.map(function (x) { return h('div', null, h('div', { class: 'sact-k' }, 'Now ' + (DIRS[x.dir] || '') + (x.totalFiles ? ' · ' + x.files + ' / ' + x.totalFiles + ' files' : '')), row(x)); })
+          : [h('div', { class: 'muted' }, 'Nothing moving right now.')]);
+        var rows = (d.recent || []).map(row);
+        (d.problems || []).forEach(function (q) { rows.unshift(h('div', { class: 'sact-row err', title: q.error }, h('b', null, '!'), h('span', { class: 'p' }, q.where + ': ' + q.path + ' — ' + q.error))); });
+        list.replaceChildren.apply(list, rows.length ? rows : [h('div', { class: 'muted' }, 'Nothing seen yet — files show here while they move.')]);
+      }).catch(function (e) { busy = false; nowBox.replaceChildren(h('div', { class: 'add-err' }, e.message)); clearInterval(timer); });
+    }
+    load();
+  }
+
   function syncDetails(p) {
     var body = h('div', null, h('div', { class: 'muted' }, 'Loading…'));
     var syncNowBtn = h('button', { class: 'btn', onclick: function () { syncAction(p, 'flush'); setTimeout(load, 1500); } }, 'Sync now');
     var reconnectBtn = h('button', { class: 'btn hidden', onclick: function () { syncAction(p, 'resume'); setTimeout(load, 2000); } }, 'Reconnect');
     var md = openModal({ title: 'Sync — ' + p.name, size: 'wide', body: body,
-      foot: [syncNowBtn, reconnectBtn, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
+      foot: [syncNowBtn, reconnectBtn, h('button', { class: 'btn', onclick: function () { syncActivity(p); } }, 'Live activity'), h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: function () { md.close(); } }, 'Close')] });
     function kv(k, v, cls) { return h('div', { class: 'kv' }, h('span', { class: 'k' }, k), h('span', { class: 'v mono ' + (cls || '') }, v)); }
     function resolve(c, keep, btn) {
       btn.disabled = true;

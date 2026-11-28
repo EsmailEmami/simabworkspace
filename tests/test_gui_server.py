@@ -1865,6 +1865,27 @@ wait_sync() {{ echo "WAIT $1"; }}
             self.assertIn("already synced", r.stdout)
 
 
+class SyncActivity(unittest.TestCase):
+    """The live window: what is coming to this computer / going to the server, from Mutagen's stagingProgress."""
+
+    def test_staging_direction_and_recent(self):
+        sess = {"name": "p", "status": "staging-alpha", "alpha": {"path": "/l/p", "stagingProgress": {"path": "a/big.bin",
+                "receivedSize": 10, "expectedSize": 100, "receivedFiles": 1, "expectedFiles": 4}},
+                "beta": {"host": "h", "path": "/r/p", "scanProblems": [{"path": "docker/data/main-db", "error": "permission denied"}]}}
+        self.assertEqual(sw.staging_now(sess), [{"dir": "down", "path": "a/big.bin", "got": 10, "size": 100, "files": 1, "totalFiles": 4}])
+        up = dict(sess, alpha={"path": "/l/p"}, beta={"host": "h", "path": "/r/p", "stagingProgress": {"path": "x", "expectedFiles": 1}})
+        self.assertEqual(sw.staging_now(up)[0]["dir"], "up")
+        app = sw.App.__new__(sw.App)
+        app.sync_recent, app.copies = {}, {}
+        with mock.patch.object(sw, "mutagen_session_now", return_value=sess):
+            app.sync_activity("p")
+            d = app.sync_activity("p")
+        self.assertEqual([r["path"] for r in d["recent"]], ["a/big.bin"], "the same file is listed once")
+        self.assertEqual(d["problems"], [{"where": "server", "path": "docker/data/main-db", "error": "permission denied"}])
+        with mock.patch.object(sw, "mutagen_session_now", return_value=None), self.assertRaises(sw.ApiError):
+            app.sync_activity("gone")
+
+
 class BashAddServerMerge(unittest.TestCase):
     """add-server into a local folder that already has files: refused with --yes, merged with --merge."""
 
@@ -2597,7 +2618,7 @@ class BashScript(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(script)]).returncode, 0)
         text = script.read_text()
         self.assertIn("gui)", text)
-        self.assertIn('VERSION="1.72.2"', text)
+        self.assertIn('VERSION="1.73.0"', text)
 
 
 if __name__ == "__main__":

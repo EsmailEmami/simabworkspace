@@ -122,6 +122,33 @@ class Devices(base.TmpHome):
         self.assertIn("'activity?all=1&limit=2000'", src)
         self.assertIn("histFrom(it)", src)
 
+    def test_sessions_of_every_computers_own_copy_show_and_open_here(self):
+        home = Path(self.server_home.name)
+        conv = {"": "11111111-1111-4111-8111-111111111111", "desk": "22222222-2222-4222-8222-222222222222",
+                "shared": "33333333-3333-4333-8333-333333333333"}
+        for folder, where in (("shop@laptop", ""), ("shop@desk", "desk"), ("shop", "shared")):
+            (home / folder).mkdir()
+            d = home / ".claude" / "projects" / sw.claude_project_dir(str(home / folder))
+            d.mkdir(parents=True)
+            (d / (conv[where] + ".jsonl")).write_text(json.dumps({"type": "user", "message": {"content": "hi from " + (where or "here")}}, separators=(",", ":")) + "\n")
+        (home / "shopping").mkdir()                       # another project that starts the same: not counted
+        self.store.add_manual({"name": "mine", "remote": str(home / "shop@laptop")})
+        self.laptop._projects_cache = (0.0, [])
+        got = {c["id"]: c for c in self.laptop.claude_sessions("mine")}
+        self.assertEqual({c["where"] for c in got.values()}, {"", "desk", "shared"})
+        desk = got[conv["desk"]]
+        self.assertEqual((desk["first"], desk["dir"]), ("hi from desk", sw.claude_project_dir(str(home / "shop@desk"))))
+        # opening the desk's conversation here copies it into this folder's Claude folder (the original stays)
+        out = self.fake(None, sw.ADOPT_PY, [sw.claude_project_dir(str(home / "shop@laptop")), conv["desk"], desk["dir"]])
+        self.assertEqual(out, {"copied": True})
+        here = home / ".claude" / "projects" / sw.claude_project_dir(str(home / "shop@laptop"))
+        self.assertTrue((here / (conv["desk"] + ".jsonl")).exists())
+        self.assertTrue((home / ".claude" / "projects" / desk["dir"] / (conv["desk"] + ".jsonl")).exists())
+        self.assertEqual(self.fake(None, sw.ADOPT_PY, [sw.claude_project_dir(str(home / "shop@laptop")), conv["desk"], desk["dir"]]),
+                         {"copied": False})        # already here: left alone
+        src = (Path(sw.__file__).parent / "static" / "app.js").read_text()
+        self.assertIn("c.where ? { adopt: c.dir } : {}", src)
+
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()
         self.web.share_sync()

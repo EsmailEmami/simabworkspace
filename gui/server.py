@@ -2461,12 +2461,31 @@ def clean_title(t) -> str:
 
 # Small Python programs run on the server (python3 is there) to read Claude's
 # own transcripts: list past conversations of a folder / load one for display.
+# argv: [claude dir of this folder, optional server folder whose copies count too]. With the folder, the
+# conversations of the shared folder <base> and of every computer's own copy <base>@<computer> are listed
+# as well (own server copy per computer, PORTING §180) — each with `where` ("" = this folder, "shared",
+# or the computer) and `dir` (its Claude folder name, to adopt it here before resuming).
 REMOTE_LIST_PY = r'''
-import sys, os, json, glob
+import sys, os, json, glob, re
 ''' + PROJ_DIR_PY + r'''
-d = os.path.expanduser("~/.claude/projects/" + sys.argv[1])
-out = []
-for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:40]:
+P = os.path.expanduser("~/.claude/projects/")
+dirs = [(sys.argv[1], "")]
+if len(sys.argv) > 2 and sys.argv[2]:
+    b = os.path.expanduser(sys.argv[2]).rstrip("/")
+    for f, w in [(b, "shared")] + [(x, x.rsplit("@", 1)[1]) for x in sorted(glob.glob(glob.escape(b) + "@*")) if os.path.isdir(x)]:
+        n = re.sub(r"[^A-Za-z0-9]", "-", f)
+        if all(n != x[0] for x in dirs):
+            dirs.append((n, w))
+files = []
+for name, where in dirs:
+    for f in sorted(glob.glob(glob.escape(P + name) + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:40]:
+        files.append((f, name, where))
+files.sort(key=lambda x: os.path.getmtime(x[0]), reverse=True)
+out, seen = [], set()
+for f, dname, where in files[:80]:
+    if os.path.basename(f) in seen:
+        continue
+    seen.add(os.path.basename(f))
     title = custom = first = last = ""
     n = 0
     try:
@@ -2495,8 +2514,25 @@ for f in sorted(glob.glob(d + "/*.jsonl"), key=os.path.getmtime, reverse=True)[:
     except OSError:
         continue
     out.append({"id": os.path.basename(f)[:-6], "mtime": os.path.getmtime(f), "title": custom or title,
-                "first": first[:300], "last": last[:300], "prompts": n, "size": os.path.getsize(f)})
+                "first": first[:300], "last": last[:300], "prompts": n, "size": os.path.getsize(f),
+                "where": where, "dir": dname})
 print(json.dumps(out))
+'''
+
+# argv: [claude dir of this folder (or ~ path), conversation id, Claude dir it lives in]. Copies the conversation
+# here when it is not here yet (one of another computer's own copy / the shared folder): claude --resume
+# only finds conversations of the folder it runs in. The original stays where it was.
+ADOPT_PY = r'''
+import sys, os, json, shutil
+''' + PROJ_DIR_PY + r'''
+P = os.path.expanduser("~/.claude/projects/")
+dst, src = os.path.join(P + sys.argv[1], sys.argv[2] + ".jsonl"), os.path.join(P + sys.argv[3], sys.argv[2] + ".jsonl")
+done = False
+if not os.path.exists(dst) and os.path.isfile(src):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    done = True
+print(json.dumps({"copied": done}))
 '''
 
 HISTORY_PAGE = 40
@@ -11714,6 +11750,14 @@ class App:
         if body.get("kind") == "chat":
             built = build_chat(body, self.conf, self.store, self.projects(max_age=10),
                                prefer="" if self.web else self.pc.cfg()["id"])
+            adopt = body.get("adopt")
+            if built["resume"] and isinstance(adopt, str) and re.fullmatch(r"-[A-Za-z0-9-]{1,250}", adopt) \
+                    and UUID_RE.fullmatch(built["resume"]):
+                try:          # another computer's (or the shared folder's) conversation: a copy here, then resume
+                    remote_python(built["conf"], ADOPT_PY, [claude_project_dir(built["rpath"]), built["resume"], adopt],
+                                  multiplex=bool(self.store.settings.get("sshMultiplex")))
+                except ApiError as e:
+                    log_line(f"adopt {built['resume']}: {e.message}")
             if built["resume"]:
                 try:
                     built["history"] = remote_python(built["conf"], REMOTE_HISTORY_PY,
@@ -12921,7 +12965,8 @@ class App:
         ep = (p or {}).get("endpoint") or {}
         conf = conf.with_endpoint(ep.get("user"), ep.get("host"), ep.get("port"))
         rpath = (p or {}).get("remote") or f"/home/{conf.user}"
-        out = remote_python(conf, REMOTE_LIST_PY, [claude_project_dir(rpath)],
+        base = (copy_base(rpath) or rpath) if p else ""
+        out = remote_python(conf, REMOTE_LIST_PY, [claude_project_dir(rpath)] + ([base] if base else []),
                             multiplex=bool(self.store.settings.get("sshMultiplex")))
         return out if isinstance(out, list) else []
 

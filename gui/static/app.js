@@ -2304,9 +2304,11 @@
       if (!shown.length) { pastBox.replaceChildren(h('div', { class: 'muted' }, past.length ? 'No match' : 'No conversations yet')); return; }
       pastBox.replaceChildren.apply(pastBox, shown.slice(0, all ? 60 : 40).map(function (c) {
         return h('div', { class: 'sess' },
-          h('button', { class: 'sess-main', onclick: function () { md.close(); openSession({ kind: 'chat', project: c.proj, resume: c.id, title: 'Claude · ' + sessionTitle(c) }); } },
+          h('button', { class: 'sess-main', onclick: function () { md.close(); openSession(Object.assign({ kind: 'chat', project: c.proj, resume: c.id, title: 'Claude · ' + sessionTitle(c) }, c.where ? { adopt: c.dir } : {})); } },
             h('div', { class: 'st', dir: 'auto' }, sessionTitle(c)),
-            h('div', { class: 'sm' }, (all ? pname(c.proj) + ' · ' : '') + window.SWChat.fmtTime(c.mtime) + ' · ' + plural(c.prompts, 'message'))));
+            h('div', { class: 'sm' }, c.where ? h('span', { class: 'hfrom', title: c.where === 'shared' ? 'Made in the shared server folder (web / before own copies) — opening it here continues a copy'
+              : 'Made on the computer ' + c.where + ' (its own server copy) — opening it here continues a copy' }, c.where === 'shared' ? 'shared' : '⚒ ' + c.where) : null,
+              (c.where ? ' ' : '') + (all ? pname(c.proj) + ' · ' : '') + window.SWChat.fmtTime(c.mtime) + ' · ' + plural(c.prompts, 'message'))));
       }));
     }
     filter.addEventListener('input', renderPast);

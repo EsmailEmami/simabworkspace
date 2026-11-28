@@ -4903,8 +4903,10 @@
         h('span', { class: 'sy-dot' }),
         h('div', { class: 'sy-hero-t' }, h('b', null, d.label), h('span', null, (d.paused ? 'paused' : d.status) + ' · ' + plural(d.cycles || 0, 'cycle') +
           (nconf ? ' · ' : ''), nconf ? h('a', { href: '#', onclick: function (e) { e.preventDefault(); show(CF, true); } }, plural(nconf, 'conflict')) : null)),
-        sy.paused || d.paused ? btn('Resume sync', function () { syncAction(q, 'resume'); setTimeout(load, 1500); }, 'primary')
-          : btn('Pause sync', function () { syncAction(q, 'pause'); setTimeout(load, 1500); })));
+        sy.paused || d.paused ? btn('Resume sync', function (ev) { runAction('resume', ev.currentTarget); }, 'primary')
+          : btn('Pause sync', function (ev) { runAction('pause', ev.currentTarget); })));
+      if (actionMsg) out.splice(d.guard ? 1 : 0, 0, h('div', { class: 'sy-alert ' + actionMsg[0] }, h('div', null, actionMsg[1]),
+        actionMsg[0] === 'err' ? h('div', { class: 'sy-acts' }, h('button', { class: 'btn sm', onclick: function () { syncActivity(p); } }, 'Live activity')) : null));
       if (d.progress) out.push(h('div', { class: 'sbar', style: 'margin:0 0 12px' }, h('i', { style: 'width:' + d.progress.percent + '%' }), h('span', null, progressLabel(d.progress))));
       out.push(h('div', { class: 'sy-sides' },
         h('div', { class: 'sy-side' }, h('span', { class: 'sy-cap' }, '⌂ This computer'), h('div', { class: 'mono' }, d.local)),
@@ -4959,8 +4961,26 @@
         btn('Stop syncing…', function () { stopSyncing(q, function () { md.close(); }); }, 'danger'), 'danger'));
       return out;
     }
+    // Resume / Pause from this window: the answer stays here (a toast is easy to miss), and a Resume that
+    // leaves it paused says so with mutagen's own reason
+    var actionMsg = null, wantResume = 0;
+    function runAction(action, b) {
+      if (b) { b.disabled = true; b.textContent = action === 'resume' ? 'Resuming…' : 'Pausing…'; }
+      actionMsg = null;
+      api('POST', 'sync/' + encodeURIComponent(p.name) + '/' + action).then(function () {
+        wantResume = action === 'resume' ? Date.now() : 0;
+        setTimeout(refreshProjects, 600);
+        setTimeout(load, 1500); setTimeout(load, 5000);
+      }).catch(function (e) {
+        actionMsg = ['err', (action === 'resume' ? 'Could not resume: ' : 'Could not pause: ') + e.message];
+        load(); refreshProjects();
+      });
+    }
     function load() {
       api('GET', 'sync/' + encodeURIComponent(p.name) + '/details').then(function (d) {
+        if (wantResume && !d.paused) { wantResume = 0; actionMsg = ['ok', 'Resumed — ' + d.label]; }
+        else if (wantResume && d.paused && Date.now() - wantResume > 4000 && !d.guard)
+          actionMsg = ['err', 'Still paused after Resume' + (d.error ? ' — mutagen says: ' + d.error : ' — mutagen gave no reason. Press Resume again, or open Live activity.')];
         var q = project(p.name) || p;
         var isErr = d.state === 'err';
         syncNowBtn.classList.toggle('hidden', isErr);

@@ -48,6 +48,7 @@ const state = {
 };
 let offline = false;
 let guardAlert = null;          // sync guard pause shown in Sync details
+let syncPaused = false, resumeError = '';   // Sync window: a paused project, a Resume the server refuses
 let extraSessions = [];
 const CONV_VS = '11111111-aaaa-bbbb-cccc-000000000001', CONV_OLD = '11111111-aaaa-bbbb-cccc-000000000002';
 let fakeRunning = { cheshmeh: [{ pid: 4242, sessionId: CONV_VS, cwd: '/home/esi/cheshmeh', status: 'busy', owner: 'vscode', relay: '', tab: '', tmux: '', started: Date.now() / 1000 - 600, updated: Date.now() / 1000 - 5 }] };
@@ -132,7 +133,7 @@ global.fetch = (url, opts) => {
       repos: [{ repo: '.', branch: 'main', head: 'aaaaaaa1', subject: 'mine', when: 1, dirty: 0, ahead: 0, behind: 0 }] },
     { folder: '~/cheshmeh@desk', copy: 'desk', mine: false, who: [{ name: 'desk', dev: 'd2', online: false, seen: 1, sync: { state: 'ok', label: 'in sync', conflicts: 2 } }],
       repos: [{ repo: '.', branch: 'main', head: 'bbbbbbb2', subject: 'desk work', when: 1, dirty: 1, ahead: 1, behind: 0 }] }] };
-  else if (url === '/api/sync/cheshmeh/details') res = { guard: guardAlert, name: 'cheshmeh', state: 'ok', label: 'in sync', status: 'watching', paused: false, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
+  else if (url === '/api/sync/cheshmeh/details') res = { guard: guardAlert, name: 'cheshmeh', state: syncPaused ? 'paused' : 'ok', label: syncPaused ? 'paused' : 'in sync', status: 'watching', paused: syncPaused, local: '/l/cheshmeh', remote: '/home/esi/cheshmeh',
     server: 'esi@h', error: '', cycles: 3, ignores: ['node_modules'], defaultIgnores: ['node_modules', 'dist'], git: true, progress: null,
     conflicts: [{ path: 'web/app.ts', local: [{ path: 'web/app.ts', was: 'file', now: 'file' }], server: [{ path: 'web/app.ts', was: 'file', now: 'deleted' }] }] };
   else if (/^\/api\/sync\/[^/]+\/activity$/.test(url)) res = { name: 'shop', status: 'staging', progress: { files: 1, totalFiles: 3, percent: 30, bytes: 0, totalBytes: 0 },
@@ -239,6 +240,7 @@ global.fetch = (url, opts) => {
     res = { path, parent: path === '/' ? '' : path.replace(/\/[^/]+$/, '') || '/', home: '/home/esi', git: false,
       dirs: (tree[path] || []).map((n) => ({ name: n, git: '', hidden: false })) };
   }
+  else if (url === '/api/sync/cheshmeh/resume' && resumeError) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: resumeError }) });
   else if (url.startsWith('/api/git/shop/branches')) res = { current: 'dev', local: [{ name: 'dev', date: 0, subject: 'wip', upstream: 'origin/dev' }, { name: 'main', date: 0, subject: 'release' }],
     remote: [{ name: 'origin/dev', local: true }, { name: 'origin/feature/pay', date: 0, subject: 'payments', local: false }] };
   else if (url === '/api/git/shop/switch') {
@@ -1354,6 +1356,21 @@ const tests = {
     global.SW.S.git = keepG; pr.pcs = keepPcs;
     document.body.querySelector('#modal-root').replaceChildren();
   },
+  async 'Resume in the Sync window: a refusal stays in the window, not only a toast'() {
+    document.body.querySelector('#modal-root').replaceChildren();
+    syncPaused = true; resumeError = 'mutagen: unable to connect to beta';
+    q('.proj-head')[0].querySelector('.icon-btn').click();
+    q('button').find((b) => b.textContent.trim().indexOf('Sync…') === 0).click();
+    await settle();
+    const md = q('.modal').pop();
+    q('button', md).find((b) => b.textContent === 'Resume sync').click();
+    await settle(); await settle();
+    assert.match(q('.sy-pane', md)[0].textContent, /Could not resume: mutagen: unable to connect to beta/);
+    assert.ok(q('button', q('.sy-pane', md)[0]).find((b) => b.textContent === 'Resume sync'), 'can be tried again');
+    syncPaused = false; resumeError = '';
+    q('button', md).find((b) => b.textContent === 'Close').click();
+  },
+
   async 'sync details: Edit… opens the not-synced list'() {
     document.body.querySelector('#modal-root').replaceChildren();
     q('.proj-head')[0].querySelector('.icon-btn').click();
@@ -2228,10 +2245,11 @@ const tests = {
     SW.closeTab(chat, true); await settle();
     // that chat is in another window of this app: nothing here
     fakePc.asks = { asks: [{ id: 'q5', project: 'cheshmeh', cmd: 'x', until: Date.now() / 1000 + 100, chat: 'aaaaaaaaaaaaaaaa', session: 'elsewhere' }], runs: [], now: Date.now() / 1000, output: 'chat' };
-    const nToasts = q('.toast').length;
+    const toastTexts = () => Array.from(new Set(q('.toast').map((t) => t.textContent.replace(/^×\d+/, ''))));
+    const nToasts = toastTexts().length;
     await global.SWComputers.poll(); await settle();
     assert.ok(!q('.modal').some((m) => /Run on this computer/.test(m.textContent)));
-    assert.strictEqual(q('.toast').length, nToasts, 'not even a toast');
+    assert.strictEqual(toastTexts().length, nToasts, 'not even a toast');
     // that chat is not open in this app (started on the web): one quiet toast; clicking it asks
     fakePc.asks = { asks: [{ id: 'q3', project: 'zzz', cmd: 'npm run build', until: Date.now() / 1000 + 100, chat: 'bbbbbbbbbbbbbbbb', session: '' }], runs: [], now: Date.now() / 1000, output: 'panel' };
     await global.SWComputers.poll(); await settle();

@@ -1085,6 +1085,14 @@ const tests = {
     assert.ok(acts.indexOf(sbtn) > 0 && acts[acts.indexOf(sbtn) - 1].classList.contains('git'), 'right after Git');
     assert.strictEqual(q('.gb', sbtn)[0].textContent, '!1');
     assert.ok(q('.gb', sbtn)[0].classList.contains('conflict'));
+    assert.ok(!q('.gb', sbtn).some((x) => x.textContent === '⚒↑'));
+    pr0.elsewhereWork = [{ name: 'desk', changes: 0, ahead: 3 }];        // another computer has work not pushed
+    global.SW.renderProjects();
+    const mark = q('.gb', q('.act.sync')[0]).find((x) => x.textContent === '⚒↑');
+    assert.ok(mark);
+    assert.match(mark.getAttribute('title'), /desk: 3 commits not pushed/);
+    delete pr0.elsewhereWork;
+    global.SW.renderProjects();
     sbtn.click();
     await settle();
     assert.match(q('.modal').pop().textContent, /Sync — cheshmeh/);

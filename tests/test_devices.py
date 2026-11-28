@@ -204,6 +204,26 @@ class Devices(base.TmpHome):
         with self.assertRaises(sw.ApiError):
             self.laptop.sync_bring("shop", "../x", "")
 
+    def test_work_another_computer_has_not_pushed_shows_here(self):
+        d = Path(self.tmp.name) / "desk2"
+        d.mkdir()
+        desk = sw.App(sw.Store(d / "simab.db"), sw.ServerConf("esi", "h"))
+        try:
+            desk.store.add_manual({"name": "shop", "remote": "~/shop@desk"})
+            desk._git_sum = {"shop": {"changes": 2, "ahead": 1}}
+            desk.share_sync()
+            self.laptop.share_sync()
+            self.laptop.share_sync()
+            shop = next(p for p in self.laptop.projects(max_age=0) if p["name"] == "shop")
+            self.assertEqual([(w["changes"], w["ahead"]) for w in shop["elsewhereWork"]], [(2, 1)])
+            desk._git_sum = {"shop": {"changes": 0, "ahead": 0}}       # pushed: the mark goes away
+            desk.share_sync()
+            self.laptop.share_sync()
+            shop = next(p for p in self.laptop.projects(max_age=0) if p["name"] == "shop")
+            self.assertEqual(shop["elsewhereWork"], [])
+        finally:
+            desk.shutdown_sessions()
+
     def test_a_shared_project_can_be_removed_from_this_list(self):
         self.laptop.share_sync()
         self.web.share_sync()

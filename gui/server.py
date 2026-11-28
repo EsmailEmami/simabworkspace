@@ -11133,12 +11133,17 @@ class App:
                 me = str(self.pc.cfg().get("id") or "")
             except Exception:
                 me = ""
-        by_key = {}
+        by_key, work = {}, {}
         for sp in self._share_projects:
             k, pc = layout_key(sp.get("remote")), str(sp.get("pc") or "")
             if k and pc and sp.get("here", True) is not False:
                 by_key.setdefault(k, []).append(pc)
+            g = sp.get("git") if isinstance(sp.get("git"), dict) else {}
+            if k and (g.get("changes") or g.get("ahead")):      # work another computer has not pushed yet
+                work.setdefault(k, []).append({"name": str(sp.get("sharedFrom") or "Computer"),
+                                               "changes": int(g.get("changes") or 0), "ahead": int(g.get("ahead") or 0)})
         for x in ps:
+            x["elsewhereWork"] = work.get(layout_key(x.get("remote")), [])
             if x.get("localOnly"):
                 x["pcs"] = [x["localOnly"]]
                 continue
@@ -11308,6 +11313,9 @@ class App:
             if not self.web:              # its own run commands: the web shows them and runs them here / on the server
                 rec["pc"], rec["commands"] = pc_id, share_run_commands(p)
                 rec["here"] = bool(p.get("localExists"))      # its files are on this computer (synced / Local only)
+                g = (getattr(self, "_git_sum", {}) or {}).get(p.get("name")) or {}
+                if g.get("changes") or g.get("ahead"):     # work not pushed: the other computers show ⚒↑
+                    rec["git"] = {"changes": int(g.get("changes") or 0), "ahead": int(g.get("ahead") or 0)}
                 y = p.get("sync") or {}
                 if y:                     # its sync with the server, for the other devices' Sync window
                     rec["sync"] = {"state": y.get("state") or "", "label": y.get("label") or "",

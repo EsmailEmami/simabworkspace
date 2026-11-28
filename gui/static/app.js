@@ -3938,8 +3938,11 @@
     return ['clean', '✓', y.label || 'in sync'];
   }
   function syncBadge(p) {
-    var b = syncBadgeInfo(p);
-    return h('span', { class: 'gbs' }, h('span', { class: 'gb ' + b[0] + (b[1] === '⟳' ? ' spin' : ''), title: b[2] }, b[1]));
+    var b = syncBadgeInfo(p), ew = p.elsewhereWork || [];
+    return h('span', { class: 'gbs' }, h('span', { class: 'gb ' + b[0] + (b[1] === '⟳' ? ' spin' : ''), title: b[2] }, b[1]),
+      ew.length ? h('span', { class: 'gb changes', title: ew.map(function (w) {
+        return w.name + ': ' + [w.changes ? plural(w.changes, 'file') + ' not committed' : '', w.ahead ? plural(w.ahead, 'commit') + ' not pushed' : ''].filter(Boolean).join(', ');
+      }).join('\n') + ' — Sync → Computers' }, '⚒↑') : null);
   }
 
   function projEl(p) {

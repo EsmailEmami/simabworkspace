@@ -53,6 +53,7 @@
 #    1.74.0  2026-11-28  History shows what was done on your other computers and on the web too, each row marked ⚒ computer / Web / here
 #    1.75.0  2026-11-28  One Sync window per project: ⋯ → Sync… has every sync option (pause, not synced, .git, own copy, move, stop) with status and conflicts
 #    1.76.0  2026-11-28  Sync window in tabs (Overview, Conflicts, What syncs, Where); project Sessions list every computer's conversations again (⚒ chip), opening one continues a copy here
+#    1.78.1  2026-11-28  The Claude button is now Chat: pick Claude or another AI (opencode, …) for a new chat
 #    1.78.0  2026-11-28  Other AI beside Claude: opencode, Gemini CLI, Codex, Qwen Code or your own ACP agent run on your computer, in the same chat panel (Settings → AI, project ⋯ → New chat: …; web via the Computers link + MFA unlock); chat text can be selected again on Linux
 #    1.77.0  2026-11-28  Sync button beside Git; Sync → Computers tab: every computer's copy, bring / send work, remove old copies; ⚒↑ when another computer has work not pushed; quit warns about work not pushed; own copy only when the other computer is on (auto/always/never)
 #    1.72.2  2026-11-28  Own server copy: folders the server user cannot read (a container database, docker/data/main-db) and Not synced paths are left out of the copy, and the unreadable ones join Not synced
@@ -428,7 +429,7 @@
 
 set -u -o pipefail
 
-VERSION="1.78.0"
+VERSION="1.78.1"
 APP="simabworkspace"
 LABEL="simabworkspace=managed"
 
